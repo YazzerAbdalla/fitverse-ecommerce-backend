@@ -9,6 +9,8 @@ import { APP_INTERCEPTOR } from '@nestjs/core';
 import { CacheInterceptor, CacheModule } from '@nestjs/cache-manager';
 import { CacheTestService } from './cache-test.service';
 import { ClientsModule, Transport } from '@nestjs/microservices';
+import { AuthModule } from './modules/auth/auth.module';
+import { OrderModule } from './modules/order/order.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -51,6 +53,8 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
         inject: [ConfigService], // Inject ConfigService
       },
     ]),
+    AuthModule,
+    OrderModule,
   ],
   controllers: [AppController],
   providers: [
