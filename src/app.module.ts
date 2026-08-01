@@ -9,13 +9,14 @@ import { APP_INTERCEPTOR } from '@nestjs/core';
 import { CacheInterceptor, CacheModule } from '@nestjs/cache-manager';
 import { CacheTestService } from './cache-test.service';
 import { ClientsModule, Transport } from '@nestjs/microservices';
-import { AuthModule } from './modules/auth/auth.module';
 import { OrderModule } from './modules/order/order.module';
+import { AuthModule } from './modules/auth/auth.module';
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     TypeOrmModule.forRootAsync({
-      useFactory: () => AppDataSource.options, // 1. Pass the configuration options
+      useFactory: () => ({ ...AppDataSource.options, autoLoadEntities: true }), // 1. Pass the configuration options
       dataSourceFactory: async () => {
         // 2. Return the existing instance or initialize it if needed
         if (!AppDataSource.isInitialized) {

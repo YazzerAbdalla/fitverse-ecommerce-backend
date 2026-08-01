@@ -3,6 +3,9 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { ConfigService } from '@nestjs/config';
+import { ValidationPipe } from '@nestjs/common';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -25,7 +28,26 @@ async function bootstrap() {
       },
     },
   });
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true, // Strip undefined properties
+      forbidNonWhitelisted: true, // Reject requests with unexpected fields
+      transform: true, // Auto-convert payloads to DTO instances
+    }),
+  );
+  app.useGlobalFilters(new AllExceptionsFilter());
   await app.startAllMicroservices();
+
+  const config = new DocumentBuilder()
+    .setTitle('Mini e-commerce')
+    .setDescription('First system design mini project')
+    .setVersion('1.0')
+    .addTag('Api')
+    .build();
+  const documentFactory = () => SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('api', app, documentFactory);
+
   await app.listen(process.env.PORT ?? 3000);
   console.log(
     `Application is running on: http://localhost:${process.env.PORT ?? 3000}`,
