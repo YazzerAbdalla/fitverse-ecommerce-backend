@@ -1,0 +1,49 @@
+# ------------------------------------------------------
+# THIS FILE WAS AUTOMATICALLY GENERATED (DO NOT MODIFY)
+# ------------------------------------------------------
+
+input CreateProductInput {
+  description: String!
+  name: String!
+  price: Int!
+  stock: Int!
+}
+
+"""
+A date-time string at UTC, such as 2019-12-03T09:54:33Z, compliant with the date-time format.
+"""
+scalar DateTime
+
+type DeleteResponse {
+  affected: Int!
+}
+
+type Mutation {
+  createManyProducts(createProductInputs: [CreateProductInput!]!): [Product!]!
+  createProduct(createProductInput: CreateProductInput!): Product!
+  removeAllProducts: DeleteResponse!
+  removeProduct(id: Int!): Product!
+  updateProduct(id: String!, updateProductInput: UpdateProductInput!): Product!
+}
+
+type Product {
+  created_at: DateTime!
+  description: String!
+  id: String!
+  name: String!
+  price: Int!
+  slug: String!
+  stock: Int!
+}
+
+type Query {
+  product(id: String!): Product!
+  products: [Product!]!
+}
+
+input UpdateProductInput {
+  description: String
+  name: String
+  price: Int
+  stock: Int
+}

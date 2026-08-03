@@ -1,6 +1,7 @@
 import * as dotenv from 'dotenv';
 import { DataSource } from 'typeorm';
 import User from './modules/users/entity/user.entity';
+import { Product } from './modules/products/entities/product.entity';
 
 dotenv.config();
 
@@ -13,7 +14,7 @@ export const AppDataSource = new DataSource({
   database: process.env.POSTGRES_DATABASE,
   synchronize: true, // Set to true only for development
   logging: true,
-  entities: [User],
+  entities: [User, Product],
   migrations: ['src/migration/**/*.ts'],
   subscribers: ['src/subscriber/**/*.ts'],
 });

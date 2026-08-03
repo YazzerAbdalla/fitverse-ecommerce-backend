@@ -12,6 +12,10 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
 import { OrderModule } from './modules/order/order.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
+import { ProductsModule } from './modules/products/products.module';
+import { GraphQLModule } from '@nestjs/graphql';
+import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
+import { join } from 'path';
 
 @Module({
   imports: [
@@ -55,15 +59,17 @@ import { UsersModule } from './modules/users/users.module';
         inject: [ConfigService], // Inject ConfigService
       },
     ]),
+    GraphQLModule.forRoot<ApolloDriverConfig>({
+      driver: ApolloDriver,
+      autoSchemaFile: join(process.cwd(), 'src/schema.gql'),
+      sortSchema: true,
+    }),
     AuthModule,
     OrderModule,
     UsersModule,
+    ProductsModule,
   ],
   controllers: [AppController],
-  providers: [
-    AppService,
-    { provide: APP_INTERCEPTOR, useClass: CacheInterceptor },
-    CacheTestService,
-  ],
+  providers: [AppService, CacheTestService],
 })
 export class AppModule {}
