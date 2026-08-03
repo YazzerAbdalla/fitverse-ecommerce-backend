@@ -11,6 +11,7 @@ import { CacheTestService } from './cache-test.service';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { OrderModule } from './modules/order/order.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { UsersModule } from './modules/users/users.module';
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { AuthModule } from './modules/auth/auth.module';
     ]),
     AuthModule,
     OrderModule,
+    UsersModule,
   ],
   controllers: [AppController],
   providers: [

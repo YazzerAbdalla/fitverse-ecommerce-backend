@@ -1,7 +1,18 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  UseGuards,
+} from '@nestjs/common';
 import { OrderService } from './order.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderDto } from './dto/update-order.dto';
+import { ApiBearerAuth } from '@nestjs/swagger';
+import { JwtGuard } from '../auth/guards/jwt.guard';
 
 @Controller('order')
 export class OrderController {
@@ -13,8 +24,10 @@ export class OrderController {
   }
 
   @Get()
+  @UseGuards(JwtGuard)
+  @ApiBearerAuth('JWT-auth')
   findAll() {
-    return this.orderService.findAll();
+    return { message: 'Hi Authenticated user!' };
   }
 
   @Get(':id')
