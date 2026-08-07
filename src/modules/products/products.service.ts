@@ -11,8 +11,9 @@ import { CreateProductInput } from './dto/create-product.input';
 import { UpdateProductInput } from './dto/update-product.input';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Product } from './entities/product.entity';
-import { Repository, MoreThan, In } from 'typeorm';
+import { Repository, MoreThan, In, DataSource } from 'typeorm';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
+import { ManyPartialProducts } from './types';
 
 @Injectable()
 export class ProductsService {
@@ -21,6 +22,7 @@ export class ProductsService {
     private readonly productsRepo: Repository<Product>,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     private readonly logger: Logger,
+    private readonly dataSource: DataSource,
   ) {}
 
   async create(createProductInput: CreateProductInput) {
@@ -124,8 +126,57 @@ export class ProductsService {
     return this.productsRepo.save(product);
   }
 
-  remove(id: number) {
-    return `This action removes a #${id} product`;
+  async updateMany(
+    manyPartialProducts: ManyPartialProducts,
+  ): Promise<{ message: string; data: Product[] }> {
+    // Check if there no products sent
+    if (!manyPartialProducts || manyPartialProducts.length === 0) {
+      return { message: 'No products provided for update', data: [] };
+    }
+
+    // Collect the ids in array
+    const productIds = manyPartialProducts.map((p) => p.id);
+
+    // Start the transaction process
+    return await this.dataSource.transaction(async (manager) => {
+      // Fetch all existing products at once using In() helper
+      const existingProducts = await manager.find(Product, {
+        where: { id: In(productIds) },
+        lock: {
+          mode: 'pessimistic_write',
+        },
+      });
+
+      // Throw notfound exception for missed products
+      if (existingProducts.length !== manyPartialProducts.length) {
+        const foundIds = existingProducts.map((p) => p.id);
+        const missingIds = productIds.filter((id) => !foundIds.includes(id));
+        throw new NotFoundException(
+          `Update failed. Products with IDs [${missingIds.join(', ')}] were not found.`,
+        );
+      }
+
+      // Loop on the existing products and merge them with the new over writen props and return updated array
+      const productsToSave = existingProducts.map((existingProduct) => {
+        const partialData = manyPartialProducts.find(
+          (p) => p.id === existingProduct.id,
+        );
+
+        return manager.merge(Product, existingProduct, partialData!);
+      });
+
+      // Save the updated array to db
+      const updatedProducts = await manager.save(Product, productsToSave);
+
+      return {
+        message: 'The products updated successfully',
+        data: updatedProducts,
+      };
+    });
+  }
+
+  remove(id: string) {
+    return this.productsRepo.delete(id);
   }
 
   async resetAll() {
