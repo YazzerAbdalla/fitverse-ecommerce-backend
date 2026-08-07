@@ -6,12 +6,14 @@ import {
   Index,
   PrimaryGeneratedColumn,
   Unique,
+  Check,
 } from 'typeorm';
 
 @ObjectType()
 @Entity()
 @Index(['name'])
 @Unique(['name'])
+@Check(`"stock" >= 0`)
 export class Product {
   @Field()
   @PrimaryGeneratedColumn('uuid')
