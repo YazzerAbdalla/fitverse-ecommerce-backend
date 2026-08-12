@@ -2,6 +2,10 @@ import * as dotenv from 'dotenv';
 import { DataSource } from 'typeorm';
 import User from './modules/users/entity/user.entity';
 import { Product } from './modules/products/entities/product.entity';
+import { Cart } from './modules/cart/entities/cart.entity';
+import { CartItem } from './modules/cart/entities/cart-items.entity';
+import { Order } from './modules/order/entities/order.entity';
+import { OrderItem } from './modules/order/entities/order-items.entity';
 
 dotenv.config();
 
@@ -14,7 +18,7 @@ export const AppDataSource = new DataSource({
   database: process.env.POSTGRES_DATABASE,
   synchronize: true, // Set to true only for development
   logging: true,
-  entities: [User, Product],
+  entities: [User, Product, Cart, CartItem, Order, OrderItem],
   migrations: ['src/migration/**/*.ts'],
   subscribers: ['src/subscriber/**/*.ts'],
 });

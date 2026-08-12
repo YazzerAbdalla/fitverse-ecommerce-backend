@@ -1,4 +1,6 @@
 import { ObjectType, Field, Int } from '@nestjs/graphql';
+import { CartItem } from 'src/modules/cart/entities/cart-items.entity';
+import { OrderItem } from 'src/modules/order/entities/order-items.entity';
 import {
   Column,
   CreateDateColumn,
@@ -7,6 +9,7 @@ import {
   PrimaryGeneratedColumn,
   Unique,
   Check,
+  OneToMany,
 } from 'typeorm';
 
 @ObjectType()
@@ -42,4 +45,10 @@ export class Product {
   @Field(() => Date)
   @CreateDateColumn()
   created_at!: Date;
+
+  @OneToMany(() => OrderItem, (orderItem) => orderItem.product_id)
+  order_items!: OrderItem[];
+
+  @OneToMany(() => CartItem, (cartItem) => cartItem.product)
+  cart_items!: CartItem[];
 }

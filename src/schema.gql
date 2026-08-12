@@ -22,7 +22,7 @@ type Mutation {
   createManyProducts(createProductInputs: [CreateProductInput!]!): [Product!]!
   createProduct(createProductInput: CreateProductInput!): Product!
   removeAllProducts: DeleteResponse!
-  removeProduct(id: Int!): Product!
+  removeProduct(id: String!): Product!
   updateProduct(id: String!, updateProductInput: UpdateProductInput!): Product!
 }
 

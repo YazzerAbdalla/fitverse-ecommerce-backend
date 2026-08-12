@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { Product } from '../products/entities/product.entity';
+import { ProductsService } from '../products/products.service';
 
 @Injectable()
 export class InventoryService {
@@ -10,6 +11,8 @@ export class InventoryService {
   // or update many at once
   // to increment or decrement stock
   // and to integrate with the reservation service to reserve products shortly to prevent race condition
+
+  constructor(private readonly productsService: ProductsService) {}
 
   async decreaseStockForOrderMany(
     manager: EntityManager,
@@ -44,6 +47,18 @@ export class InventoryService {
 
   async increaseStock() {}
 
-  checkAvailability() {}
+  async checkAvailability(productId: string, neededQuantity: number) {
+    const pickedProduct = await this.productsService.findOne(productId);
+
+    const isQuantityAvailable = pickedProduct!.stock >= neededQuantity;
+
+    if (!pickedProduct || isQuantityAvailable)
+      throw new ConflictException(
+        `Product's stock can not serve this needed quantity ${neededQuantity}`,
+      );
+
+    return true;
+  }
+
   checkAvailabilityMany() {}
 }
