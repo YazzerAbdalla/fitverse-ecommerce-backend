@@ -26,6 +26,14 @@ type Mutation {
   updateProduct(id: String!, updateProductInput: UpdateProductInput!): Product!
 }
 
+type PaginationMeta {
+  currentPage: Int!
+  itemCount: Int!
+  itemsPerPage: Int!
+  totalItems: Int!
+  totalPages: Int!
+}
+
 type Product {
   created_at: DateTime!
   description: String!
@@ -36,9 +44,14 @@ type Product {
   stock: Int!
 }
 
+type ProductPagination {
+  data: [Product!]!
+  meta: PaginationMeta!
+}
+
 type Query {
   product(id: String!): Product!
-  products: [Product!]!
+  products(limit: Int = 10, page: Int = 1): ProductPagination!
 }
 
 input UpdateProductInput {

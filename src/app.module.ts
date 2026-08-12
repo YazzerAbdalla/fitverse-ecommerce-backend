@@ -17,8 +17,6 @@ import { InventoryModule } from './modules/inventory/inventory.module';
 import { OrderModule } from './modules/order/order.module';
 import { ProductsModule } from './modules/products/products.module';
 import { UsersModule } from './modules/users/users.module';
-import { APP_GUARD, Reflector } from '@nestjs/core';
-import { RolesGuard } from './modules/auth/guards/roles.guard';
 
 @Module({
   imports: [

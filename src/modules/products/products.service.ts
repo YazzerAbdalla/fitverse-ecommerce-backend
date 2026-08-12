@@ -14,6 +14,7 @@ import { Product } from './entities/product.entity';
 import { Repository, MoreThan, In, DataSource } from 'typeorm';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { ManyPartialProducts } from './types';
+import { PaginationArgs } from './dto/pagination.dto';
 
 @Injectable()
 export class ProductsService {
@@ -41,7 +42,9 @@ export class ProductsService {
     });
 
     if (isProductExist) {
-      throw new ConflictException('Product with same name already exist');
+      throw new ConflictException(
+        'Product with same name or slug already exist',
+      );
     }
 
     return this.productsRepo.save(createProductInput);
@@ -90,25 +93,42 @@ export class ProductsService {
     return this.productsRepo.save(filteredUniqueProducts);
   }
 
-  async findAll() {
-    const key = 'prodcuts';
-    const cachedProdcuts = await this.cacheManager.get(key);
+  async findAll(paginationArgs: PaginationArgs) {
+    const { page, limit } = paginationArgs;
 
-    if (cachedProdcuts) {
-      this.logger.log('Hit all products from cache');
+    const key = `products:list:${page}:${limit}`;
+    const cachedProducts = await this.cacheManager.get(key);
 
-      return cachedProdcuts;
+    if (cachedProducts) {
+      this.logger.debug(`Cache HIT: ${key}`);
+
+      return cachedProducts;
     }
 
-    this.logger.log('Miss all products in the cache');
+    this.logger.debug(`Cache MISS: ${key}`);
 
-    const dbProducts = await this.productsRepo.find({
+    const skip = (page! - 1) * limit!;
+
+    const [data, total] = await this.productsRepo.findAndCount({
       where: { stock: MoreThan(0) },
+      take: limit,
+      skip,
     });
 
-    await this.cacheManager.set(key, dbProducts);
+    const result = {
+      data,
+      meta: {
+        totalItems: total,
+        itemCount: data.length,
+        itemsPerPage: limit,
+        totalPages: Math.ceil(total / limit!),
+        currentPage: page,
+      },
+    };
 
-    return dbProducts;
+    await this.cacheManager.set(key, result);
+
+    return result;
   }
 
   async findOne(id: string) {
@@ -119,9 +139,11 @@ export class ProductsService {
     const product = await this.productsRepo.findOneBy({ id });
 
     if (!product)
-      throw new NotFoundException(`This product with id ${id} is unavailable`);
+      throw new NotFoundException(
+        `Trying to update a product that doesn't exist`,
+      );
 
-    Object.assign(product, updateProductInput);
+    this.productsRepo.merge(product, updateProductInput);
 
     return this.productsRepo.save(product);
   }
