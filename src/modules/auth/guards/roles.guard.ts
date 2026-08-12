@@ -1,4 +1,41 @@
-import { SetMetadata } from '@nestjs/common';
+import {
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+  Injectable,
+} from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { Request } from 'express';
+import { Observable } from 'rxjs';
+import { JwtPayloadProps } from '../types';
+import { UserRoles } from 'src/modules/users/enum/roles';
+import { ROLESKEY } from '../decorators/auth.decorator';
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private reflector: Reflector) {}
 
-export const ROLESKEY = 'roles';
-export const Roles = (...roles: string[]) => SetMetadata(ROLESKEY, roles);
+  canActivate(
+    context: ExecutionContext,
+  ): boolean | Promise<boolean> | Observable<boolean> {
+    const requiredRoles = this.reflector.getAllAndOverride<UserRoles[]>(
+      ROLESKEY,
+      [context.getHandler(), context.getClass()],
+    );
+
+    if (!requiredRoles) return true;
+
+    const request = context
+      .switchToHttp()
+      .getRequest<Request & { user: JwtPayloadProps }>();
+
+    const role = request.user?.role;
+
+    if (!role || !requiredRoles.includes(role)) {
+      throw new ForbiddenException(
+        'You do not have permission to access this resource.',
+      );
+    }
+
+    return true;
+  }
+}

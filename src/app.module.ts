@@ -1,23 +1,24 @@
+import { createKeyv } from '@keyv/redis';
+import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
+import { CacheModule } from '@nestjs/cache-manager';
 import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { GraphQLModule } from '@nestjs/graphql';
+import { ClientsModule, Transport } from '@nestjs/microservices';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { join } from 'path';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { ConfigModule, ConfigService } from '@nestjs/config';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { AppDataSource } from './data-source';
-import { createKeyv } from '@keyv/redis';
-import { APP_INTERCEPTOR } from '@nestjs/core';
-import { CacheInterceptor, CacheModule } from '@nestjs/cache-manager';
 import { CacheTestService } from './cache-test.service';
-import { ClientsModule, Transport } from '@nestjs/microservices';
-import { OrderModule } from './modules/order/order.module';
+import { AppDataSource } from './data-source';
 import { AuthModule } from './modules/auth/auth.module';
-import { UsersModule } from './modules/users/users.module';
-import { ProductsModule } from './modules/products/products.module';
-import { GraphQLModule } from '@nestjs/graphql';
-import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
-import { join } from 'path';
-import { InventoryModule } from './modules/inventory/inventory.module';
 import { CartModule } from './modules/cart/cart.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
+import { OrderModule } from './modules/order/order.module';
+import { ProductsModule } from './modules/products/products.module';
+import { UsersModule } from './modules/users/users.module';
+import { APP_GUARD, Reflector } from '@nestjs/core';
+import { RolesGuard } from './modules/auth/guards/roles.guard';
 
 @Module({
   imports: [

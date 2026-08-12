@@ -4,6 +4,7 @@ import { UsersService } from '../users/users.service';
 import { UserRegisterDto } from './dto/user-register.dto';
 import User from '../users/entity/user.entity';
 import { JwtService } from '@nestjs/jwt';
+import { JwtPayloadProps } from './types';
 
 @Injectable()
 export class AuthService {
@@ -59,9 +60,9 @@ export class AuthService {
 
   //Generate the jwt for user after validation his credentionals
   async login(user: Partial<User>) {
-    const { id, email, firstName, lastName } = user;
+    const { id, email, firstName, lastName, role } = user;
     const fullName = firstName + ' ' + lastName;
-    const payload = { sub: id, email, fullName };
+    const payload: JwtPayloadProps = { sub: id, email, fullName, role };
 
     const accessToken = await this.jwtService.signAsync(payload);
 

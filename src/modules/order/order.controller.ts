@@ -13,6 +13,11 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderDto } from './dto/update-order.dto';
 import { ApiBearerAuth } from '@nestjs/swagger';
 import { JwtGuard } from '../auth/guards/jwt.guard';
+import { Auth } from '../auth/decorators/auth.decorator';
+import { UserRoles } from '../users/enum/roles';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
 @Controller('order')
 export class OrderController {
@@ -24,10 +29,10 @@ export class OrderController {
   }
 
   @Get()
-  @UseGuards(JwtGuard)
+  @Auth(UserRoles.User)
   @ApiBearerAuth('JWT-auth')
-  findAll() {
-    return { message: 'Hi Authenticated user!' };
+  findAll(@CurrentUser('email') email: string) {
+    return { message: `Hi Authenticated user with email ${email}!` };
   }
 
   @Get(':id')
