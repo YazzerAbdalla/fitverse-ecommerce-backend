@@ -109,6 +109,7 @@ export class ProductsService {
 
     const skip = (page! - 1) * limit!;
 
+    // TODO: Add the search and filters in the future
     const [data, total] = await this.productsRepo.findAndCount({
       where: { stock: MoreThan(0) },
       take: limit,
