@@ -250,6 +250,7 @@ Run: `npm run test`, `npm run test:e2e`, `npm run test:cov`.
 - prefer small, reviewable changes
 - consider failure, concurrency, and DB consistency
 - add/update tests for behavior changes
+- update plan.md after implement any phase 
 - update `docs/` and `docs/decisions/` when an architecture decision is made
 - verify (`lint`, `build`, `test`) before declaring done
 
