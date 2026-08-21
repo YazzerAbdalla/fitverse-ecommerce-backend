@@ -1,163 +1,93 @@
-# Mini E-Commerce Backend — Architecture & Implementation Plan
+# Mini E-Commerce Backend — Phased Manual Development Backlog
 
-## 1. System Overview
+## Project Architecture
 
-This project is a **modular monolithic e-commerce backend** built with NestJS.
+**Architecture:** NestJS Modular Monolith
 
-The system is responsible for:
+**Core stack:**
 
-* Authentication and authorization
-* Users
-* Products
-* Cart management
-* Inventory management
-* Temporary inventory reservations
-* Orders and order items
-* Favorites
-* Caching
-* Background jobs
-* Asynchronous notifications
-* Rate limiting
-* Validation
-* Centralized error handling
+* NestJS
+* TypeScript
+* PostgreSQL
+* TypeORM
+* Redis
+* RabbitMQ
+* BullMQ
+* Docker / Docker Compose
+* REST
+* JWT
+* Jest / Integration / E2E testing
 
-The application runs as one backend application while maintaining strong module boundaries.
+### Core architectural rule
 
-The architecture should allow individual infrastructure components such as Redis, RabbitMQ, or background workers to scale independently when necessary without prematurely turning the application into microservices.
+PostgreSQL is the source of truth for transactional business state.
 
----
+Redis, RabbitMQ, and BullMQ are infrastructure components and must not become the authoritative source for:
 
-# 2. Technology Stack
+* Inventory
+* Reservations
+* Orders
+* Payments
+* Other transactional business state
 
-| Concern                   | Technology                                        |
-| ------------------------- | ------------------------------------------------- |
-| Runtime                   | Node.js                                           |
-| Framework                 | NestJS                                            |
-| Language                  | TypeScript                                        |
-| Database                  | PostgreSQL                                        |
-| ORM                       | TypeORM                                           |
-| Cache / distributed state | Redis                                             |
-| Message broker            | RabbitMQ where asynchronous messaging is required |
-| Background jobs           | BullMQ where appropriate                          |
-| Authentication            | JWT                                               |
-| Containers                | Docker / Docker Compose                           |
-| API                       | REST                                              |
-| Validation                | NestJS ValidationPipe / class-validator           |
-| Testing                   | Jest + integration/E2E testing                    |
+The application remains a **modular monolith**.
 
-Do not introduce another backend framework.
-
-The project is a NestJS modular monolith.
+Do not split modules into microservices unless a demonstrated requirement appears later.
 
 ---
 
-# 3. High-Level Architecture
+# Phase 0 — Existing Foundation
 
-```text
-                    ┌─────────────────────┐
-                    │       Client        │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │     NestJS API      │
-                    │   Modular Monolith  │
-                    └──────────┬──────────┘
-                               │
-       ┌───────────────────────┼────────────────────────┐
-       │                       │                        │
-       ▼                       ▼                        ▼
- ┌──────────┐           ┌─────────────┐          ┌───────────┐
- │  Auth    │           │   Product   │          │   Cart    │
- └──────────┘           └─────────────┘          └───────────┘
-       │                       │                        │
-       │                       ▼                        ▼
-       │                ┌─────────────┐          ┌───────────┐
-       │                │  Inventory  │◄─────────│   Order   │
-       │                └──────┬──────┘          └─────┬─────┘
-       │                       │                       │
-       │                       ▼                       ▼
-       │                ┌─────────────┐         ┌─────────────┐
-       └───────────────►│ Reservation │◄────────│ Order Items │
-                        └─────────────┘         └─────────────┘
+**Status: DONE / EXISTING**
 
-                               │
-                               ▼
-                       ┌──────────────┐
-                       │  PostgreSQL  │
-                       └──────────────┘
+The project already has the basic e-commerce foundation.
 
-        ┌─────────────────────────────────────────────┐
-        │ Redis / RabbitMQ / BullMQ                   │
-        │                                             │
-        │ Cache • Rate Limiting • Background Jobs     │
-        │ Async Notifications / Events                │
-        └─────────────────────────────────────────────┘
-```
+### Existing areas
 
-The database is the source of truth for transactional business state.
+* [x] NestJS application
+* [x] TypeScript
+* [x] PostgreSQL
+* [x] TypeORM
+* [x] Docker-based development infrastructure
+* [x] Redis infrastructure
+* [x] RabbitMQ infrastructure
+* [x] Authentication module
+* [x] Users
+* [x] Products
+* [x] Cart
+* [x] Cart items
+* [x] Basic centralized error handling
+* [x] Validation infrastructure
+* [x] REST API structure
 
-Redis and message queues must not become accidental sources of truth for inventory or orders.
+### Architectural decisions already established
+
+* [x] Modular monolith architecture
+* [x] Product does not own inventory state
+* [x] Inventory is a separate domain
+* [x] Reservation is a separate domain
+* [x] PostgreSQL is the transactional source of truth
+* [x] Redis is not authoritative for inventory
+* [x] Inventory concurrency must be handled at the database level
+* [x] Background processing must not replace transactional consistency
+
+### Important previous Cart/Inventory decision
+
+The cart should not directly mutate inventory.
+
+The inventory lifecycle belongs to the inventory/reservation/order workflow.
 
 ---
 
-# 4. Module Structure
+# Phase 1 — Inventory Foundation
 
-The application should follow NestJS module boundaries.
+**Status: NOT DONE**
 
-Expected modules include:
+**Goal:** Introduce inventory as a first-class domain without implementing reservations yet.
 
-```text
-src/
-├── auth/
-├── users/
-├── products/
-├── inventory/
-├── reservations/
-├── cart/
-├── orders/
-├── favorites/
-├── notifications/
-├── common/
-├── config/
-└── infrastructure/
-```
+## 1.1 Inventory Entity
 
-The exact structure should follow the existing repository where possible.
-
-Do not reorganize unrelated modules merely for stylistic reasons.
-
----
-
-# 5. Product
-
-The Product module owns product information.
-
-Example conceptual entity:
-
-```text
-Product
--------
-id
-title
-description
-note
-price
-created_at
-updated_at
-```
-
-Product information does not represent inventory state.
-
-Inventory is a separate concern.
-
----
-
-# 6. Inventory
-
-Inventory represents the **current stock state** of a product.
-
-Conceptual entity:
+Create the Inventory entity with:
 
 ```text
 Inventory
@@ -166,73 +96,84 @@ id
 product_id
 stock
 reserved_amount
-available
 created_at
 updated_at
 ```
 
-Where:
+### Rules
+
+* [ ] `stock >= 0`
+* [ ] `reserved_amount >= 0`
+* [ ] `reserved_amount <= stock`
+* [ ] `product_id` references Product
+* [ ] Decide whether one product can have exactly one inventory record
+* [ ] Add appropriate unique constraint for `product_id`
+
+Do not store `available` as an independently mutable database field.
+
+Calculate:
 
 ```text
 available = stock - reserved_amount
 ```
 
-`available` should be derived rather than independently maintained whenever possible.
+## 1.2 Inventory Module
 
-The important source-of-truth fields are:
+Create:
 
 ```text
-stock
-reserved_amount
+inventory/
+├── inventory.module.ts
+├── inventory.controller.ts
+├── inventory.service.ts
+├── entities/
+└── dto/
 ```
 
-Do not maintain three independent mutable values.
+Follow the repository's existing structure rather than blindly creating this exact layout.
 
-The system must maintain the invariant:
+## 1.3 Inventory Business API
 
-```text
-0 <= reserved_amount <= stock
-```
+Expose business operations rather than allowing other modules to mutate the entity directly.
 
----
-
-# 7. Inventory Responsibilities
-
-The Inventory module is responsible for:
-
-* Reading inventory
-* Checking availability
-* Reserving inventory
-* Releasing reserved inventory
-* Converting reserved inventory into sold inventory
-* Increasing stock
-* Decreasing stock when an order is completed
-* Protecting inventory from concurrent updates
-
-The Inventory module should expose business operations rather than allowing arbitrary modules to directly modify `stock` or `reserved_amount`.
-
-Examples:
+Conceptually:
 
 ```text
+getInventory()
 checkAvailability()
+increaseStock()
+decreaseStock()
 reserve()
 releaseReservation()
 completeSale()
-increaseStock()
-decreaseStock()
 ```
 
-The exact method names should follow the existing codebase conventions.
+Exact names should follow existing project conventions.
+
+## 1.4 Inventory Tests
+
+* [ ] Create inventory
+* [ ] Read inventory
+* [ ] Calculate available quantity
+* [ ] Reject negative stock
+* [ ] Reject invalid reserved amount
+* [ ] Prevent invalid inventory state
+
+### Phase 1 Exit Criteria
+
+Inventory exists independently from Product and the database enforces its basic invariants.
 
 ---
 
-# 8. Reservation
+# Phase 2 — Reservation Domain
 
-Reservation represents a **temporary claim on inventory**.
+**Status: NOT DONE**
 
-A reservation must have an expiration time.
+**Goal:** Introduce temporary inventory ownership.
 
-Conceptual model:
+## 2.1 Reservation Entity
+
+Create:
 
 ```text
 Reservation
@@ -245,45 +186,6 @@ expires_at
 created_at
 updated_at
 ```
-
-For a reservation containing multiple products, use:
-
-```text
-Reservation
------------
-id
-user_id
-order_id nullable
-status
-expires_at
-
-ReservationItem
----------------
-id
-reservation_id
-inventory_id
-quantity
-```
-
-This is preferred when a single checkout/reservation can contain multiple products.
-
-Conceptually:
-
-```text
-Reservation
-     │
-     ├── Product A × 2
-     ├── Product B × 1
-     └── Product C × 4
-```
-
-Each reservation item references inventory rather than duplicating product inventory logic.
-
----
-
-# 9. Reservation States
-
-Keep reservation states explicit and limited.
 
 Recommended states:
 
@@ -294,94 +196,98 @@ EXPIRED
 CANCELLED
 ```
 
-State transitions:
+Do not add unnecessary states.
+
+## 2.2 Reservation Item
+
+Because checkout can contain multiple products, use:
 
 ```text
-                 ┌──────────────┐
-                 │   RESERVED   │
-                 └──────┬───────┘
-                        │
-          ┌─────────────┼──────────────┐
-          │             │              │
-          ▼             ▼              ▼
-     COMPLETED       EXPIRED       CANCELLED
+ReservationItem
+---------------
+id
+reservation_id
+inventory_id
+quantity
 ```
 
-Do not create unnecessary statuses such as `waiting`, `pending`, and `active` unless the business requirements require them.
+Relationship:
+
+```text
+Reservation
+    |
+    ├── ReservationItem
+    ├── ReservationItem
+    └── ReservationItem
+```
+
+Each item references Inventory.
+
+## 2.3 Reservation Module
+
+Create a dedicated reservation module.
+
+Responsibilities:
+
+* [ ] Create reservation
+* [ ] Add reservation items
+* [ ] Complete reservation
+* [ ] Cancel reservation
+* [ ] Expire reservation
+* [ ] Retrieve reservation
+* [ ] Validate reservation state transitions
+
+### Phase 2 Exit Criteria
+
+The system can represent a temporary claim on one or more inventory records.
 
 ---
 
-# 10. Reservation Expiration
+# Phase 3 — Transaction-Safe Reservation
 
-Expiration is determined by:
+**Status: NOT DONE — CURRENT PRIORITY**
 
-```text
-expires_at <= current_time
-```
+This is the most important implementation phase.
 
-The `expires_at` field is the source of truth.
+**Goal:** Prevent overselling under concurrency.
 
-A background job / scheduled cleanup process should periodically find expired reservations.
+## 3.1 Reservation Transaction
 
-Conceptually:
-
-```sql
-WHERE status = 'RESERVED'
-AND expires_at <= NOW()
-```
-
-For each expired reservation:
-
-1. Lock the relevant inventory.
-2. Verify the reservation is still active.
-3. Decrease `inventory.reserved_amount`.
-4. Mark reservation as `EXPIRED`.
-5. Commit the transaction.
-
-The cleanup job is a **reconciliation/cleanup mechanism**.
-
-The system must not assume that a reservation is valid merely because the cron job has not processed it yet.
-
----
-
-# 11. Reservation Creation
-
-Creating a reservation must be transactional.
-
-Conceptual process:
+Reservation creation must execute atomically:
 
 ```text
-BEGIN TRANSACTION
+BEGIN
 
-        │
-        ▼
-Lock inventory row
-        │
-        ▼
-Calculate available stock
-        │
-        ▼
-Is requested quantity available?
-        │
-       / \
-     NO   YES
-     │     │
-     ▼     ▼
- Reject   Increase reserved_amount
-             │
-             ▼
-        Create reservation
-             │
-             ▼
-        Create reservation items
-             │
-             ▼
-          COMMIT
+    Lock inventory rows
+
+        ↓
+
+    Check availability
+
+        ↓
+
+    Increase reserved_amount
+
+        ↓
+
+    Create Reservation
+
+        ↓
+
+    Create ReservationItems
+
+COMMIT
 ```
 
-The inventory row must be protected from concurrent reservation requests.
+If anything fails:
 
-Use PostgreSQL row-level locking where appropriate, for example:
+```text
+ROLLBACK
+```
+
+## 3.2 Row-Level Locking
+
+Use PostgreSQL row-level locking where appropriate:
 
 ```sql
 SELECT ...
@@ -390,65 +296,265 @@ WHERE id = ?
 FOR UPDATE;
 ```
 
-This prevents two concurrent checkout requests from both seeing the same available inventory and overselling it.
+For multiple inventory records:
 
----
+* [ ] Lock every required inventory row
+* [ ] Use a deterministic ordering when acquiring multiple locks
+* [ ] Avoid unnecessary locking
+* [ ] Keep the transaction short
 
-# 12. Example Concurrency Scenario
+Deterministic lock ordering is important because multiple-resource transactions can otherwise create unnecessary deadlock risk.
 
-Suppose:
+## 3.3 Availability Rule
+
+For every inventory record:
+
+```text
+available = stock - reserved_amount
+```
+
+Reservation succeeds only when:
+
+```text
+available >= requested_quantity
+```
+
+## 3.4 Concurrency Test
+
+Test:
 
 ```text
 stock = 10
-reserved_amount = 8
-available = 2
+reserved = 8
+
+User A requests 2
+User B requests 2
 ```
 
-Two users simultaneously request:
+Expected:
 
 ```text
-User A → 2 units
-User B → 2 units
+User A → SUCCESS
+User B → INSUFFICIENT INVENTORY
 ```
 
-The system must not allow both requests to succeed.
-
-Transaction A locks the inventory row:
+Never:
 
 ```text
-available = 2
+A → SUCCESS
+B → SUCCESS
 ```
 
-A reserves 2:
+### Phase 3 Exit Criteria
 
-```text
-reserved_amount = 10
-available = 0
-```
-
-Transaction A commits.
-
-Transaction B then obtains the lock and sees:
-
-```text
-available = 0
-```
-
-Therefore:
-
-```text
-User B → insufficient inventory
-```
-
-This is required to prevent overselling.
+Concurrent reservation requests cannot oversell inventory.
 
 ---
 
-# 13. Order Architecture
+# Phase 4 — Reservation Lifecycle
 
-The Order module owns orders and order items.
+**Status: NOT DONE**
 
-Conceptual model:
+**Goal:** Make reservation state transitions explicit and safe.
+
+## 4.1 Reservation Creation
+
+```text
+NONE
+ ↓
+RESERVED
+```
+
+When created:
+
+```text
+inventory.reserved_amount += quantity
+```
+
+## 4.2 Reservation Completion
+
+```text
+RESERVED
+ ↓
+COMPLETED
+```
+
+On successful sale:
+
+```text
+stock -= quantity
+reserved_amount -= quantity
+```
+
+Example:
+
+```text
+Before:
+
+stock = 10
+reserved = 3
+available = 7
+
+After sale:
+
+stock = 7
+reserved = 0
+available = 7
+```
+
+## 4.3 Reservation Cancellation
+
+```text
+RESERVED
+ ↓
+CANCELLED
+```
+
+Release:
+
+```text
+reserved_amount -= quantity
+```
+
+Stock does not change.
+
+## 4.4 Reservation Expiration
+
+```text
+RESERVED
+ ↓
+EXPIRED
+```
+
+Release:
+
+```text
+reserved_amount -= quantity
+```
+
+Stock does not change.
+
+## 4.5 State Transition Rules
+
+Implement explicit transition rules.
+
+Invalid examples:
+
+```text
+COMPLETED → EXPIRED
+COMPLETED → CANCELLED
+EXPIRED → COMPLETED
+CANCELLED → COMPLETED
+```
+
+must not be silently accepted.
+
+### Phase 4 Exit Criteria
+
+Every reservation has a well-defined lifecycle and inventory remains synchronized with the reservation state.
+
+---
+
+# Phase 5 — Reservation Expiration / Cleanup
+
+**Status: NOT DONE**
+
+**Goal:** Automatically release expired inventory.
+
+## 5.1 Expiration Source of Truth
+
+The authoritative rule is:
+
+```text
+expires_at <= current_time
+```
+
+The database field determines whether a reservation is expired.
+
+The cleanup worker does not define expiration.
+
+It only discovers and processes expired reservations.
+
+## 5.2 Cleanup Process
+
+Conceptually:
+
+```sql
+WHERE status = 'RESERVED'
+AND expires_at <= NOW()
+```
+
+For each candidate:
+
+```text
+BEGIN
+
+    Lock reservation
+
+        ↓
+
+    Verify status is still RESERVED
+
+        ↓
+
+    Lock relevant inventory
+
+        ↓
+
+    Release reserved quantity
+
+        ↓
+
+    Mark reservation EXPIRED
+
+COMMIT
+```
+
+## 5.3 Race Conditions
+
+Handle cases such as:
+
+```text
+Cleanup worker
+       +
+Checkout completion
+       +
+Cancellation
+```
+
+happening concurrently.
+
+Only one state transition should win.
+
+The losing operation must safely detect that the reservation is no longer `RESERVED`.
+
+## 5.4 Cleanup Job
+
+Use the project's existing background-job infrastructure.
+
+Decide during implementation whether this workload belongs in:
+
+* BullMQ
+* NestJS scheduler
+* another already-existing mechanism
+
+Do not introduce infrastructure without a reason.
+
+### Phase 5 Exit Criteria
+
+Expired reservations eventually release inventory and concurrent expiration/completion/cancellation cannot corrupt inventory.
+
+---
+
+# Phase 6 — Order Integration
+
+**Status: NOT DONE**
+
+**Goal:** Connect reservations to Orders.
+
+## 6.1 Order Model
+
+Conceptually:
 
 ```text
 Order
@@ -459,7 +565,11 @@ status
 total
 created_at
 updated_at
+```
 
+Order item:
+
+```text
 OrderItem
 ---------
 id
@@ -469,453 +579,320 @@ quantity
 unit_price
 ```
 
-The order should preserve the price at the time of purchase.
+## 6.2 Historical Price
 
-Do not rely on the current Product price when displaying historical orders.
+When the order is created:
 
----
+```text
+unit_price = Product.price
+```
 
-# 14. Checkout Flow
+The OrderItem keeps this value.
 
-Checkout should not be implemented as a chain of unrelated operations.
+Historical orders must not depend on the current Product price.
 
-The critical inventory/order operations should be coordinated transactionally.
+## 6.3 Checkout Flow
 
-Conceptual flow:
+The exact checkout behavior must first be specified.
+
+Current architectural direction:
 
 ```text
 Client
-  │
-  ▼
-Auth
-  │
-  ▼
+  ↓
 Cart
-  │
-  ▼
+  ↓
 Checkout
-  │
-  ▼
-Create / validate reservation
-  │
-  ▼
+  ↓
+Validate cart
+  ↓
 Reserve inventory
-  │
-  ▼
+  ↓
 Create order
-  │
-  ▼
+  ↓
 Create order items
-  │
-  ▼
-Commit transaction
-  │
-  ▼
-Publish asynchronous event/job
-  │
-  ▼
-Notifications
+  ↓
+Commit
 ```
 
-The exact flow depends on whether inventory is reserved when the cart is created, when checkout starts, or at another explicitly defined business stage.
+The exact transaction boundary must be decided in the feature specification.
 
-This decision must be documented in the feature specification before implementation.
+## 6.4 Important Unresolved Requirement
+
+Before implementation, decide:
+
+```text
+When does inventory become reserved?
+```
+
+Possible choices:
+
+```text
+A. When item is added to cart
+B. When checkout starts
+C. When order is created
+D. Another explicit business stage
+```
+
+Do not implement this assumption silently.
+
+### Phase 6 Exit Criteria
+
+A successful checkout produces a consistent Order + OrderItems + Reservation + Inventory state.
 
 ---
 
-# 15. Reservation vs Order Completion
+# Phase 7 — Order Completion / Sale
 
-Do not confuse:
+**Status: NOT DONE**
+
+**Goal:** Convert reserved inventory into sold inventory.
+
+## 7.1 Successful Completion
+
+Conceptually:
 
 ```text
 Reservation
-```
+    ↓
+COMPLETED
 
-with:
-
-```text
-Sale
-```
-
-A reservation means:
-
-> This inventory is temporarily unavailable to other users.
-
-A completed order means:
-
-> The inventory has been sold.
-
-When an order/payment is successfully completed:
-
-```text
+Inventory:
 stock -= quantity
 reserved_amount -= quantity
 ```
 
+This must be transactional.
+
+## 7.2 Payment
+
+The project currently does not define a payment provider.
+
 Therefore:
 
-```text
-Before:
-stock = 10
-reserved = 3
-available = 7
+* [ ] Do not invent a payment integration
+* [ ] Define payment state separately when payment requirements exist
+* [ ] Specify what happens when payment fails
+* [ ] Specify what happens when payment succeeds
 
-After sale:
-stock = 7
-reserved = 0
-available = 7
-```
+### Phase 7 Exit Criteria
 
-The inventory quantity available for future customers remains correct.
+A completed sale permanently decreases stock while releasing its reservation.
 
 ---
 
-# 16. Reservation Expiration
+# Phase 8 — Order Cancellation
 
-If a reservation expires before successful order completion:
+**Status: NOT DONE**
 
-```text
-reserved_amount -= reservation.quantity
-```
+**Goal:** Define and implement inventory behavior when orders are cancelled.
 
-The actual stock does not change.
+## 8.1 Cancellation Before Sale
 
-Example:
+If inventory is still reserved:
 
 ```text
-Before:
-stock = 10
-reserved = 3
-available = 7
-
-Reservation expires:
-
-stock = 10
-reserved = 0
-available = 10
+reserved_amount -= quantity
 ```
 
-The product was never sold.
+Stock remains unchanged.
 
----
+## 8.2 Cancellation After Sale
 
-# 17. Order Cancellation
-
-Order cancellation must define what happens to inventory.
-
-For an order that has already converted a reservation into a sale:
+If inventory has already been sold:
 
 ```text
 stock += quantity
 ```
 
-If cancellation occurs while inventory is still reserved:
+The exact behavior depends on the business meaning of cancellation/refund.
 
-```text
-reserved_amount -= quantity
-```
+## 8.3 Required Order State Machine
 
-The exact behavior must depend on the order state.
+Before coding cancellation:
 
-Do not implement cancellation without defining the order state transition rules.
+* [ ] Define Order statuses
+* [ ] Define valid transitions
+* [ ] Define cancellation rules per status
+* [ ] Define inventory effect per status
+* [ ] Define payment/refund behavior
 
----
+### Phase 8 Exit Criteria
 
-# 18. Database Transactions
-
-Transactions are mandatory for operations that change multiple pieces of related business state.
-
-Examples:
-
-### Creating a reservation
-
-```text
-Inventory update
-+
-Reservation creation
-+
-Reservation items
-```
-
-must be atomic.
-
-### Completing an order
-
-```text
-Order update
-+
-Inventory update
-+
-Reservation update
-```
-
-must be coordinated so the system cannot end in an inconsistent state.
-
-If one operation fails, the relevant transactional changes must roll back.
+Cancellation cannot accidentally double-release or double-return inventory.
 
 ---
 
-# 19. RabbitMQ / Background Processing
+# Phase 9 — Redis / Caching
 
-RabbitMQ should not be placed unnecessarily inside the critical inventory transaction.
+**Status: PARTIALLY DONE / INFRASTRUCTURE EXISTS**
 
-Avoid:
+Redis already exists in the project infrastructure.
 
-```text
-Checkout
-   ↓
-RabbitMQ
-   ↓
-Inventory update
-   ↓
-Order
-```
+The remaining work is deciding where caching actually provides value.
 
-for the core consistency path.
+## Tasks
 
-Instead:
+* [ ] Define product cache strategy
+* [ ] Define cache keys
+* [ ] Define TTLs
+* [ ] Invalidate cache after product mutation
+* [ ] Test cache miss
+* [ ] Test cache hit
+* [ ] Test invalidation
 
-```text
-Database Transaction
-       │
-       ▼
-Commit
-       │
-       ▼
-Publish Event / Background Job
-       │
-       ▼
-Notification / Other asynchronous processing
-```
-
-The database transaction should establish the authoritative business state first.
-
-RabbitMQ is appropriate for asynchronous communication such as:
-
-* Order-created events
-* Notifications
-* External integrations
-* Non-critical downstream processing
-
----
-
-# 20. Background Jobs
-
-Background processing can be used for:
-
-### Reservation Cleanup
-
-Periodically find:
-
-```text
-RESERVED
-AND expires_at <= NOW()
-```
-
-and release the inventory.
-
-### Notifications
-
-After order creation/completion:
-
-```text
-Order event
-    ↓
-Notification worker
-    ↓
-Email / other notification
-```
-
-Background jobs must be idempotent where retries are possible.
-
----
-
-# 21. Redis
-
-Redis should be treated as an infrastructure component rather than the primary database.
-
-Possible uses:
-
-```text
-Caching
-Rate limiting
-Temporary state
-BullMQ job storage
-Distributed coordination where explicitly required
-```
-
-Example cache:
+Example:
 
 ```text
 product:{productId}
 ```
 
-However, cache invalidation must happen when underlying product data changes.
+## Important Rule
 
-Inventory correctness must not depend on stale Redis data.
+Do NOT use Redis as the authoritative inventory store.
 
-Do not use cached inventory values as the authoritative source for reservation decisions.
-
----
-
-# 22. Rate Limiting
-
-Rate limiting should protect the API from abuse and excessive requests.
-
-If the application runs multiple instances, rate-limit state should not be stored only in process memory.
-
-Redis can be used as shared rate-limit storage when distributed rate limiting is required.
-
-The rate limiter should not affect the correctness of inventory transactions.
-
----
-
-# 23. API Design
-
-Use REST endpoints following the existing NestJS conventions.
-
-Examples:
+Never make:
 
 ```text
-POST   /auth/login
-POST   /auth/register
-POST   /auth/refresh
-
-GET    /products
-GET    /products/:id
-
-GET    /cart
-POST   /cart/items
-PATCH  /cart/items/:id
-DELETE /cart/items/:id
-
-POST   /orders
-GET    /orders
-GET    /orders/:id
-POST   /orders/:id/cancel
-
-GET    /favorites
-POST   /favorites
-DELETE /favorites/:id
+Redis inventory
+    ↓
+reservation decision
 ```
 
-Do not blindly copy these routes if the existing application already has established routes.
+the source of truth.
 
-Existing API conventions take precedence.
-
----
-
-# 24. Validation
-
-All external input must be validated.
-
-Validate:
-
-* IDs
-* quantities
-* prices where applicable
-* pagination parameters
-* filters
-* DTO fields
-
-Inventory quantities must be positive integers.
-
-Never trust quantities coming from the client.
-
----
-
-# 25. Error Handling
-
-Use appropriate HTTP errors.
-
-Examples:
+The authoritative path is:
 
 ```text
-400 Bad Request
-401 Unauthorized
-403 Forbidden
-404 Not Found
-409 Conflict
-422 Unprocessable Entity
-500 Internal Server Error
+PostgreSQL transaction
+    ↓
+Inventory row
+    ↓
+Reservation
 ```
-
-Inventory conflicts such as insufficient stock should normally be represented as a conflict/business error rather than a generic internal server error.
-
-All exceptions should follow the project's centralized exception handling strategy.
 
 ---
 
-# 26. Database Indexing
+# Phase 10 — Rate Limiting
 
-Indexes should support actual access patterns.
+**Status: PARTIALLY DONE / INFRASTRUCTURE DIRECTION EXISTS**
 
-Important candidates include:
+The application already has rate-limiting requirements.
+
+Remaining work:
+
+* [ ] Define protected endpoints
+* [ ] Define limits per endpoint/use case
+* [ ] Decide whether distributed rate limiting is required
+* [ ] Use Redis for shared state when multiple API instances are used
+* [ ] Test rate-limit behavior
+* [ ] Test behavior when Redis is unavailable
+
+Rate limiting must never compromise transactional inventory correctness.
+
+---
+
+# Phase 11 — Asynchronous Events / Notifications
+
+**Status: NOT DONE**
+
+**Goal:** Separate non-critical work from the transactional path.
+
+The core pattern should be:
 
 ```text
-users.email
-
-inventory.product_id
-
-reservation.status
-reservation.expires_at
-
-reservation.user_id
-
-reservation.order_id
-
-reservation_item.reservation_id
-
-reservation_item.inventory_id
-
-order.user_id
-
-order_item.order_id
+Database Transaction
+        ↓
+Commit
+        ↓
+Event / Job
+        ↓
+Worker
+        ↓
+Notification / Integration
 ```
 
-Do not blindly add indexes to every column.
-
-Indexes should be justified by query patterns and constraints.
-
----
-
-# 27. Entity Relationships
-
-Conceptually:
+Potential events:
 
 ```text
-User
- │
- ├──────── Cart
- │            │
- │            └── CartItem ── Product
- │
- ├──────── Order
- │            │
- │            └── OrderItem ── Product
- │
- ├──────── Reservation
- │            │
- │            └── ReservationItem ── Inventory ── Product
- │
- └──────── Favorites
-              │
-              └── FavoriteItem ── Product
+OrderCreated
+OrderCompleted
+OrderCancelled
+ReservationExpired
 ```
 
-The ORM relationships should follow the actual ownership and lifecycle of each entity.
+Potential consumers:
 
-Do not add bidirectional relationships merely because TypeORM supports them.
+```text
+Notification worker
+Email service
+External integration
+Analytics
+```
 
-Add relationships where they are useful for domain navigation and querying.
+## RabbitMQ
+
+Use RabbitMQ where asynchronous messaging between components/workflows provides value.
+
+## BullMQ
+
+Use BullMQ where the workload is naturally a background job:
+
+```text
+Reservation cleanup
+Notification retries
+Scheduled processing
+```
+
+The exact division between RabbitMQ and BullMQ remains a design decision.
+
+### Phase 11 Exit Criteria
+
+Asynchronous failures do not roll back already committed business transactions.
 
 ---
 
-# 28. Important Constraints
+# Phase 12 — Reliability / Idempotency
 
-The database should enforce important invariants where possible.
+**Status: NOT DONE**
 
-Examples:
+This phase becomes important once background processing and events exist.
+
+## Tasks
+
+* [ ] Identify retryable operations
+* [ ] Make reservation expiration idempotent
+* [ ] Make notification jobs idempotent
+* [ ] Prevent duplicate order completion
+* [ ] Prevent duplicate inventory release
+* [ ] Define event/job retry behavior
+* [ ] Define failure handling
+
+Example:
+
+If the cleanup worker processes the same reservation twice:
+
+```text
+First attempt:
+RESERVED → EXPIRED
+reserved_amount -= quantity
+
+Second attempt:
+reservation is already EXPIRED
+→ do nothing
+```
+
+The second attempt must not subtract inventory again.
+
+---
+
+# Phase 13 — Database Constraints & Indexes
+
+**Status: PARTIALLY DONE / DESIGN DEFINED, IMPLEMENTATION NOT COMPLETE**
+
+## Constraints
+
+Implement where appropriate:
 
 ```text
 stock >= 0
@@ -925,78 +902,145 @@ quantity > 0
 price >= 0
 ```
 
-Use database constraints where appropriate rather than relying entirely on application-level validation.
+## Indexes
+
+Evaluate based on actual queries:
+
+```text
+users.email
+
+inventory.product_id
+
+reservation.status
+reservation.expires_at
+reservation.user_id
+reservation.order_id
+
+reservation_item.reservation_id
+reservation_item.inventory_id
+
+order.user_id
+
+order_item.order_id
+```
+
+Do not blindly create every proposed index.
+
+Verify query patterns first.
+
+### Phase Exit Criteria
+
+The database enforces important business invariants and common access paths are indexed appropriately.
 
 ---
 
-# 29. Testing Strategy
+# Phase 14 — Testing
 
-The inventory/reservation system requires more than simple unit tests.
+**Status: NOT DONE**
+
+Testing should be implemented progressively rather than postponed until the end.
 
 ## Unit Tests
 
-Test:
-
-* Availability calculation
-* Reservation state transitions
-* Expiration rules
-* Inventory business methods
-* Validation
+* [ ] Inventory availability
+* [ ] Reservation creation rules
+* [ ] Reservation state transitions
+* [ ] Expiration rules
+* [ ] Inventory business methods
+* [ ] DTO validation
 
 ## Integration Tests
 
-Test:
-
-* PostgreSQL transactions
-* Reservation creation
-* Reservation expiration
-* Inventory release
-* Order completion
-* Database constraints
+* [ ] PostgreSQL transactions
+* [ ] Reservation creation
+* [ ] Inventory release
+* [ ] Reservation expiration
+* [ ] Order completion
+* [ ] Order cancellation
+* [ ] Database constraints
 
 ## Concurrency Tests
 
-Explicitly test scenarios such as:
+Critical test:
 
 ```text
-Two users reserve the final available quantity simultaneously.
+Inventory = final 1 unit
+
+Request A → 1
+Request B → 1
 ```
 
-The system must not oversell.
-
-## E2E Tests
-
-Test the complete flow:
+Expected:
 
 ```text
-Register/Login
-    ↓
-Add product to cart
-    ↓
+A → success
+B → conflict
+```
+
+Never:
+
+```text
+A → success
+B → success
+```
+
+## E2E
+
+Complete flow:
+
+```text
+Register
+ ↓
+Login
+ ↓
+Browse product
+ ↓
+Add to cart
+ ↓
 Checkout
-    ↓
+ ↓
 Reservation
-    ↓
+ ↓
 Order
-    ↓
+ ↓
 Completion
 ```
 
-Also test:
+Expiration flow:
 
 ```text
 Reservation
-    ↓
+ ↓
+Time passes
+ ↓
+Cleanup
+ ↓
 Expiration
-    ↓
+ ↓
 Inventory released
+```
+
+Cancellation flow:
+
+```text
+Order
+ ↓
+Cancel
+ ↓
+Inventory released/restored
 ```
 
 ---
 
-# 30. Documentation Structure
+# Phase 15 — Documentation & Spec-Driven Development
 
-Maintain AI and human-readable documentation using:
+**Status: PARTIALLY DONE**
+
+The project already has an architectural direction and should now turn it into maintainable documentation.
+
+## Documentation
+
+Maintain:
 
 ```text
 AGENTS.md
@@ -1020,201 +1064,267 @@ docs/
     └── conventions.md
 ```
 
-Use the existing Spec Kit structure in addition to this documentation where applicable.
+Use the existing Spec Kit structure alongside this documentation.
 
-Do not duplicate the same architecture information in multiple locations unnecessarily.
+Do not duplicate information unnecessarily.
 
----
+## Feature Development Process
 
-# 31. Spec-Driven Development
-
-All significant features should follow:
+Every significant feature follows:
 
 ```text
 Requirement
-     ↓
+    ↓
 Specification
-     ↓
+    ↓
 Clarification
-     ↓
+    ↓
 Design
-     ↓
+    ↓
 Implementation Plan
-     ↓
+    ↓
 Implementation
-     ↓
+    ↓
 Tests
-     ↓
+    ↓
 Verification
 ```
 
-For example, the Inventory/Reservation feature should first define:
+---
 
-* What creates a reservation?
-* How long does it last?
-* When is inventory reserved?
-* When is inventory sold?
-* What happens when payment fails?
-* What happens when payment succeeds?
-* What happens when a reservation expires?
-* What happens when an order is cancelled?
-* How is concurrency handled?
-* What happens if the cleanup job fails?
-* What happens if a worker retries?
-* What happens if the API crashes during checkout?
+# Current Backlog Status
 
-These decisions belong in the specification before implementation.
+## DONE
+
+```text
+[x] NestJS modular monolith foundation
+[x] PostgreSQL + TypeORM
+[x] Docker infrastructure
+[x] Redis infrastructure
+[x] RabbitMQ infrastructure
+[x] Authentication
+[x] Users
+[x] Products
+[x] Cart
+[x] Cart items
+[x] Basic validation
+[x] Centralized error handling direction
+[x] Product/inventory separation decision
+[x] Reservation as separate domain decision
+[x] PostgreSQL as transactional source of truth
+[x] Database-level concurrency strategy identified
+[x] Background processing separated from transactional consistency
+```
+
+## PARTIALLY DONE
+
+```text
+[~] Redis usage
+[~] Rate limiting
+[~] Database indexes
+[~] Database constraints
+[~] AI/project documentation
+[~] Spec Kit setup
+```
+
+## NOT DONE
+
+```text
+[ ] Inventory entity
+[ ] Inventory module
+[ ] Inventory constraints
+[ ] Inventory business operations
+[ ] Inventory tests
+
+[ ] Reservation entity
+[ ] ReservationItem entity
+[ ] Reservation module
+[ ] Reservation state machine
+
+[ ] Transaction-safe reservation
+[ ] PostgreSQL row locking
+[ ] Concurrent reservation tests
+
+[ ] Reservation completion
+[ ] Reservation cancellation
+[ ] Reservation expiration
+
+[ ] Expiration cleanup worker
+
+[ ] Order integration
+[ ] Checkout transaction
+[ ] Order state machine
+[ ] Order completion
+
+[ ] Order cancellation
+
+[ ] Async events
+[ ] Notification workers
+[ ] RabbitMQ/BullMQ responsibilities
+[ ] Idempotency
+[ ] Retry handling
+
+[ ] Complete integration tests
+[ ] Concurrency tests
+[ ] Complete E2E tests
+
+[ ] Final architecture documentation
+[ ] ADRs for important architectural decisions
+```
 
 ---
 
-# 32. Architecture Principles
+# Immediate Development Roadmap
 
-The project should follow these principles:
+Do NOT work through all remaining items at once.
 
-### Database is the source of truth
+Work in this order:
 
-PostgreSQL owns transactional business state.
+## Current Milestone — Inventory
 
-### Inventory is strongly consistent
+```text
+Phase 1
+Inventory Foundation
+        ↓
+Phase 2
+Reservation Domain
+        ↓
+Phase 3
+Transaction-Safe Reservation
+        ↓
+Phase 4
+Reservation Lifecycle
+        ↓
+Phase 5
+Expiration Cleanup
+```
 
-Inventory reservation must use transactions and concurrency control.
+Only after these are stable:
 
-### Reservation has its own lifecycle
+```text
+Phase 6
+Order Integration
+        ↓
+Phase 7
+Order Completion
+        ↓
+Phase 8
+Cancellation
+```
 
-A reservation is not simply a field on Product or Inventory.
+Then infrastructure/reliability:
 
-### Expiration is explicit
+```text
+Phase 9
+Redis / Cache
 
-Use `expires_at`.
+Phase 10
+Rate Limiting
 
-### Background jobs are asynchronous
+Phase 11
+Async Events / Notifications
 
-They should not replace transactional consistency.
+Phase 12
+Idempotency / Reliability
 
-### Redis is not authoritative
+Phase 13
+Database Optimization
+```
 
-Redis may be unavailable without corrupting the inventory model.
+Finally:
 
-### Queue failures must be recoverable
+```text
+Phase 14
+Complete Testing
 
-Asynchronous processing must tolerate retries.
-
-### Modules own their business logic
-
-Other modules should call business services instead of directly mutating another module's database entities.
-
-### Prefer simple architecture
-
-This is a modular monolith.
-
-Do not introduce microservices unless there is a demonstrated requirement.
+Phase 15
+Documentation / Spec Verification
+```
 
 ---
 
-# 33. Current Priority
+# Manual Development Rule
 
-The immediate architectural priority is:
+For every phase:
 
 ```text
-1. Inventory entity/module
-2. Reservation entity/module
-3. Reservation items if required
-4. Transaction-safe inventory reservation
-5. Reservation expiration
-6. Order integration
-7. Order completion
-8. Cancellation/release
-9. Background cleanup
-10. Tests
+1. Read existing code
+2. Identify affected modules
+3. Write/confirm the specification
+4. Clarify unresolved business decisions
+5. Design the database changes
+6. Design the service boundaries
+7. Implement the smallest increment
+8. Write tests
+9. Run existing tests
+10. Verify database behavior
+11. Update documentation
+12. Mark the phase complete
 ```
 
-Do not implement all of these at once.
+Do not implement future phases prematurely.
 
-Use Spec-Driven Development to specify and implement each capability incrementally.
+For example:
+
+**Do not implement Order Completion while Reservation Creation is still untested.**
+
+**Do not implement RabbitMQ events before the transactional business operation is correct.**
+
+**Do not optimize Redis caching before the PostgreSQL inventory path is correct.**
 
 ---
 
-# 34. What Must NOT Be Assumed
+# Current Position
 
-The following decisions are intentionally not hardcoded until requirements are specified:
-
-* Exact reservation duration
-* Whether inventory is reserved when adding to cart or only during checkout
-* Payment provider
-* Exact order status state machine
-* Exact notification providers
-* Exact RabbitMQ exchange/queue topology
-* Exact cache TTLs
-* Whether RabbitMQ or BullMQ is preferred for each background workload
-
-These should be decided based on the feature requirements and infrastructure already present in the repository.
-
----
-
-# 35. Final Architecture
-
-The core business model is:
+The project is currently at:
 
 ```text
-                    PRODUCT
-                       │
-                       │
-                       ▼
-                  INVENTORY
-              ┌────────┴────────┐
-              │                 │
-            stock         reserved_amount
-              │                 │
-              └────────┬────────┘
-                       │
-                       ▼
-                   available
-                       │
-                       │
-                       ▼
-                 RESERVATION
-                       │
-                 ReservationItem
-                       │
-                       ▼
-                   ORDER
-                       │
-                  OrderItem
-                       │
-                       ▼
-                 COMPLETED SALE
+Foundation
+    ↓
+DONE
+    ↓
+Inventory
+    ↓
+>>> CURRENT TARGET <<<
+    ↓
+Reservation
+    ↓
+Concurrency
+    ↓
+Lifecycle
+    ↓
+Expiration
+    ↓
+Orders
+    ↓
+Async infrastructure
+    ↓
+Reliability
+    ↓
+Testing
+    ↓
+Documentation
 ```
 
-The key invariant is:
+## Next Manual Task
+
+The next task should be:
+
+**Phase 1 — Inventory Foundation**
+
+Start with:
 
 ```text
-available = stock - reserved_amount
+1. Inspect existing Product entity
+2. Design Inventory entity relationship
+3. Add Inventory entity
+4. Add database constraints
+5. Create Inventory module/service
+6. Implement basic inventory operations
+7. Add unit/integration tests
+8. Verify migration/database state
 ```
 
-The key consistency rule is:
+Do not implement reservations yet.
 
-```text
-Reservation + Inventory update
-must be atomic.
-```
-
-The key expiration rule is:
-
-```text
-expires_at determines expiration.
-```
-
-The key concurrency rule is:
-
-```text
-Inventory reservation must be protected by database locking/transactional concurrency control.
-```
-
-The key architectural rule is:
-
-```text
-Keep the application as a modular monolith.
-Use PostgreSQL for transactional state.
-Use Redis and queues for infrastructure/asynchronous concerns.
-Do not introduce distributed complexity without a requirement.
-```
+The purpose of this phase is to establish a clean Inventory boundary that the Reservation module can safely depend on later.
