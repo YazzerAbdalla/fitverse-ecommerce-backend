@@ -16,7 +16,7 @@ export const AppDataSource = new DataSource({
   username: process.env.POSTGRES_USER,
   password: process.env.POSTGRES_PASSWORD,
   database: process.env.POSTGRES_DATABASE,
-  synchronize: true, // Set to true only for development
+  synchronize: false,
   logging: true,
   entities: [User, Product, Cart, CartItem, Order, OrderItem],
   migrations: ['src/migration/**/*.ts'],
