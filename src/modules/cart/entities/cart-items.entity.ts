@@ -1,13 +1,12 @@
+import { Product } from 'src/modules/products/entities/product.entity';
 import {
   Column,
   Entity,
-  Index,
   ManyToOne,
   PrimaryGeneratedColumn,
   Unique,
 } from 'typeorm';
 import { Cart } from './cart.entity';
-import { Product } from 'src/modules/products/entities/product.entity';
 
 @Entity()
 @Unique(['id'])
