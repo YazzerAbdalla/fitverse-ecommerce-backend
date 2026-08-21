@@ -8,15 +8,15 @@ import {
   Index,
   PrimaryGeneratedColumn,
   Unique,
-  Check,
   OneToMany,
+  OneToOne,
 } from 'typeorm';
+import { Inventory } from 'src/modules/inventory/entities/inventory.entity';
 
 @ObjectType()
 @Entity()
 @Index(['name'])
 @Unique(['name'])
-@Check(`"stock" >= 0`)
 export class Product {
   @Field()
   @PrimaryGeneratedColumn('uuid')
@@ -36,10 +36,6 @@ export class Product {
 
   @Field(() => Int)
   @Column()
-  stock!: number;
-
-  @Field(() => Int)
-  @Column()
   price!: number;
 
   @Field(() => Date)
@@ -51,4 +47,7 @@ export class Product {
 
   @OneToMany(() => CartItem, (cartItem) => cartItem.product)
   cart_items!: CartItem[];
+
+  @OneToOne(() => Inventory, (inventory) => inventory.product)
+  inventory!: Inventory;
 }

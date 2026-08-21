@@ -21,8 +21,8 @@
 
 **Purpose**: Confirm environment and review existing code before changes (Manual Development Rule step 1).
 
-- [ ] T001 Review existing Product entity and InventoryService to understand current stock handling in `src/modules/products/entities/product.entity.ts` and `src/modules/inventory/inventory.service.ts`
-- [ ] T002 [P] Confirm local infrastructure is up (`docker-compose up -d` for postgres/redis/rabbitmq) and DB is reachable for integration tests
+- [x] T001 Review existing Product entity and InventoryService to understand current stock handling in `src/modules/products/entities/product.entity.ts` and `src/modules/inventory/inventory.service.ts`
+- [x] T002 [P] Confirm local infrastructure is up (`docker-compose up -d` for postgres/redis/rabbitmq) and DB is reachable for integration tests
 
 ---
 
@@ -32,9 +32,9 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T003 Create `Inventory` entity with `id`, `productId`, `stock`, `reservedAmount`, `createdAt`, `updatedAt`, `@Check` constraints (`stock >= 0`, `reservedAmount >= 0`, `reservedAmount <= stock`), `@Unique` on `productId`, `@Index` on `productId`, and a derived `available` getter in `src/modules/inventory/entities/inventory.entity.ts`
-- [ ] T004 Add inverse read-only `@OneToOne(() => Inventory)` relation to `Product` in `src/modules/products/entities/product.entity.ts` (keep `stock` column for now — removed in US1)
-- [ ] T005 Register `Inventory` entity / repository provider in `src/modules/inventory/inventory.module.ts` (import `ProductsModule`)
+- [x] T003 Create `Inventory` entity with `id`, `productId`, `stock`, `reservedAmount`, `createdAt`, `updatedAt`, `@Check` constraints (`stock >= 0`, `reservedAmount >= 0`, `reservedAmount <= stock`), `@Unique` on `productId`, `@Index` on `productId`, and a derived `available` getter in `src/modules/inventory/entities/inventory.entity.ts`
+- [x] T004 Add inverse read-only `@OneToOne(() => Inventory)` relation to `Product` in `src/modules/products/entities/product.entity.ts` (keep `stock` column for now — removed in US1)
+- [x] T005 Register `Inventory` entity / repository provider in `src/modules/inventory/inventory.module.ts` (import `ProductsModule`)
 
 **Checkpoint**: Inventory entity exists with constraints; Product links back. User stories can now begin.
 
@@ -48,10 +48,10 @@
 
 ### Implementation for User Story 1
 
-- [ ] T006 [US1] Implement `InventorySeeder` (idempotent, runs once via `onModuleInit`) that creates one `Inventory` per `Product`, copying `Product.stock` → `stock`, `reservedAmount = 0`, in `src/modules/inventory/inventory.seeder.ts`. Guard: skip products that already have an `Inventory`, and tolerate the `Product.stock` column already being removed on later runs.
-- [ ] T007 [US1] Wire `InventorySeeder` into `InventoryModule.onModuleInit` in `src/modules/inventory/inventory.module.ts` (idempotent guard so re-boots do not fail or duplicate).
-- [ ] T008 [US1] Ensure new-product creation auto-creates inventory: `ProductsModule` imports `InventoryModule`; `ProductsService.create` (GraphQL) calls `InventoryService.createForProduct(productId, initialStock = 0)` so every newly created `Product` gets an `Inventory` row. Add `createForProduct` to `src/modules/inventory/inventory.service.ts` and export the service.
-- [ ] T009 [US1] Remove `stock` column and its `@Check('"stock" >= 0')` from `Product` entity in `src/modules/products/entities/product.entity.ts` (only after the seeder has run once and new-product creation is wired).
+- [x] T006 [US1] Implement `InventorySeeder` (idempotent, runs once via `onModuleInit`) that creates one `Inventory` per `Product`, copying `Product.stock` → `stock`, `reservedAmount = 0`, in `src/modules/inventory/inventory.seeder.ts`. Guard: skip products that already have an `Inventory`, and tolerate the `Product.stock` column already being removed on later runs.
+- [x] T007 [US1] Wire `InventorySeeder` into `InventoryModule.onModuleInit` in `src/modules/inventory/inventory.module.ts` (idempotent guard so re-boots do not fail or duplicate).
+- [x] T008 [US1] Ensure new-product creation auto-creates inventory: `ProductsModule` imports `InventoryModule`; `ProductsService.create` (GraphQL) calls `InventoryService.createForProduct(productId, initialStock = 0)` so every newly created `Product` gets an `Inventory` row. Add `createForProduct` to `src/modules/inventory/inventory.service.ts` and export the service.
+- [x] T009 [US1] Remove `stock` column and its `@Check('"stock" >= 0')` from `Product` entity in `src/modules/products/entities/product.entity.ts` (only after the seeder has run once and new-product creation is wired).
 
 **Checkpoint**: Inventory is the authoritative stock owner for existing and new products; no `Product.stock` remains. MVP demonstrable.
 
@@ -65,11 +65,11 @@
 
 ### Implementation for User Story 2
 
-- [ ] T010 [US2] Implement `getInventory(productId)` and `checkAvailability(productId, qty)` in `src/modules/inventory/inventory.service.ts`
-- [ ] T011 [US2] Implement `increaseStock(productId, qty)` and `decreaseStock(productId, qty)` with invariant checks and `ConflictException` on violation in `src/modules/inventory/inventory.service.ts`
-- [ ] T012 [US2] Redirect `decreaseStockForOrderMany` / `restoreStockForOrderMany` to operate on `Inventory`: change their parameter type from `Array<Pick<Product, 'id' | 'stock'> & { soldQuantity: number }>` to `Array<Pick<Inventory, 'id' | 'stock'> & { soldQuantity: number }>` and persist via `manager.getRepository(Inventory)` in `src/modules/inventory/inventory.service.ts`
-- [ ] T013 [US2] Add stub `reserve(productId, qty)` / `releaseReservation(productId, qty)` / `completeSale(productId, qty)` with correct inventory math (transactional locking wired in Phase 3/4) in `src/modules/inventory/inventory.service.ts`
-- [ ] T014 [US2] Ensure `InventoryService` is exported from `InventoryModule` in `src/modules/inventory/inventory.module.ts`
+- [x] T010 [US2] Implement `getInventory(productId)` and `checkAvailability(productId, qty)` in `src/modules/inventory/inventory.service.ts`
+- [x] T011 [US2] Implement `increaseStock(productId, qty)` and `decreaseStock(productId, qty)` with invariant checks and `ConflictException` on violation in `src/modules/inventory/inventory.service.ts`
+- [x] T012 [US2] Redirect `decreaseStockForOrderMany` / `restoreStockForOrderMany` to operate on `Inventory`: change their parameter type from `Array<Pick<Product, 'id' | 'stock'> & { soldQuantity: number }>` to `Array<Pick<Inventory, 'id' | 'stock'> & { soldQuantity: number }>` and persist via `manager.getRepository(Inventory)` in `src/modules/inventory/inventory.service.ts`
+- [x] T013 [US2] Add stub `reserve(productId, qty)` / `releaseReservation(productId, qty)` / `completeSale(productId, qty)` with correct inventory math (transactional locking wired in Phase 3/4) in `src/modules/inventory/inventory.service.ts`
+- [x] T014 [US2] Ensure `InventoryService` is exported from `InventoryModule` in `src/modules/inventory/inventory.module.ts`
 
 **Checkpoint**: Other modules can use `InventoryService` for all stock/reservation math.
 
@@ -83,9 +83,9 @@
 
 ### Implementation for User Story 3
 
-- [ ] T015 [US3] Create DTOs `IncreaseStockDto`/`DecreaseStockDto` (`quantity: number`, `@IsInt() @Min(1)`) and a response DTO in `src/modules/inventory/dto/`
-- [ ] T016 [US3] Implement `inventory.controller.ts` with `GET /inventory/:productId`, `GET /inventory/:productId/availability`, `POST /inventory/:productId/increase`, `POST /inventory/:productId/decrease` (thin; `@Auth` protected) per `contracts/inventory-api.md` in `src/modules/inventory/inventory.controller.ts`
-- [ ] T017 [US3] Register the controller in `InventoryModule` in `src/modules/inventory/inventory.module.ts`
+- [x] T015 [US3] Create DTOs `IncreaseStockDto`/`DecreaseStockDto` (`quantity: number`, `@IsInt() @Min(1)`) and a response DTO in `src/modules/inventory/dto/`
+- [x] T016 [US3] Implement `inventory.controller.ts` with `GET /inventory/:productId`, `GET /inventory/:productId/availability`, `POST /inventory/:productId/increase`, `POST /inventory/:productId/decrease` (thin; `@Auth` protected) per `contracts/inventory-api.md` in `src/modules/inventory/inventory.controller.ts`
+- [x] T017 [US3] Register the controller in `InventoryModule` in `src/modules/inventory/inventory.module.ts`
 
 **Checkpoint**: Inventory is queryable/adjustable via REST; controller holds no business logic.
 
@@ -99,9 +99,9 @@
 
 ### Tests for User Story 4
 
-- [ ] T018 [US4] Write/expand unit tests for `InventoryService` math and error throwing in `src/modules/inventory/inventory.service.spec.ts`; include an assertion that `Product` (imported entity) has no `stock` property and no code path reads it.
-- [ ] T019 [US4] Write integration tests (real PostgreSQL) asserting `@Check` constraints, `productId` uniqueness, `available` derivation, and that the `Product` table/entity has no `stock` column, in `src/modules/inventory/test/inventory.integration.spec.ts`
-- [ ] T020 [P] [US4] Run `npm run lint`, `npm run build`, `npm run test` and confirm all green
+- [x] T018 [US4] Write/expand unit tests for `InventoryService` math and error throwing in `src/modules/inventory/inventory.service.spec.ts`; include an assertion that `Product` (imported entity) has no `stock` property and no code path reads it.
+- [x] T019 [US4] Write integration tests (real PostgreSQL) asserting `@Check` constraints, `productId` uniqueness, `available` derivation, and that the `Product` table/entity has no `stock` column, in `src/modules/inventory/test/inventory.integration.spec.ts`
+- [x] T020 [P] [US4] Run `npm run lint`, `npm run build`, `npm run test` and confirm all green
 
 **Checkpoint**: Behavior is verified against the real database; constraints enforced; `Product.stock` removal verified.
 
@@ -111,10 +111,10 @@
 
 **Purpose**: Documentation and decision records required by constitution Principle IX.
 
-- [ ] T021 [P] Update `AGENTS.md` module map: `inventory` now has an entity, service, and REST API
-- [ ] T022 [P] Add/refresh `docs/architecture/inventory.md` describing the Inventory domain
-- [ ] T023 [P] Record the `Product.stock` removal decision as an ADR in `docs/decisions/`
-- [ ] T024 Run `quickstart.md` validation end-to-end and confirm migration note (disable `synchronize` + add real migration before prod)
+- [x] T021 [P] Update `AGENTS.md` module map: `inventory` now has an entity, service, and REST API
+- [x] T022 [P] Add/refresh `docs/architecture/inventory.md` describing the Inventory domain
+- [x] T023 [P] Record the `Product.stock` removal decision as an ADR in `docs/decisions/`
+- [x] T024 Run `quickstart.md` validation end-to-end and confirm migration note (disable `synchronize` + add real migration before prod)
 
 ---
 

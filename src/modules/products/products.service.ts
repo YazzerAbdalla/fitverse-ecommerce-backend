@@ -6,15 +6,17 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import { CreateProductInput } from './dto/create-product.input';
 import { UpdateProductInput } from './dto/update-product.input';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Product } from './entities/product.entity';
-import { Repository, MoreThan, In, DataSource } from 'typeorm';
+import { Repository, In, DataSource } from 'typeorm';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { ManyPartialProducts } from './types';
 import { PaginationArgs } from './dto/pagination.dto';
+import { InventoryService } from '../inventory/inventory.service';
 
 @Injectable()
 export class ProductsService {
@@ -24,13 +26,18 @@ export class ProductsService {
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     private readonly logger: Logger,
     private readonly dataSource: DataSource,
+    @Inject(forwardRef(() => InventoryService))
+    private readonly inventoryService: InventoryService,
   ) {}
 
   async create(createProductInput: CreateProductInput) {
     // Make slug for the product for the frontend url
     // Check the name and slug if are they already existed or not
 
-    const { name } = createProductInput;
+    const { name, stock, ...rest } =
+      createProductInput as CreateProductInput & {
+        stock?: number;
+      };
 
     const slug = slugify(name, {
       lower: true,
@@ -47,16 +54,39 @@ export class ProductsService {
       );
     }
 
-    return this.productsRepo.save(createProductInput);
+    const productToSave = this.productsRepo.create({
+      ...rest,
+      name,
+      slug,
+    } as Partial<Product>);
+
+    const savedProduct = await this.productsRepo.save(productToSave);
+
+    const initialStock =
+      typeof stock === 'number' && Number.isFinite(stock) ? stock : 0;
+
+    await this.inventoryService.createForProduct(savedProduct.id, initialStock);
+
+    return savedProduct;
   }
 
   async createMany(createProductInputs: CreateProductInput[]) {
-    const newProducts = this.productsRepo.create(createProductInputs);
+    // Extract stock from inputs; product entity no longer stores it
+    const inputsWithStock = createProductInputs.map((input) => {
+      const { stock, ...rest } = input as CreateProductInput & {
+        stock?: number;
+      };
+      return { rest, stock };
+    });
+
+    const productEntities = inputsWithStock.map(({ rest }) =>
+      this.productsRepo.create(rest as Partial<Product>),
+    );
 
     const uniqueNamesInRequest = new Set<string>();
     const uniqueSlugs = new Set<string>();
 
-    for (const product of newProducts) {
+    for (const product of productEntities) {
       if (uniqueNamesInRequest.has(product.name)) {
         throw new BadRequestException(
           `Duplicate product ${product.name} in request`,
@@ -75,22 +105,51 @@ export class ProductsService {
       where: [{ name: In(names) }, { slug: In([...uniqueSlugs]) }],
     });
 
-    if (!existingProducts || existingProducts.length === 0)
-      return this.productsRepo.save(newProducts);
+    let toSave: Product[];
 
-    const existingNames = new Set<string>(existingProducts.map((p) => p.name));
-    const existingSlugs = new Set<string>(existingProducts.map((p) => p.slug));
-    const filteredUniqueProducts = newProducts.filter(
-      ({ name, slug }) => !existingNames.has(name) && !existingSlugs.has(slug),
-    );
+    if (!existingProducts || existingProducts.length === 0) {
+      toSave = productEntities;
+    } else {
+      const existingNames = new Set<string>(
+        existingProducts.map((p) => p.name),
+      );
+      const existingSlugs = new Set<string>(
+        existingProducts.map((p) => p.slug),
+      );
+      toSave = productEntities.filter(
+        ({ name, slug }) =>
+          !existingNames.has(name) && !existingSlugs.has(slug),
+      );
 
-    if (filteredUniqueProducts.length === 0) {
-      throw new BadRequestException(
-        'All the input products names or slugs are exists.',
+      if (toSave.length === 0) {
+        throw new BadRequestException(
+          'All the input products names or slugs are exists.',
+        );
+      }
+    }
+
+    const saved = await this.productsRepo.save(toSave);
+
+    // Create inventory for each newly created product, preserving original stock
+    for (let i = 0; i < saved.length; i++) {
+      const savedProduct = saved[i];
+      // Find original input matching saved product by name
+      const original = inputsWithStock.find(
+        ({ rest }) => rest.name === savedProduct.name,
+      );
+      const initialStock =
+        original &&
+        typeof original.stock === 'number' &&
+        Number.isFinite(original.stock)
+          ? original.stock
+          : 0;
+      await this.inventoryService.createForProduct(
+        savedProduct.id,
+        initialStock,
       );
     }
 
-    return this.productsRepo.save(filteredUniqueProducts);
+    return saved;
   }
 
   async findAll(paginationArgs: PaginationArgs) {
@@ -111,7 +170,6 @@ export class ProductsService {
 
     // TODO: Add the search and filters in the future
     const [data, total] = await this.productsRepo.findAndCount({
-      where: { stock: MoreThan(0) },
       take: limit,
       skip,
     });
@@ -144,7 +202,10 @@ export class ProductsService {
         `Trying to update a product that doesn't exist`,
       );
 
-    this.productsRepo.merge(product, updateProductInput);
+    const { stock: _stock, ...restInput } =
+      updateProductInput as UpdateProductInput & { stock?: number };
+
+    this.productsRepo.merge(product, restInput);
 
     return this.productsRepo.save(product);
   }
@@ -184,8 +245,9 @@ export class ProductsService {
         const partialData = manyPartialProducts.find(
           (p) => p.id === existingProduct.id,
         );
-
-        return manager.merge(Product, existingProduct, partialData!);
+        const { stock: _stock, ...sanitized } =
+          (partialData as Record<string, unknown>) || {};
+        return manager.merge(Product, existingProduct, sanitized);
       });
 
       // Save the updated array to db

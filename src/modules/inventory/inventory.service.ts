@@ -1,64 +1,220 @@
-import { ConflictException, Injectable } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
-import { Product } from '../products/entities/product.entity';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  forwardRef,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { EntityManager, Repository } from 'typeorm';
+import { Inventory } from './entities/inventory.entity';
 import { ProductsService } from '../products/products.service';
 
 @Injectable()
 export class InventoryService {
-  // This service responsible for update the stock number for the products
-  // This service will used inside the order service after check the products
-  // to update one
-  // or update many at once
-  // to increment or decrement stock
-  // and to integrate with the reservation service to reserve products shortly to prevent race condition
+  private readonly logger = new Logger(InventoryService.name);
 
-  constructor(private readonly productsService: ProductsService) {}
+  constructor(
+    @InjectRepository(Inventory)
+    private readonly inventoryRepo: Repository<Inventory>,
+    @Inject(forwardRef(() => ProductsService))
+    private readonly productsService: ProductsService,
+  ) {}
+
+  async createForProduct(
+    productId: string,
+    initialStock = 0,
+  ): Promise<Inventory> {
+    if (initialStock < 0) {
+      throw new ConflictException('Initial stock cannot be negative');
+    }
+
+    const existing = await this.inventoryRepo.findOne({
+      where: { productId },
+    });
+    if (existing) {
+      this.logger.debug(`Inventory already exists for product ${productId}`);
+      return existing;
+    }
+
+    const inventory = this.inventoryRepo.create({
+      productId,
+      stock: initialStock,
+      reservedAmount: 0,
+    });
+
+    const saved = await this.inventoryRepo.save(inventory);
+    this.logger.log(
+      `Created inventory for product ${productId} with stock ${initialStock}`,
+    );
+    return saved;
+  }
+
+  async getInventory(productId: string): Promise<Inventory> {
+    const inventory = await this.inventoryRepo.findOne({
+      where: { productId },
+    });
+
+    if (!inventory) {
+      throw new NotFoundException(
+        `Inventory for product ${productId} not found`,
+      );
+    }
+
+    return inventory;
+  }
+
+  async checkAvailability(
+    productId: string,
+    neededQuantity: number,
+  ): Promise<boolean> {
+    if (!Number.isInteger(neededQuantity) || neededQuantity <= 0) {
+      throw new ConflictException('Quantity must be a positive integer');
+    }
+
+    const inventory = await this.getInventory(productId);
+
+    return inventory.available >= neededQuantity;
+  }
+
+  async increaseStock(productId: string, quantity: number): Promise<Inventory> {
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new ConflictException('Quantity must be a positive integer');
+    }
+
+    const inventory = await this.getInventory(productId);
+    inventory.stock += quantity;
+
+    return this.inventoryRepo.save(inventory);
+  }
+
+  async decreaseStock(productId: string, quantity: number): Promise<Inventory> {
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new ConflictException('Quantity must be a positive integer');
+    }
+
+    const inventory = await this.getInventory(productId);
+
+    if (inventory.stock - quantity < 0) {
+      throw new ConflictException(
+        `Insufficient stock for product ${productId}. Available stock: ${inventory.stock}, requested: ${quantity}`,
+      );
+    }
+
+    inventory.stock -= quantity;
+
+    // Ensure invariant reservedAmount <= stock after decrease
+    if (inventory.reservedAmount > inventory.stock) {
+      throw new ConflictException(
+        `Cannot decrease stock below reserved amount for product ${productId}`,
+      );
+    }
+
+    return this.inventoryRepo.save(inventory);
+  }
 
   async decreaseStockForOrderMany(
     manager: EntityManager,
-    products: Array<Pick<Product, 'id' | 'stock'> & { soldQuantity: number }>,
-  ) {
-    // Take the products from those in the cart and passed from order service after
-    // The order service responsible for check the products , find them , make pessimistic lock , and pass
-    // Decrement the stock according to the soldQuantity that passed
-    const updatedProducts = products.map((product) => ({
-      id: product.id,
-      stock: product.stock - product.soldQuantity,
-    }));
+    products: Array<Pick<Inventory, 'id' | 'stock'> & { soldQuantity: number }>,
+  ): Promise<Inventory[]> {
+    const inventoryRepo = manager.getRepository(Inventory);
 
-    return manager.getRepository(Product).save(updatedProducts);
+    const updates = products.map((p) => {
+      const newStock = p.stock - p.soldQuantity;
+      if (newStock < 0) {
+        throw new ConflictException(`Insufficient stock for inventory ${p.id}`);
+      }
+      return { id: p.id, stock: newStock };
+    });
+
+    return inventoryRepo.save(updates);
   }
 
   async restoreStockForOrderMany(
     manager: EntityManager,
-    products: Array<Pick<Product, 'id' | 'stock'> & { soldQuantity: number }>,
-  ) {
-    // This method used in case the user decide to refunde the order or order canceled
+    products: Array<Pick<Inventory, 'id' | 'stock'> & { soldQuantity: number }>,
+  ): Promise<Inventory[]> {
+    const inventoryRepo = manager.getRepository(Inventory);
 
-    const productRepo = manager.getRepository(Product);
-
-    const updatedProducts = products.map((p) => ({
+    const updates = products.map((p) => ({
       id: p.id,
       stock: p.stock + p.soldQuantity,
     }));
 
-    return productRepo.save(updatedProducts);
+    return inventoryRepo.save(updates);
   }
 
-  async increaseStock() {}
+  async reserve(productId: string, quantity: number): Promise<Inventory> {
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new ConflictException('Quantity must be a positive integer');
+    }
 
-  async checkAvailability(productId: string, neededQuantity: number) {
-    const pickedProduct = await this.productsService.findOne(productId);
+    const inventory = await this.getInventory(productId);
 
-    const isQuantityAvailable = pickedProduct!.stock >= neededQuantity;
-
-    if (!pickedProduct || isQuantityAvailable)
+    if (inventory.available < quantity) {
       throw new ConflictException(
-        `Product's stock can not serve this needed quantity ${neededQuantity}`,
+        `Insufficient available inventory for product ${productId}. Available: ${inventory.available}, requested: ${quantity}`,
       );
+    }
 
-    return true;
+    inventory.reservedAmount += quantity;
+
+    return this.inventoryRepo.save(inventory);
   }
 
-  checkAvailabilityMany() {}
+  async releaseReservation(
+    productId: string,
+    quantity: number,
+  ): Promise<Inventory> {
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new ConflictException('Quantity must be a positive integer');
+    }
+
+    const inventory = await this.getInventory(productId);
+
+    if (inventory.reservedAmount - quantity < 0) {
+      throw new ConflictException(
+        `Cannot release more than reserved for product ${productId}`,
+      );
+    }
+
+    inventory.reservedAmount -= quantity;
+
+    return this.inventoryRepo.save(inventory);
+  }
+
+  async completeSale(productId: string, quantity: number): Promise<Inventory> {
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new ConflictException('Quantity must be a positive integer');
+    }
+
+    const inventory = await this.getInventory(productId);
+
+    if (inventory.reservedAmount - quantity < 0) {
+      throw new ConflictException(
+        `Cannot complete sale: not enough reserved for product ${productId}`,
+      );
+    }
+
+    if (inventory.stock - quantity < 0) {
+      throw new ConflictException(
+        `Insufficient stock to complete sale for product ${productId}`,
+      );
+    }
+
+    inventory.stock -= quantity;
+    inventory.reservedAmount -= quantity;
+
+    return this.inventoryRepo.save(inventory);
+  }
+
+  // Deprecated compatibility alias
+  checkAvailabilityMany(): never {
+    throw new ConflictException('Not implemented');
+  }
+
+  increaseStockLegacy(): never {
+    throw new ConflictException('Not implemented');
+  }
 }

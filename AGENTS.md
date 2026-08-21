@@ -72,19 +72,17 @@ RabbitMQ    ◄──── async notifications (published AFTER the DB commit)
 | --- | --- | --- |
 | `auth` | REST | JWT login/register, `Auth`/`CurrentUser` decorators, `JwtGuard`, `RolesGuard` |
 | `users` | — | User entity, `UserRoles` enum, CRUD-by-email |
-| `products` | **GraphQL** | Product entity + resolver; list caching; `updateMany` uses pessimistic locking |
-| `cart` | REST | Per-user cart, cart items (eager product); stock checks only (no reservation) |
+| `products` | **GraphQL** | Product entity + resolver; list caching; `updateMany` uses pessimistic locking; **no `stock` field** — inventory owned by Inventory domain |
+| `cart` | REST | Per-user cart, cart items (eager product); stock checks via `InventoryService.getInventory` (available = stock - reservedAmount) |
 | `order` | REST | **Stub** — controller returns placeholder strings; `CreateOrderDto` empty; not implemented |
-| `inventory` | — | `InventoryService` with `decreaseStockForOrderMany` / `restoreStockForOrderMany` on `EntityManager`; **no entity yet** |
+| `inventory` | REST | `Inventory` entity (`stock`, `reservedAmount`, `available` derived) with DB constraints (`stock >=0`, `reservedAmount >=0`, `reservedAmount <= stock`, unique `productId`); `InventoryService` business API (`getInventory`, `checkAvailability`, `increaseStock`, `decreaseStock`, `decreaseStockForOrderMany`/`restoreStockForOrderMany` via `EntityManager`, plus `reserve`/`releaseReservation`/`completeSale` stubs); thin REST controller (`GET /inventory/:productId`, `GET .../availability?quantity=`, `POST .../increase`, `POST .../decrease`); `InventorySeeder` (idempotent `onModuleInit`) seeds & auto-creates inventory |
 
 ### Boundaries (enforce)
 
 - A module exposes business operations via its **service**. Other modules import
   the service (and the module must `exports: [Service]`) — they must **not**
   `@InjectRepository` of another module's entity.
-- `InventoryService` is the only place that should mutate `Product.stock`. Today
-  it is called with an `EntityManager` passed in by the caller; the caller owns
-  the transaction. See `docs/architecture/inventory-reservation.md`.
+- `InventoryService` is the only place that should mutate `Inventory.stock`/`reservedAmount` (`available` derived). Product no longer owns stock. `InventoryService` methods `decreaseStockForOrderMany`/`restoreStockForOrderMany` are called with an `EntityManager` passed in by the caller; the caller owns the transaction. See `docs/architecture/inventory-reservation.md`.
 - PostgreSQL is authoritative. Redis and RabbitMQ are infrastructure, never a
   source of truth for inventory or orders.
 
@@ -145,8 +143,7 @@ Follow the existing structure under `src/modules/<name>/`:
   `Product.name`). Don't index every column. Candidates for future
   inventory/reservation tables are listed in `docs/plan.md` §26.
 - **Constraints** — enforce invariants in the DB, not only in code
-  (`@Check`, `@Unique`, `NOT NULL`). Example already present:
-  `Product` has `@Check('"stock" >= 0')` and `@Unique(['name'])`.
+  (`@Check`, `@Unique`, `NOT NULL`). Examples: `Inventory` has `@Check('"stock" >= 0')`, `@Check('"reservedAmount" >= 0')`, `@Check('"reservedAmount" <= "stock"')`, `@Unique(['productId'])`; `Product` has `@Unique(['name'])`.
 - **Transactions** — mandatory for any write touching multiple related rows
   (reservation + inventory, order + inventory). Use `EntityManager` inside
   `dataSource.transaction`.

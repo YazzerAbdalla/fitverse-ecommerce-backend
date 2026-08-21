@@ -10,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 
 import { ProductsService } from '../products/products.service';
+import { InventoryService } from '../inventory/inventory.service';
 import { CartItem } from './entities/cart-items.entity';
 import { Cart } from './entities/cart.entity';
 import {
@@ -28,6 +29,8 @@ export class CartService {
     private readonly cartItemRepository: Repository<CartItem>,
 
     private readonly productsService: ProductsService,
+
+    private readonly inventoryService: InventoryService,
 
     private readonly logger: Logger,
   ) {}
@@ -118,16 +121,13 @@ export class CartService {
       const newQuantity = existingCartItem.quantity + quantity;
 
       /**
-       * Validate current stock availability.
-       *
-       * This is only a cart-level validation.
-       * Inventory is not reserved or decremented here.
-       * Final stock validation and inventory mutation happen during checkout/order creation.
+       * Validate current stock availability via inventory.
        */
-      if (newQuantity > product.stock) {
+      const inventory = await this.inventoryService.getInventory(productId);
+      if (newQuantity > inventory.available) {
         this.logger.warn(
           `Insufficient stock for product ${productId}. ` +
-            `Requested quantity: ${newQuantity}, stock: ${product.stock}`,
+            `Requested quantity: ${newQuantity}, available: ${inventory.available}`,
         );
 
         throw new ConflictException(
@@ -154,16 +154,13 @@ export class CartService {
     }
 
     /**
-     * Validate current stock availability.
-     *
-     * This is only a cart-level validation.
-     * Inventory is not reserved or decremented here.
-     * Final stock validation and inventory mutation happen during checkout/order creation.
+     * Validate current stock availability via inventory.
      */
-    if (quantity > product.stock) {
+    const inventory = await this.inventoryService.getInventory(productId);
+    if (quantity > inventory.available) {
       this.logger.warn(
         `Insufficient stock for product ${productId}. ` +
-          `Requested quantity: ${quantity}, stock: ${product.stock}`,
+          `Requested quantity: ${quantity}, available: ${inventory.available}`,
       );
 
       throw new ConflictException(
@@ -270,10 +267,11 @@ export class CartService {
 
     const newQuantity = cartItem.quantity + quantity;
 
-    if (newQuantity > cartItem.product.stock) {
+    const inventory = await this.inventoryService.getInventory(productId);
+    if (newQuantity > inventory.available) {
       this.logger.warn(
         `Insufficient stock for product ${productId}. ` +
-          `Requested: ${newQuantity}, available: ${cartItem.product.stock}`,
+          `Requested: ${newQuantity}, available: ${inventory.available}`,
       );
 
       throw new ConflictException(
