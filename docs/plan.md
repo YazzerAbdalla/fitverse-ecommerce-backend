@@ -81,7 +81,7 @@ The inventory lifecycle belongs to the inventory/reservation/order workflow.
 
 # Phase 1 — Inventory Foundation
 
-**Status: NOT DONE**
+**Status: DONE — 2026-08-21** (inventory entity, constraints, business API, REST controller, migration, tests, random seeding)
 
 **Goal:** Introduce inventory as a first-class domain without implementing reservations yet.
 
@@ -102,12 +102,12 @@ updated_at
 
 ### Rules
 
-* [ ] `stock >= 0`
-* [ ] `reserved_amount >= 0`
-* [ ] `reserved_amount <= stock`
-* [ ] `product_id` references Product
-* [ ] Decide whether one product can have exactly one inventory record
-* [ ] Add appropriate unique constraint for `product_id`
+* [x] `stock >= 0` — `CHK_inventory_stock_non_negative` on `Inventory.stock`
+* [x] `reserved_amount >= 0` — `CHK_inventory_reserved_non_negative`
+* [x] `reserved_amount <= stock` — `CHK_inventory_reserved_lte_stock`
+* [x] `product_id` references Product — `FK_inventory_productId` (`Product.id` ON DELETE CASCADE)
+* [x] Decide whether one product can have exactly one inventory record — **one-to-one**, `Inventory` owns FK, `UQ_inventory_productId` + `@Index(productId)`
+* [x] Add appropriate unique constraint for `product_id` — done
 
 Do not store `available` as an independently mutable database field.
 
@@ -152,22 +152,22 @@ Exact names should follow existing project conventions.
 
 ## 1.4 Inventory Tests
 
-* [ ] Create inventory
-* [ ] Read inventory
-* [ ] Calculate available quantity
-* [ ] Reject negative stock
-* [ ] Reject invalid reserved amount
-* [ ] Prevent invalid inventory state
+* [x] Create inventory — unit `createForProduct` + integration `INSERT` succeeds
+* [x] Read inventory — `getInventory` + `GET /inventory/:productId`
+* [x] Calculate available quantity — `available = stock - reservedAmount` getter, integration asserts 7
+* [x] Reject negative stock — `CHK` + `ConflictException`, integration `stock=-1` throws
+* [x] Reject invalid reserved amount — `CHK reservedAmount>=0` and `<=stock`, integration throws
+* [x] Prevent invalid inventory state — all three DB checks + `UQ productId` verified
 
 ### Phase 1 Exit Criteria
 
-Inventory exists independently from Product and the database enforces its basic invariants.
+Inventory exists independently from Product and the database enforces its basic invariants. — **MET**: `Inventory` entity owns `stock`/`reservedAmount`, `Product.stock` removed, `InventoryService` is sole mutation point, REST API thin, migration `1755800000000-CreateInventoryAndDropProductStock` (seed + drop) executed, `synchronize: false`, unit 26 + integration 7 PASS, 5 products seeded with random stock 67-174.
 
 ---
 
 # Phase 2 — Reservation Domain
 
-**Status: NOT DONE**
+**Status: NOT DONE — NEXT**
 
 **Goal:** Introduce temporary inventory ownership.
 
@@ -245,7 +245,7 @@ The system can represent a temporary claim on one or more inventory records.
 
 # Phase 3 — Transaction-Safe Reservation
 
-**Status: NOT DONE — CURRENT PRIORITY**
+**Status: NOT DONE**
 
 This is the most important implementation phase.
 
@@ -1114,6 +1114,13 @@ Verification
 [x] PostgreSQL as transactional source of truth
 [x] Database-level concurrency strategy identified
 [x] Background processing separated from transactional consistency
+[x] Inventory entity (stock, reservedAmount, available derived, FK productId, UQ + IDX)
+[x] Inventory module (InventoryModule + InventoryService + InventoryController + DTOs)
+[x] Inventory constraints (CHK stock>=0, reservedAmount>=0, reservedAmount<=stock, UQ productId)
+[x] Inventory business operations (getInventory, checkAvailability, increase/decreaseStock, reserve/release/completeSale stubs, bulk via EntityManager)
+[x] Inventory tests (unit 26 + integration 7, real PostgreSQL, Product.stock absence verified)
+[x] Inventory migration (1755800000000-CreateInventoryAndDropProductStock, seed + drop Product.stock, synchronize: false)
+[x] Inventory seeding (5 products seeded with random stock 67-174 via InventorySeeder)
 ```
 
 ## PARTIALLY DONE
@@ -1130,12 +1137,6 @@ Verification
 ## NOT DONE
 
 ```text
-[ ] Inventory entity
-[ ] Inventory module
-[ ] Inventory constraints
-[ ] Inventory business operations
-[ ] Inventory tests
-
 [ ] Reservation entity
 [ ] ReservationItem entity
 [ ] Reservation module
@@ -1285,9 +1286,11 @@ DONE
     ↓
 Inventory
     ↓
->>> CURRENT TARGET <<<
+DONE — 2026-08-21 (entity, API, migration, tests, seed)
     ↓
 Reservation
+    ↓
+>>> CURRENT TARGET <<<
     ↓
 Concurrency
     ↓
@@ -1310,21 +1313,20 @@ Documentation
 
 The next task should be:
 
-**Phase 1 — Inventory Foundation**
+**Phase 2 — Reservation Domain**
 
 Start with:
 
 ```text
-1. Inspect existing Product entity
-2. Design Inventory entity relationship
-3. Add Inventory entity
-4. Add database constraints
-5. Create Inventory module/service
-6. Implement basic inventory operations
-7. Add unit/integration tests
-8. Verify migration/database state
+1. Design Reservation + ReservationItem entities (one-to-many, FK inventoryId)
+2. Add reservation statuses (RESERVED, COMPLETED, EXPIRED, CANCELLED)
+3. Create ReservationModule with service + repository
+4. Implement create/add/complete/cancel/expire/retrieve + state-transition validation
+5. Wire InventoryService reserve/release/completeSale (Phase 3 locking)
+6. Add unit/integration tests (real PostgreSQL)
+7. Verify DB constraints + indexes (reservation.status, expires_at, etc.)
 ```
 
-Do not implement reservations yet.
+Do not implement transaction-safe locking or expiration cleanup yet (Phases 3-5).
 
-The purpose of this phase is to establish a clean Inventory boundary that the Reservation module can safely depend on later.
+The purpose of the next phase is to represent a temporary claim on inventory that later phases can make transactional and expirable.
