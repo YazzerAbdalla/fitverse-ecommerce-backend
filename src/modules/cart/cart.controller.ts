@@ -19,9 +19,8 @@ import { UserRoles } from '../users/enum/roles';
 import { CartService } from './cart.service';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemQuantityDto } from './dto/update-cart-item-quantity.dto';
-import { Cart } from './entities/cart.entity';
 import { CartItem } from './entities/cart-items.entity';
-import { AddCartItemProps } from './types';
+import { Cart } from './entities/cart.entity';
 
 @Controller('cart')
 @ApiTags('Cart')
@@ -63,7 +62,7 @@ export class CartController {
   addItem(
     @CurrentUser('sub') userId: string,
     @Body() addCartItemDto: AddCartItemDto,
-  ): Promise<CartItem> {
+  ): Promise<Cart> {
     return this.cartService.addCartItem({
       userId,
       productId: addCartItemDto.productId,

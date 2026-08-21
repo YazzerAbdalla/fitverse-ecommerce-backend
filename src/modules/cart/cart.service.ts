@@ -2,11 +2,12 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 
 import { ProductsService } from '../products/products.service';
 import { CartItem } from './entities/cart-items.entity';
@@ -81,13 +82,15 @@ export class CartService {
   async addCartItem({ userId, productId, quantity = 1 }: AddCartItemProps) {
     this.logger.log(`Adding product ${productId} to cart for user ${userId}`);
 
+    /**
+     * Validate the quantity
+     */
+
     if (!Number.isInteger(quantity) || quantity <= 0) {
       this.logger.warn(`Invalid cart quantity ${quantity} for user ${userId}`);
 
       throw new BadRequestException('Quantity must be a positive integer.');
     }
-
-    const cart = await this.findOrCreateUserCart(userId);
 
     const product = await this.productsService.findOne(productId);
 
@@ -99,6 +102,11 @@ export class CartService {
       throw new NotFoundException('Product not found.');
     }
 
+    const cart = await this.findOrCreateUserCart(userId);
+
+    /**
+     * Check if the product already exist in the db
+     */
     const existingCartItem = await this.cartItemRepository.findOne({
       where: {
         product: { id: productId },
@@ -109,6 +117,13 @@ export class CartService {
     if (existingCartItem) {
       const newQuantity = existingCartItem.quantity + quantity;
 
+      /**
+       * Validate current stock availability.
+       *
+       * This is only a cart-level validation.
+       * Inventory is not reserved or decremented here.
+       * Final stock validation and inventory mutation happen during checkout/order creation.
+       */
       if (newQuantity > product.stock) {
         this.logger.warn(
           `Insufficient stock for product ${productId}. ` +
@@ -129,9 +144,22 @@ export class CartService {
         `Cart item ${updatedCartItem.id} quantity increased to ${newQuantity}`,
       );
 
-      return updatedCartItem;
+      const cartItemIndex = cart.cart_items.findIndex(
+        (ci) => ci.id === updatedCartItem.id,
+      );
+
+      cart.cart_items[cartItemIndex].quantity = newQuantity;
+
+      return cart;
     }
 
+    /**
+     * Validate current stock availability.
+     *
+     * This is only a cart-level validation.
+     * Inventory is not reserved or decremented here.
+     * Final stock validation and inventory mutation happen during checkout/order creation.
+     */
     if (quantity > product.stock) {
       this.logger.warn(
         `Insufficient stock for product ${productId}. ` +
@@ -143,17 +171,22 @@ export class CartService {
       );
     }
 
-    const cartItem = this.cartItemRepository.create({
+    const savedCartItem = await this.cartItemRepository.save({
       cart,
       product,
       quantity,
     });
 
-    const savedCartItem = await this.cartItemRepository.save(cartItem);
+    const responseCartItem = {
+      ...savedCartItem,
+      cart: {},
+    };
+
+    cart.cart_items.push(responseCartItem as CartItem);
 
     this.logger.log(`Cart item ${savedCartItem.id} added to cart ${cart.id}`);
 
-    return savedCartItem;
+    return cart;
   }
 
   /**
@@ -331,7 +364,7 @@ export class CartService {
         `from cart ${cart.id}`,
     );
 
-    this.deleteCartItemsInBackground(cartItems);
+    void this.deleteCartItemsInBackground(cartItems);
 
     cart.cart_items = [];
 
@@ -345,10 +378,14 @@ export class CartService {
    *
    * Note: this is fire-and-forget work, not a durable background job.
    */
-  private deleteCartItemsInBackground(cartItems: CartItem[]) {
-    this.cartItemRepository
-      .delete(cartItems)
+  private async deleteCartItemsInBackground(cartItems: CartItem[]) {
+    const cartItemsIds = cartItems.map(({ id }) => id);
+
+    return this.cartItemRepository
+      .delete({ id: In(cartItemsIds) })
       .then((result) => {
+        if (!result.affected || result.affected === 0)
+          throw new InternalServerErrorException();
         this.logger.debug(
           `Background cart-item deletion completed. ` +
             `Deleted: ${result.affected ?? 0}`,
