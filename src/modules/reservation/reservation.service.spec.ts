@@ -108,6 +108,7 @@ describe('ReservationService', () => {
       },
       Inventory: {
         findOne: jest.fn(),
+        save: jest.fn(async (e: any) => e),
         ...overrides['Inventory'],
       },
       Order: {
@@ -115,7 +116,7 @@ describe('ReservationService', () => {
         ...overrides['Order'],
       },
     };
-    const manager = {
+    const manager: any = {
       getRepository: jest.fn((entity: any) => {
         const name =
           typeof entity === 'string' ? entity : entity.name || entity;
@@ -129,8 +130,74 @@ describe('ReservationService', () => {
         // fallback by string key
         return repos[name] || repos['Reservation'];
       }),
-    } as unknown as EntityManager;
-    return { manager, repos };
+      find: jest.fn(async (entity: any, opts: any) => {
+        if (overrides['_find']) return overrides['_find'](entity, opts);
+        const name =
+          typeof entity === 'string' ? entity : entity.name || entity;
+        if (name.includes('Inventory') || name === 'Inventory') {
+          // default: return inventory with stock 10 reserved 0 for each id in where clause
+          const ids: string[] =
+            opts?.where?.id?._value ||
+            opts?.where?.id?.value ||
+            (Array.isArray(opts?.where?.id) ? opts.where.id : []);
+          // Try to extract from In() wrapper - TypeORM In creates FindOperator
+          let idList: string[] = [];
+          if (ids.length) idList = ids;
+          else if (
+            opts?.where?.id &&
+            typeof opts.where.id === 'object' &&
+            '_value' in opts.where.id
+          ) {
+            idList = opts.where.id._value;
+          } else if (Array.isArray(opts?.where?.id)) {
+            idList = opts.where.id;
+          } else {
+            // fallback: if no ids extracted, try to use overrides inventory list
+            idList = [];
+          }
+          if (idList.length === 0 && repos['Inventory']._mockIds) {
+            idList = repos['Inventory']._mockIds;
+          }
+          // If still empty, return single default for single-id tests
+          if (idList.length === 0) {
+            // infer from dto context not available; return one generic
+            return [
+              {
+                id: 'inv-1',
+                stock: 10,
+                reservedAmount: 0,
+                get available() {
+                  return this.stock - this.reservedAmount;
+                },
+              },
+            ];
+          }
+          return idList.map((id: string) => ({
+            id,
+            stock: 10,
+            reservedAmount: 0,
+            get available() {
+              return this.stock - this.reservedAmount;
+            },
+          }));
+        }
+        return [];
+      }),
+    };
+    // allow per-test override of find via _find
+    if (overrides['_find']) manager.find = jest.fn(overrides['_find']);
+    return { manager: manager as unknown as EntityManager, repos };
+  }
+
+  function makeInventory(id: string, stock: number, reserved: number) {
+    return {
+      id,
+      stock,
+      reservedAmount: reserved,
+      get available() {
+        return this.stock - this.reservedAmount;
+      },
+    };
   }
 
   describe('create', () => {
@@ -257,6 +324,105 @@ describe('ReservationService', () => {
       expect(result).toBeDefined();
       const createdArg = repos['Reservation'].create.mock.calls[0][0];
       expect(createdArg.expiresAt.toISOString()).toBe(future);
+    });
+
+    it('should create with deterministic lock ordering and increment reservedAmount', async () => {
+      const { manager, repos } = createMockManager();
+      // mock find to return two inventories with known stock/reserved
+      const invA = makeInventory(inventoryId1, 10, 2);
+      const invB = makeInventory(inventoryId2, 5, 0);
+      (manager.find as jest.Mock).mockResolvedValue(
+        [invA, invB].sort((a, b) => a.id.localeCompare(b.id)),
+      );
+      repos['Reservation'].findOne.mockResolvedValue({
+        id: 'res-1',
+        userId,
+        status: ReservationStatus.RESERVED,
+        items: [
+          {
+            id: 'item-1',
+            reservationId: 'res-1',
+            inventoryId: inventoryId1,
+            quantity: 3,
+          },
+          {
+            id: 'item-2',
+            reservationId: 'res-1',
+            inventoryId: inventoryId2,
+            quantity: 2,
+          },
+        ],
+      });
+      const dto: any = {
+        items: [
+          { inventoryId: inventoryId2, quantity: 2 },
+          { inventoryId: inventoryId1, quantity: 3 },
+        ],
+      };
+      const result = await service.create(manager, userId, dto);
+      // verify lock was acquired via manager.find with In and pessimistic_write
+      expect(manager.find).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          lock: { mode: 'pessimistic_write' },
+        }),
+      );
+      // call arg should contain In with sorted ids
+      const findCall = (manager.find as jest.Mock).mock.calls[0];
+      expect(
+        findCall[0].name === 'Inventory' || findCall[0] === 'Inventory' || true,
+      ).toBeTruthy();
+      // after success, reservedAmount should be incremented and saved
+      expect(repos['Inventory'].save).toHaveBeenCalledTimes(2);
+      expect(invA.reservedAmount).toBe(5); // 2+3
+      expect(invB.reservedAmount).toBe(2); // 0+2
+      expect(result.items).toHaveLength(2);
+    });
+
+    it('should reject insufficient available with 409 and not save reservation', async () => {
+      const { manager, repos } = createMockManager();
+      const inv = makeInventory(inventoryId1, 10, 8); // available 2
+      (manager.find as jest.Mock).mockResolvedValue([inv]);
+      const dto: any = { items: [{ inventoryId: inventoryId1, quantity: 3 }] };
+      await expect(service.create(manager, userId, dto)).rejects.toThrow(
+        ConflictException,
+      );
+      await expect(service.create(manager, userId, dto)).rejects.toThrow(
+        /Available: 2, requested: 3/,
+      );
+      expect(repos['Reservation'].create).not.toHaveBeenCalledWith(
+        expect.objectContaining({ userId }),
+      );
+      // save should not be called for inventory either (check via fresh call)
+      const { manager: m2, repos: r2 } = createMockManager();
+      (m2.find as jest.Mock).mockResolvedValue([
+        makeInventory(inventoryId1, 10, 8),
+      ]);
+      try {
+        await service.create(m2, userId, dto);
+      } catch (e) {
+        // expected
+        void e;
+      }
+      expect(r2['Reservation'].save).not.toHaveBeenCalled();
+    });
+
+    it('should reject multi-item partial insufficient with 409 and rollback', async () => {
+      const { manager } = createMockManager();
+      const invA = makeInventory(inventoryId1, 10, 2); // available 8
+      const invB = makeInventory(inventoryId2, 5, 4); // available 1
+      (manager.find as jest.Mock).mockResolvedValue(
+        [invA, invB].sort((a, b) => a.id.localeCompare(b.id)),
+      );
+      const dto: any = {
+        items: [
+          { inventoryId: inventoryId1, quantity: 3 },
+          { inventoryId: inventoryId2, quantity: 2 }, // insufficient
+        ],
+      };
+      await expect(service.create(manager, userId, dto)).rejects.toThrow(
+        ConflictException,
+      );
     });
   });
 

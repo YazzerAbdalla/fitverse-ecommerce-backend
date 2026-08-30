@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager } from 'typeorm';
+import { DataSource, EntityManager, In } from 'typeorm';
 import { Reservation } from './entities/reservation.entity';
 import { ReservationItem } from './entities/reservation-item.entity';
 import { ReservationStatus } from './entities/reservation-status.enum';
@@ -76,14 +76,33 @@ export class ReservationService {
       seen.add(item.inventoryId);
     }
 
+    // deterministic lock ordering to prevent deadlocks (FR-003/D2)
+    const sortedIds = [...new Set(dto.items.map((i) => i.inventoryId))].sort();
+    const lockedInventories = await manager.find(Inventory, {
+      where: { id: In(sortedIds) },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (lockedInventories.length !== sortedIds.length) {
+      const foundIds = new Set(lockedInventories.map((r) => r.id));
+      const missing = sortedIds.find((id) => !foundIds.has(id))!;
+      throw new NotFoundException(`Inventory ${missing} not found`);
+    }
+    const inventoryMap = new Map(lockedInventories.map((inv) => [inv.id, inv]));
+
+    for (const item of dto.items) {
+      const inv = inventoryMap.get(item.inventoryId)!;
+      if (inv.available < item.quantity) {
+        throw new ConflictException(
+          `Insufficient available inventory for ${item.inventoryId}. Available: ${inv.available}, requested: ${item.quantity}`,
+        );
+      }
+    }
+
     const inventoryRepo = manager.getRepository(Inventory);
     for (const item of dto.items) {
-      const inv = await inventoryRepo.findOne({
-        where: { id: item.inventoryId },
-      });
-      if (!inv) {
-        throw new NotFoundException(`Inventory ${item.inventoryId} not found`);
-      }
+      const inv = inventoryMap.get(item.inventoryId)!;
+      inv.reservedAmount += item.quantity;
+      await inventoryRepo.save(inv);
     }
 
     const reservationRepo = manager.getRepository(Reservation);

@@ -18,9 +18,9 @@
 
 **Purpose**: Verify foundation so a cheap model has zero guesswork; no code change in this phase except confirming prerequisites.
 
-- [ ] T001 Verify branch and feature directory in `D:\Projects\mini-e-commerce` — run `git branch --show-current` must be `003-transaction-safe-reservation` and `cat .specify/feature.json` must contain `specs/003-transaction-safe-reservation`; also `ls specs/003-transaction-safe-reservation/spec.md` and `plan.md` exist
-- [ ] T002 Verify PostgreSQL docker and env in `D:\Projects\mini-e-commerce` — run `docker compose ps` (postgres up), `cat .env` has `POSTGRES_*`, run `npm run build` must pass with zero errors before any code change
-- [ ] T003 Confirm no new migration is needed for Phase 3 in `src/data-source.ts` — open the file, verify `synchronize: false`, verify existing migration `1755850000000-CreateReservationAndReservationItem` already creates `Reservation`/`ReservationItem`/`Inventory` tables; document that Phase 3 uses existing `Inventory`/`Reservation`/`ReservationItem` only (spec A8, `data-model.md` §6)
+- [X] T001 Verify branch and feature directory in `D:\Projects\mini-e-commerce` — run `git branch --show-current` must be `003-transaction-safe-reservation` and `cat .specify/feature.json` must contain `specs/003-transaction-safe-reservation`; also `ls specs/003-transaction-safe-reservation/spec.md` and `plan.md` exist
+- [X] T002 Verify PostgreSQL docker and env in `D:\Projects\mini-e-commerce` — run `docker compose ps` (postgres up), `cat .env` has `POSTGRES_*`, run `npm run build` must pass with zero errors before any code change
+- [X] T003 Confirm no new migration is needed for Phase 3 in `src/data-source.ts` — open the file, verify `synchronize: false`, verify existing migration `1755850000000-CreateReservationAndReservationItem` already creates `Reservation`/`ReservationItem`/`Inventory` tables; document that Phase 3 uses existing `Inventory`/`Reservation`/`ReservationItem` only (spec A8, `data-model.md` §6)
 
 ---
 
@@ -30,10 +30,10 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T004 [P] Read and annotate the exact precedent pattern in `src/modules/products/products.service.ts:225` — open the file, note the `dataSource.transaction(async (manager) => manager.find(Product, { where: { id: In(productIds) }, lock: { mode: 'pessimistic_write' } }))` + `manager.save(Product, ...)` pattern; copy the import line `import { In } from 'typeorm'` for reuse in `reservation.service.ts`
-- [ ] T005 [P] Read current implementation in `src/modules/reservation/reservation.service.ts:46-113` — note the current `create()` does `manager.getRepository(Inventory).findOne` per item WITHOUT locking, WITHOUT availability check, WITHOUT `reservedAmount` increment; note imports already present (`ConflictException`, `DataSource`, `EntityManager`, `Inventory`, `Order`, `Reservation`, `ReservationItem`) and that `DataSource` is injected as `public readonly dataSource`
-- [ ] T006 [P] Read controller wrapping in `src/modules/reservation/reservation.controller.ts:24-30` — confirm `POST /reservations` is `return this.reservationService.dataSource.transaction((manager) => this.reservationService.create(manager, userId, dto))`; confirm NO change needed here, only service will be augmented
-- [ ] T007 Read entity getters and constraints in `src/modules/inventory/entities/inventory.entity.ts:44-46` — confirm `get available() { return this.stock - this.reservedAmount; }` and `@Check("stock" >=0)`, `@Check("reservedAmount" >=0)`, `@Check("reservedAmount" <= "stock")`; confirm these CHECKs are the DB backstop for FR-007
+- [X] T004 [P] Read and annotate the exact precedent pattern in `src/modules/products/products.service.ts:225` — open the file, note the `dataSource.transaction(async (manager) => manager.find(Product, { where: { id: In(productIds) }, lock: { mode: 'pessimistic_write' } }))` + `manager.save(Product, ...)` pattern; copy the import line `import { In } from 'typeorm'` for reuse in `reservation.service.ts`
+- [X] T005 [P] Read current implementation in `src/modules/reservation/reservation.service.ts:46-113` — note the current `create()` does `manager.getRepository(Inventory).findOne` per item WITHOUT locking, WITHOUT availability check, WITHOUT `reservedAmount` increment; note imports already present (`ConflictException`, `DataSource`, `EntityManager`, `Inventory`, `Order`, `Reservation`, `ReservationItem`) and that `DataSource` is injected as `public readonly dataSource`
+- [X] T006 [P] Read controller wrapping in `src/modules/reservation/reservation.controller.ts:24-30` — confirm `POST /reservations` is `return this.reservationService.dataSource.transaction((manager) => this.reservationService.create(manager, userId, dto))`; confirm NO change needed here, only service will be augmented
+- [X] T007 Read entity getters and constraints in `src/modules/inventory/entities/inventory.entity.ts:44-46` — confirm `get available() { return this.stock - this.reservedAmount; }` and `@Check("stock" >=0)`, `@Check("reservedAmount" >=0)`, `@Check("reservedAmount" <= "stock")`; confirm these CHECKs are the DB backstop for FR-007
 
 **Checkpoint**: Foundation ready — cheap model now knows the exact locking precedent, the exact service method to augment, and that no migration/DTO/entity change is needed. User story implementation can now begin.
 
@@ -47,14 +47,14 @@
 
 ### Tests for User Story 1 (write FIRST, ensure they FAIL before implementation)
 
-- [ ] T008 [P] [US1] Add unit test for happy-path atomic increment in `src/modules/reservation/reservation.service.spec.ts` — in `describe('create')` add a test that mocks `EntityManager` with `find` returning locked inventories `{id: inv-1, stock:10, reservedAmount:2, get available(){return 8}}` and `{id: inv-2, stock:5, reservedAmount:0, get available(){return 5}}`, calls `service.create(manager, userId, {items:[{inventoryId:inv-1,quantity:3},{inventoryId:inv-2,quantity:2}]})`, expects `manager.find` called with `{where:{id: In(sortedIds)}, lock:{mode:'pessimistic_write'}}`, expects saved inventories have `reservedAmount` 5 and 2, expects reservation created with `status RESERVED`; this test MUST fail before T009-T014
-- [ ] T009 [P] [US1] Add unit test for insufficient available rejection in `src/modules/reservation/reservation.service.spec.ts` — add test with locked inventory `{stock:10, reservedAmount:8, available:2}` and dto qty=3, expects `service.create` throws `ConflictException` with message containing `Insufficient available inventory` and `Available: 2, requested: 3`, and `manager.save` for `Reservation` is never called
-- [ ] T010 [P] [US1] Add unit test for multi-item partial failure rollback in `src/modules/reservation/reservation.service.spec.ts` — locked A available=8, B available=1, dto `{A:3, B:2}` where B insufficient, expects single `ConflictException` and no `Reservation` persisted
+- [X] T008 [P] [US1] Add unit test for happy-path atomic increment in `src/modules/reservation/reservation.service.spec.ts` — in `describe('create')` add a test that mocks `EntityManager` with `find` returning locked inventories `{id: inv-1, stock:10, reservedAmount:2, get available(){return 8}}` and `{id: inv-2, stock:5, reservedAmount:0, get available(){return 5}}`, calls `service.create(manager, userId, {items:[{inventoryId:inv-1,quantity:3},{inventoryId:inv-2,quantity:2}]})`, expects `manager.find` called with `{where:{id: In(sortedIds)}, lock:{mode:'pessimistic_write'}}`, expects saved inventories have `reservedAmount` 5 and 2, expects reservation created with `status RESERVED`; this test MUST fail before T009-T014
+- [X] T009 [P] [US1] Add unit test for insufficient available rejection in `src/modules/reservation/reservation.service.spec.ts` — add test with locked inventory `{stock:10, reservedAmount:8, available:2}` and dto qty=3, expects `service.create` throws `ConflictException` with message containing `Insufficient available inventory` and `Available: 2, requested: 3`, and `manager.save` for `Reservation` is never called
+- [X] T010 [P] [US1] Add unit test for multi-item partial failure rollback in `src/modules/reservation/reservation.service.spec.ts` — locked A available=8, B available=1, dto `{A:3, B:2}` where B insufficient, expects single `ConflictException` and no `Reservation` persisted
 
 ### Implementation for User Story 1
 
-- [ ] T011 [US1] Add import `In` to `src/modules/reservation/reservation.service.ts:10` — change `import { DataSource, EntityManager } from 'typeorm'` to `import { DataSource, EntityManager, In } from 'typeorm'`; verify no duplicate import
-- [ ] T012 [US1] Replace Inventory existence check with sorted `FOR UPDATE` lock in `src/modules/reservation/reservation.service.ts:79-87` — **DELETE** the loop `for (const item of dto.items) { const inv = await inventoryRepo.findOne(...) }`; **REPLACE** with:
+- [X] T011 [US1] Add import `In` to `src/modules/reservation/reservation.service.ts:10` — change `import { DataSource, EntityManager } from 'typeorm'` to `import { DataSource, EntityManager, In } from 'typeorm'`; verify no duplicate import
+- [X] T012 [US1] Replace Inventory existence check with sorted `FOR UPDATE` lock in `src/modules/reservation/reservation.service.ts:79-87` — **DELETE** the loop `for (const item of dto.items) { const inv = await inventoryRepo.findOne(...) }`; **REPLACE** with:
   ```
   const sortedIds = [...new Set(dto.items.map((i) => i.inventoryId))].sort();
   const lockedInventories = await manager.find(Inventory, {
@@ -69,7 +69,7 @@
   const inventoryMap = new Map(lockedInventories.map((inv) => [inv.id, inv]));
   ```
   This satisfies FR-002/FR-003/FR-005: every requested row locked FOR UPDATE, deterministic ordering, only requested rows locked, inside same EntityManager. Keep the earlier `orderId` FK check and `seen` duplicate check above this block.
-- [ ] T013 [US1] Add per-item availability check on locked rows in `src/modules/reservation/reservation.service.ts` — immediately after the `inventoryMap` line, add:
+- [X] T013 [US1] Add per-item availability check on locked rows in `src/modules/reservation/reservation.service.ts` — immediately after the `inventoryMap` line, add:
   ```
   for (const item of dto.items) {
     const inv = inventoryMap.get(item.inventoryId)!;
@@ -81,7 +81,7 @@
   }
   ```
   This is FR-004 on the locked row's derived `available`. Use `inv.available` getter (data-model.md §1.1), never client value.
-- [ ] T014 [US1] Increment `reservedAmount` via transactional EntityManager in `src/modules/reservation/reservation.service.ts` — immediately after the check loop, add:
+- [X] T014 [US1] Increment `reservedAmount` via transactional EntityManager in `src/modules/reservation/reservation.service.ts` — immediately after the check loop, add:
   ```
   const inventoryRepo2 = manager.getRepository(Inventory);
   for (const item of dto.items) {
@@ -91,8 +91,8 @@
   }
   ```
   This is FR-007 via locked entity save so `CHECK reservedAmount <= stock` is enforced. Do NOT use global `this.inventoryRepo` here. Keep transaction short: no Redis/RabbitMQ/BullMQ/email between lock and save. Then keep the existing `reservationRepo.create/save` + `itemRepo.save` + `findByIdInternal` return.
-- [ ] T015 [US1] Remove the now-dead `inventoryRepo` variable if unused in `src/modules/reservation/reservation.service.ts` — after T012, the old `const inventoryRepo = manager.getRepository(Inventory)` for findOne is gone; ensure no leftover reference; file must still compile
-- [ ] T016 [US1] Run `npm run build` and `npm run lint` in `D:\Projects\mini-e-commerce` — fix any TypeScript/ESLint errors; build must be green before testing
+- [X] T015 [US1] Remove the now-dead `inventoryRepo` variable if unused in `src/modules/reservation/reservation.service.ts` — after T012, the old `const inventoryRepo = manager.getRepository(Inventory)` for findOne is gone; ensure no leftover reference; file must still compile
+- [X] T016 [US1] Run `npm run build` and `npm run lint` in `D:\Projects\mini-e-commerce` — fix any TypeScript/ESLint errors; build must be green before testing
 
 **Checkpoint**: US1 should be fully functional; run `npx jest src/modules/reservation/reservation.service.spec.ts --runInBand` — T008-T010 must now pass; also manually verify via `POST /reservations` (quickstart.md §4.2-4.3) that within-available succeeds with `reservedAmount` increment and exceeding-available returns `409` with zero side effect.
 
@@ -106,7 +106,7 @@
 
 ### Tests for User Story 2 (write FIRST, fail before implementation — but implementation is mostly US1's ordering; these tests verify it)
 
-- [ ] T017 [P] [US2] Add concurrency integration test for contested last unit in `src/modules/reservation/test/reservation.integration.spec.ts` — new `describe('concurrency: contested last available')` with helper to set `UPDATE "Inventory" SET stock=10, "reservedAmount"=8 WHERE id='<id>'`, then:
+- [X] T017 [P] [US2] Add concurrency integration test for contested last unit in `src/modules/reservation/test/reservation.integration.spec.ts` — new `describe('concurrency: contested last available')` with helper to set `UPDATE "Inventory" SET stock=10, "reservedAmount"=8 WHERE id='<id>'`, then:
   ```
   const dtoA:any={items:[{inventoryId:invId,quantity:2}]}, dtoB:any={items:[{inventoryId:invId,quantity:2}]};
   const results = await Promise.allSettled([
@@ -120,7 +120,7 @@
   const count = await reservationRepo.count(); // only one reservation for this inv among those two
   ```
   Must run against real PostgreSQL (constitution VII); do NOT mock DataSource. This test MUST fail or be skipped before T012 ordering is correct.
-- [ ] T018 [P] [US2] Add overlapping-order deadlock-avoidance test in `src/modules/reservation/test/reservation.integration.spec.ts` — inside same `describe`, create two inventories A2,B2 with stock=10,reserved=0, then:
+- [X] T018 [P] [US2] Add overlapping-order deadlock-avoidance test in `src/modules/reservation/test/reservation.integration.spec.ts` — inside same `describe`, create two inventories A2,B2 with stock=10,reserved=0, then:
   ```
   const dtoA:any={items:[{inventoryId:A2,quantity:1},{inventoryId:B2,quantity:1}]}; // A then B
   const dtoB:any={items:[{inventoryId:B2,quantity:1},{inventoryId:A2,quantity:1}]}; // B then A
@@ -132,12 +132,12 @@
   expect(results.every(r=> r.status==='fulfilled' || (r as any).reason instanceof ConflictException)).toBe(true);
   // verify both completed without deadlock/timeout
   ```
-- [ ] T019 [P] [US2] Add disjoint-inventory parallel success test in `src/modules/reservation/test/reservation.integration.spec.ts` — two inventories X,Y disjoint, two concurrent reservations each for one inventory `available>>qty`, expects both `fulfilled`, both `reservedAmount` incremented by 1, proves row-level not table-level lock
+- [X] T019 [P] [US2] Add disjoint-inventory parallel success test in `src/modules/reservation/test/reservation.integration.spec.ts` — two inventories X,Y disjoint, two concurrent reservations each for one inventory `available>>qty`, expects both `fulfilled`, both `reservedAmount` incremented by 1, proves row-level not table-level lock
 
 ### Implementation for User Story 2
 
-- [ ] T020 [US2] Verify deterministic ordering is implemented in `src/modules/reservation/reservation.service.ts:79-87` — open the file, confirm `sortedIds = [...new Set(...)].sort()` and `manager.find(Inventory, { where:{id: In(sortedIds)}, lock:{mode:'pessimistic_write'} })` exists from T012; if not, fix it now; add a code comment `// deterministic lock ordering to prevent deadlocks (FR-003/D2)` above the line
-- [ ] T021 [US2] Run concurrency suite in `D:\Projects\mini-e-commerce` — run `npx jest src/modules/reservation/test/reservation.integration.spec.ts --runInBand` (or `--testNamePattern=concurrency`); all three tests T017-T019 must pass; if deadlock or 500 occurs, re-check T012 ordering and that lock is inside the same `manager` transaction
+- [X] T020 [US2] Verify deterministic ordering is implemented in `src/modules/reservation/reservation.service.ts:79-87` — open the file, confirm `sortedIds = [...new Set(...)].sort()` and `manager.find(Inventory, { where:{id: In(sortedIds)}, lock:{mode:'pessimistic_write'} })` exists from T012; if not, fix it now; add a code comment `// deterministic lock ordering to prevent deadlocks (FR-003/D2)` above the line
+- [X] T021 [US2] Run concurrency suite in `D:\Projects\mini-e-commerce` — run `npx jest src/modules/reservation/test/reservation.integration.spec.ts --runInBand` (or `--testNamePattern=concurrency`); all three tests T017-T019 must pass; if deadlock or 500 occurs, re-check T012 ordering and that lock is inside the same `manager` transaction
 
 **Checkpoint**: At this point, US1 AND US2 should both work independently — single-request correctness AND concurrent correctness proven against real PostgreSQL; no overselling in any execution.
 
@@ -151,16 +151,16 @@
 
 ### Tests for User Story 3
 
-- [ ] T022 [P] [US3] Add integration rollback test for unknown inventoryId in `src/modules/reservation/test/reservation.integration.spec.ts` — new `describe('rollback on failure')`: capture `before = (await inventoryRepo.findOne({where:{id:A}})).reservedAmount`, attempt `dataSource.transaction(m=> service.create(m, userId, {items:[{inventoryId:A,quantity:1},{inventoryId:'00000000-0000-0000-0000-000000000000',quantity:1}]}))` expects `NotFoundException`, then `after = (await inventoryRepo.findOne({where:{id:A}})).reservedAmount` must equal `before` and `reservationRepo.count({where:{userId}})` unchanged
-- [ ] T023 [P] [US3] Add rollback test for duplicate inventoryId in `src/modules/reservation/test/reservation.integration.spec.ts` — same pattern, dto with same `inventoryId` twice, expects `BadRequestException("Duplicate inventoryId")`, `reservedAmount` unchanged, no reservation count increase
-- [ ] T024 [P] [US3] Add rollback test for insufficient available in `src/modules/reservation/test/reservation.integration.spec.ts` — set `UPDATE "Inventory" SET stock=5, "reservedAmount"=4 WHERE id=A` (available=1), attempt qty=2, expects `ConflictException`, `reservedAmount` still 4, count unchanged
-- [ ] T025 [P] [US3] Add unit test for `expiresAt` past rolls back in `src/modules/reservation/reservation.service.spec.ts` — mock manager, dto `expiresAt: new Date(Date.now()-1000).toISOString()`, expects `BadRequestException` and `manager.find` (lock) never called and `manager.save` never called
+- [X] T022 [P] [US3] Add integration rollback test for unknown inventoryId in `src/modules/reservation/test/reservation.integration.spec.ts` — new `describe('rollback on failure')`: capture `before = (await inventoryRepo.findOne({where:{id:A}})).reservedAmount`, attempt `dataSource.transaction(m=> service.create(m, userId, {items:[{inventoryId:A,quantity:1},{inventoryId:'00000000-0000-0000-0000-000000000000',quantity:1}]}))` expects `NotFoundException`, then `after = (await inventoryRepo.findOne({where:{id:A}})).reservedAmount` must equal `before` and `reservationRepo.count({where:{userId}})` unchanged
+- [X] T023 [P] [US3] Add rollback test for duplicate inventoryId in `src/modules/reservation/test/reservation.integration.spec.ts` — same pattern, dto with same `inventoryId` twice, expects `BadRequestException("Duplicate inventoryId")`, `reservedAmount` unchanged, no reservation count increase
+- [X] T024 [P] [US3] Add rollback test for insufficient available in `src/modules/reservation/test/reservation.integration.spec.ts` — set `UPDATE "Inventory" SET stock=5, "reservedAmount"=4 WHERE id=A` (available=1), attempt qty=2, expects `ConflictException`, `reservedAmount` still 4, count unchanged
+- [X] T025 [P] [US3] Add unit test for `expiresAt` past rolls back in `src/modules/reservation/reservation.service.spec.ts` — mock manager, dto `expiresAt: new Date(Date.now()-1000).toISOString()`, expects `BadRequestException` and `manager.find` (lock) never called and `manager.save` never called
 
 ### Implementation for User Story 3
 
-- [ ] T026 [US3] Verify all failure paths throw BEFORE or INSIDE the same transaction so `dataSource.transaction` rolls back in `src/modules/reservation/reservation.service.ts:46-90` — confirm: (a) `expiresAt` past → `BadRequestException` before lock, (b) duplicate `inventoryId` → `BadRequestException` before lock, (c) missing inventory after lock → `NotFoundException`, (d) `available < requested` → `ConflictException` after lock but before any `save`, (e) no `try/catch` that swallows and returns plain object; all exceptions are Nest HTTP exceptions serialized by `AllExceptionsFilter` (never 500 leakage)
-- [ ] T027 [US3] Verify `complete`/`cancel`/`expire` remain status-only (no inventory mutation) in `src/modules/reservation/reservation.service.ts:183-224` — open the file, ensure no `reservedAmount`/`stock` change in those methods; they are out of scope for Phase 3 (FR-009/A10); if any such code exists, remove it — Phase 4 will add it
-- [ ] T028 [US3] Run full rollback suite in `D:\Projects\mini-e-commerce` — run `npx jest src/modules/reservation/test/reservation.integration.spec.ts --runInBand --testNamePattern="rollback"` and `npx jest src/modules/reservation/reservation.service.spec.ts --runInBand`; all must pass with zero partial state
+- [X] T026 [US3] Verify all failure paths throw BEFORE or INSIDE the same transaction so `dataSource.transaction` rolls back in `src/modules/reservation/reservation.service.ts:46-90` — confirm: (a) `expiresAt` past → `BadRequestException` before lock, (b) duplicate `inventoryId` → `BadRequestException` before lock, (c) missing inventory after lock → `NotFoundException`, (d) `available < requested` → `ConflictException` after lock but before any `save`, (e) no `try/catch` that swallows and returns plain object; all exceptions are Nest HTTP exceptions serialized by `AllExceptionsFilter` (never 500 leakage)
+- [X] T027 [US3] Verify `complete`/`cancel`/`expire` remain status-only (no inventory mutation) in `src/modules/reservation/reservation.service.ts:183-224` — open the file, ensure no `reservedAmount`/`stock` change in those methods; they are out of scope for Phase 3 (FR-009/A10); if any such code exists, remove it — Phase 4 will add it
+- [X] T028 [US3] Run full rollback suite in `D:\Projects\mini-e-commerce` — run `npx jest src/modules/reservation/test/reservation.integration.spec.ts --runInBand --testNamePattern="rollback"` and `npx jest src/modules/reservation/reservation.service.spec.ts --runInBand`; all must pass with zero partial state
 
 **Checkpoint**: All user stories now independently functional and failure-safe; SC-005 (100% of creation failures leave zero partial state) verified.
 
@@ -170,11 +170,11 @@
 
 **Purpose**: Cross-cutting verification, docs, and cheap-model safety nets.
 
-- [ ] T029 [P] Verify no external I/O inside reservation transaction in `src/modules/reservation/reservation.service.ts` — search the file for `cacheManager`, `CACHE_MANAGER`, `amqp`, `RabbitMQ`, `BullMQ`, `Queue`, `fetch`, `axios`, `http` inside `create()`; if any found between the `manager.find(Inventory` line and the final `return`, remove it — research D7 / FR-005 requires lock→check→increment→insert only
-- [ ] T030 [P] Verify controller still thin and transaction-wrapping in `src/modules/reservation/reservation.controller.ts` — file must remain exactly `return this.reservationService.dataSource.transaction((manager) => this.reservationService.create(manager, userId, dto))` for `POST /reservations`; no business logic, no direct DB access, uses `@Auth(UserRoles.User, UserRoles.Admin)` + `@CurrentUser('sub')` + global `ValidationPipe`
-- [ ] T031 Run full verification suite in `D:\Projects\mini-e-commerce` — run `npm run lint`, `npm run build`, `npm run test -- --runInBand`, and `npm run test:e2e -- --runInBand` (or at least `npx jest src/modules/reservation --runInBand`); all must be green; if `lint` fails on `reservation.service.ts`, fix import order and add `Logger` debug if missing
-- [ ] T032 [P] Manual quickstart validation per `specs/003-transaction-safe-reservation/quickstart.md:4` in `D:\Projects\mini-e-commerce` — start app with `npm run start:dev`, run curls from quickstart §4.2-4.6 (happy-path `201`, exceed `409`, duplicate `400`, past `expiresAt` `400`, unknown `404`, concurrent `qty=2 vs qty=2` → one `201` one `409` reserved=10, opposite-order no deadlock), and psql checks `SELECT stock, "reservedAmount", stock-"reservedAmount" FROM "Inventory"`; document results
-- [ ] T033 [P] Update documentation in `docs/plan.md` — mark Phase 3 as `DONE — 2026-08-30` with exit criterion `Concurrent reservation requests cannot oversell inventory — verified by integration concurrency test stock=10,reserved=8 qty=2 vs qty=2` and reference this feature directory `specs/003-transaction-safe-reservation`
+- [X] T029 [P] Verify no external I/O inside reservation transaction in `src/modules/reservation/reservation.service.ts` — search the file for `cacheManager`, `CACHE_MANAGER`, `amqp`, `RabbitMQ`, `BullMQ`, `Queue`, `fetch`, `axios`, `http` inside `create()`; if any found between the `manager.find(Inventory` line and the final `return`, remove it — research D7 / FR-005 requires lock→check→increment→insert only
+- [X] T030 [P] Verify controller still thin and transaction-wrapping in `src/modules/reservation/reservation.controller.ts` — file must remain exactly `return this.reservationService.dataSource.transaction((manager) => this.reservationService.create(manager, userId, dto))` for `POST /reservations`; no business logic, no direct DB access, uses `@Auth(UserRoles.User, UserRoles.Admin)` + `@CurrentUser('sub')` + global `ValidationPipe`
+- [X] T031 Run full verification suite in `D:\Projects\mini-e-commerce` — run `npm run lint`, `npm run build`, `npm run test -- --runInBand`, and `npm run test:e2e -- --runInBand` (or at least `npx jest src/modules/reservation --runInBand`); all must be green; if `lint` fails on `reservation.service.ts`, fix import order and add `Logger` debug if missing
+- [X] T032 [P] Manual quickstart validation per `specs/003-transaction-safe-reservation/quickstart.md:4` in `D:\Projects\mini-e-commerce` — start app with `npm run start:dev`, run curls from quickstart §4.2-4.6 (happy-path `201`, exceed `409`, duplicate `400`, past `expiresAt` `400`, unknown `404`, concurrent `qty=2 vs qty=2` → one `201` one `409` reserved=10, opposite-order no deadlock), and psql checks `SELECT stock, "reservedAmount", stock-"reservedAmount" FROM "Inventory"`; document results
+- [X] T033 [P] Update documentation in `docs/plan.md` — mark Phase 3 as `DONE — 2026-08-30` with exit criterion `Concurrent reservation requests cannot oversell inventory — verified by integration concurrency test stock=10,reserved=8 qty=2 vs qty=2` and reference this feature directory `specs/003-transaction-safe-reservation`
 
 ---
 
@@ -300,4 +300,5 @@ With multiple developers (or cheap model + reviewer):
   - Commit after each task or logical group (`git add -A && git commit -m "feat(reservation): T0XX ... [spec 003]"`)
 - Stop at any checkpoint to validate story independently
 - Avoid: vague tasks, same-file parallel conflicts, cross-story dependencies that break independence
+
 
