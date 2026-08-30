@@ -24,9 +24,9 @@
 
 **Purpose**: Create module structure and register entities so the rest can compile.
 
-- [ ] T001 [P] Create `src/modules/reservation/` directory tree with subfolders `entities/`, `dto/`, `test/` per plan.md §1
-- [ ] T002 [P] Register `Reservation` and `ReservationItem` in the `entities` array of `src/data-source.ts` per plan.md §7.2 (import from `./modules/reservation/entities/...`)
-- [ ] T003 Start required infrastructure with `docker-compose up -d` (postgres) per quickstart.md prerequisites
+- [X] T001 [P] Create `src/modules/reservation/` directory tree with subfolders `entities/`, `dto/`, `test/` per plan.md §1
+- [X] T002 [P] Register `Reservation` and `ReservationItem` in the `entities` array of `src/data-source.ts` per plan.md §7.2 (import from `./modules/reservation/entities/...`)
+- [X] T003 Start required infrastructure with `docker-compose up -d` (postgres) per quickstart.md prerequisites
 
 **Checkpoint**: Directory skeleton and entity registration present; app still compiles after entities are added in Phase 2.
 
@@ -38,14 +38,14 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T004 [P] Create `ReservationStatus` enum (`RESERVED|COMPLETED|EXPIRED|CANCELLED`) in `src/modules/reservation/entities/reservation-status.enum.ts` per plan.md §2.1
-- [ ] T005 [P] Create `Reservation` entity in `src/modules/reservation/entities/reservation.entity.ts` with `@Index(['userId'])`, `@Index(['status'])`, `@Index(['expiresAt'])`, `@Index(['status','expiresAt'])`, FKs to User/Order, `items` OneToMany per plan.md §2.2
-- [ ] T006 [P] Create `ReservationItem` entity in `src/modules/reservation/entities/reservation-item.entity.ts` with `@Unique(['reservationId','inventoryId'])`, `@Check('"quantity" > 0')`, FKs to Reservation/Inventory per plan.md §2.3
-- [ ] T007 [P] Create DTOs in `src/modules/reservation/dto/`: `create-reservation.dto.ts` (items array, optional expiresAt/orderId, nested item validators), `reservation-response.dto.ts`, `update-reservation-status.dto.ts` per plan.md §3
-- [ ] T008 [P] Create migration `src/migration/<TIMESTAMP>-CreateReservationAndReservationItem.ts` with full `up()`/`down()` (enum, tables, indexes, unique, `CHECK quantity > 0`, FKs, CASCADE/SET NULL) per plan.md §8
-- [ ] T009 Implement `ReservationModule` in `src/modules/reservation/reservation.module.ts` (imports `TypeOrmModule.forFeature([Reservation, ReservationItem])`, `UsersModule`/`InventoryModule`/`OrderModule`, exports `ReservationService`) and import it into `src/app.module.ts` per plan.md §6 and §7.1
-- [ ] T010 [P] Create `ReservationService` skeleton in `src/modules/reservation/reservation.service.ts`: `@Injectable()`, `@InjectDataSource() private dataSource`, `Logger`, public `validateTransition(from,to)` (throws `ConflictException` per ALLOWED_TRANSITIONS map), private `assertOwner(reservation, requestingUserId, role?)` (throws `ForbiddenException`), private `findByIdInternal(manager, id)` (throws `NotFoundException`) per plan.md §4.1
-- [ ] T011 [P] Create `ReservationController` skeleton in `src/modules/reservation/reservation.controller.ts`: `@Controller('reservations')`, class-level `@Auth(UserRoles.User, UserRoles.Admin)`, import `Auth` from `../auth/decorators/auth.decorator` and `CurrentUser` from `../auth/decorators/current-user.decorator` (matching `cart.controller.ts`), inject `ReservationService` per plan.md §5
+- [X] T004 [P] Create `ReservationStatus` enum (`RESERVED|COMPLETED|EXPIRED|CANCELLED`) in `src/modules/reservation/entities/reservation-status.enum.ts` per plan.md §2.1
+- [X] T005 [P] Create `Reservation` entity in `src/modules/reservation/entities/reservation.entity.ts` with `@Index(['userId'])`, `@Index(['status'])`, `@Index(['expiresAt'])`, `@Index(['status','expiresAt'])`, FKs to User/Order, `items` OneToMany per plan.md §2.2
+- [X] T006 [P] Create `ReservationItem` entity in `src/modules/reservation/entities/reservation-item.entity.ts` with `@Unique(['reservationId','inventoryId'])`, `@Check('"quantity" > 0')`, FKs to Reservation/Inventory per plan.md §2.3
+- [X] T007 [P] Create DTOs in `src/modules/reservation/dto/`: `create-reservation.dto.ts` (items array, optional expiresAt/orderId, nested item validators), `reservation-response.dto.ts`, `update-reservation-status.dto.ts` per plan.md §3
+- [X] T008 [P] Create migration `src/migration/<TIMESTAMP>-CreateReservationAndReservationItem.ts` with full `up()`/`down()` (enum, tables, indexes, unique, `CHECK quantity > 0`, FKs, CASCADE/SET NULL) per plan.md §8
+- [X] T009 Implement `ReservationModule` in `src/modules/reservation/reservation.module.ts` (imports `TypeOrmModule.forFeature([Reservation, ReservationItem])`, `UsersModule`/`InventoryModule`/`OrderModule`, exports `ReservationService`) and import it into `src/app.module.ts` per plan.md §6 and §7.1
+- [X] T010 [P] Create `ReservationService` skeleton in `src/modules/reservation/reservation.service.ts`: `@Injectable()`, `@InjectDataSource() private dataSource`, `Logger`, public `validateTransition(from,to)` (throws `ConflictException` per ALLOWED_TRANSITIONS map), private `assertOwner(reservation, requestingUserId, role?)` (throws `ForbiddenException`), private `findByIdInternal(manager, id)` (throws `NotFoundException`) per plan.md §4.1
+- [X] T011 [P] Create `ReservationController` skeleton in `src/modules/reservation/reservation.controller.ts`: `@Controller('reservations')`, class-level `@Auth(UserRoles.User, UserRoles.Admin)`, import `Auth` from `../auth/decorators/auth.decorator` and `CurrentUser` from `../auth/decorators/current-user.decorator` (matching `cart.controller.ts`), inject `ReservationService` per plan.md §5
 
 **Checkpoint**: App compiles; `Reservation`/`ReservationItem` tables creatable via migration; service/controller skeletons present. User stories can now be implemented.
 
@@ -61,13 +61,13 @@
 
 > Write these tests FIRST, ensure they FAIL before implementation.
 
-- [ ] T012 [P] [US1] Unit test `create` in `src/modules/reservation/reservation.service.spec.ts`: default expiresAt = now+15m; rejects past `expiresAt` (400); rejects duplicate `inventoryId` (400); rejects unknown `inventoryId` (404); rejects unknown `orderId` (404); returns RESERVED with items
-- [ ] T013 [P] [US1] Integration test create in `src/modules/reservation/test/reservation.integration.spec.ts`: insert Inventory row, create reservation via `dataSource.transaction(m => service.create(m, userId, dto))`, assert DB `Reservation`+`ReservationItem` rows; assert `quantity=0` INSERT violates `CHECK` (catch error)
+- [X] T012 [P] [US1] Unit test `create` in `src/modules/reservation/reservation.service.spec.ts`: default expiresAt = now+15m; rejects past `expiresAt` (400); rejects duplicate `inventoryId` (400); rejects unknown `inventoryId` (404); rejects unknown `orderId` (404); returns RESERVED with items
+- [X] T013 [P] [US1] Integration test create in `src/modules/reservation/test/reservation.integration.spec.ts`: insert Inventory row, create reservation via `dataSource.transaction(m => service.create(m, userId, dto))`, assert DB `Reservation`+`ReservationItem` rows; assert `quantity=0` INSERT violates `CHECK` (catch error)
 
 ### Implementation for User Story 1
 
-- [ ] T014 [US1] Implement `create(manager: EntityManager, requestingUserId: string, dto: CreateReservationDto)` in `src/modules/reservation/reservation.service.ts`: compute expiresAt (default 15m / future check), validate orderId existence → 404, detect duplicate inventoryId → 400, validate each inventoryId exists → 404, persist Reservation + items via `manager.getRepository` per plan.md §4
-- [ ] T015 [US1] Implement `POST /reservations` route in `src/modules/reservation/reservation.controller.ts`: `@Post()`, `@CurrentUser('sub')` userId, `@Body() dto`, wrap `service.dataSource.transaction(m => service.create(m, userId, dto))`, return `Reservation` entity (with items) per plan.md §5 and contracts/reservation-api.md §1
+- [X] T014 [US1] Implement `create(manager: EntityManager, requestingUserId: string, dto: CreateReservationDto)` in `src/modules/reservation/reservation.service.ts`: compute expiresAt (default 15m / future check), validate orderId existence → 404, detect duplicate inventoryId → 400, validate each inventoryId exists → 404, persist Reservation + items via `manager.getRepository` per plan.md §4
+- [X] T015 [US1] Implement `POST /reservations` route in `src/modules/reservation/reservation.controller.ts`: `@Post()`, `@CurrentUser('sub')` userId, `@Body() dto`, wrap `service.dataSource.transaction(m => service.create(m, userId, dto))`, return `Reservation` entity (with items) per plan.md §5 and contracts/reservation-api.md §1
 
 **Checkpoint**: A reservation with items can be created and read back with status RESERVED (MVP demonstrable).
 
@@ -81,13 +81,13 @@
 
 ### Tests for User Story 2
 
-- [ ] T016 [P] [US2] Unit test `findById` in `src/modules/reservation/reservation.service.spec.ts`: owner returns reservation; non-owner non-admin → 403; unknown id → 404
-- [ ] T017 [P] [US2] Integration test GET by id in `src/modules/reservation/test/reservation.integration.spec.ts`: create then fetch, assert items present
+- [X] T016 [P] [US2] Unit test `findById` in `src/modules/reservation/reservation.service.spec.ts`: owner returns reservation; non-owner non-admin → 403; unknown id → 404
+- [X] T017 [P] [US2] Integration test GET by id in `src/modules/reservation/test/reservation.integration.spec.ts`: create then fetch, assert items present
 
 ### Implementation for User Story 2
 
-- [ ] T018 [US2] Implement `findById(requestingUserId: string, id: string, role?: UserRoles)` in `src/modules/reservation/reservation.service.ts`: read with `relations:['items']`, call `assertOwner`, throw 404 if missing per plan.md §4
-- [ ] T019 [US2] Implement `GET /reservations/:id` route in `src/modules/reservation/reservation.controller.ts`: `@Get(':id')`, `@CurrentUser('sub')` + `@CurrentUser('role')`, call `service.findById`, return `Reservation` entity per contracts/reservation-api.md §2
+- [X] T018 [US2] Implement `findById(requestingUserId: string, id: string, role?: UserRoles)` in `src/modules/reservation/reservation.service.ts`: read with `relations:['items']`, call `assertOwner`, throw 404 if missing per plan.md §4
+- [X] T019 [US2] Implement `GET /reservations/:id` route in `src/modules/reservation/reservation.controller.ts`: `@Get(':id')`, `@CurrentUser('sub')` + `@CurrentUser('role')`, call `service.findById`, return `Reservation` entity per contracts/reservation-api.md §2
 
 **Checkpoint**: Reservations retrievable by owner/admin only; US1 and US2 both independently functional.
 
@@ -101,13 +101,13 @@
 
 ### Tests for User Story 3
 
-- [ ] T020 [P] [US3] Unit test transition matrix in `src/modules/reservation/reservation.service.spec.ts`: RESERVED→COMPLETED/CANCELLED/EXPIRED succeed; COMPLETED/EXPIRED/CANCELLED → any transition throws 409; `complete` with valid orderId sets it, invalid orderId → 404
-- [ ] T021 [P] [US3] Integration test transition persistence in `src/modules/reservation/test/reservation.integration.spec.ts`: complete then assert status COMPLETED in DB; second cancel → 409
+- [X] T020 [P] [US3] Unit test transition matrix in `src/modules/reservation/reservation.service.spec.ts`: RESERVED→COMPLETED/CANCELLED/EXPIRED succeed; COMPLETED/EXPIRED/CANCELLED → any transition throws 409; `complete` with valid orderId sets it, invalid orderId → 404
+- [X] T021 [P] [US3] Integration test transition persistence in `src/modules/reservation/test/reservation.integration.spec.ts`: complete then assert status COMPLETED in DB; second cancel → 409
 
 ### Implementation for User Story 3
 
-- [ ] T022 [US3] Implement `complete`, `cancel`, `expire`, and private `transition(manager, requestingUserId, id, to, orderId?, role?)` in `src/modules/reservation/reservation.service.ts`: load, `assertOwner`, `validateTransition`, set orderId (404 if invalid), update status per plan.md §4
-- [ ] T023 [US3] Implement routes `PATCH /reservations/:id/complete`, `PATCH /reservations/:id/cancel`, `PATCH /reservations/:id/expire` in `src/modules/reservation/reservation.controller.ts`: wrap writes in `dataSource.transaction`, add `@Auth(UserRoles.Admin)` on the `expire` route, return `Reservation` entity per contracts/reservation-api.md §4-6
+- [X] T022 [US3] Implement `complete`, `cancel`, `expire`, and private `transition(manager, requestingUserId, id, to, orderId?, role?)` in `src/modules/reservation/reservation.service.ts`: load, `assertOwner`, `validateTransition`, set orderId (404 if invalid), update status per plan.md §4
+- [X] T023 [US3] Implement routes `PATCH /reservations/:id/complete`, `PATCH /reservations/:id/cancel`, `PATCH /reservations/:id/expire` in `src/modules/reservation/reservation.controller.ts`: wrap writes in `dataSource.transaction`, add `@Auth(UserRoles.Admin)` on the `expire` route, return `Reservation` entity per contracts/reservation-api.md §4-6
 
 **Checkpoint**: State machine enforced everywhere; invalid transitions rejected with 409.
 
@@ -121,13 +121,13 @@
 
 ### Tests for User Story 4
 
-- [ ] T024 [P] [US4] Unit test `listByUser` in `src/modules/reservation/reservation.service.spec.ts`: non-admin returns only own reservations; admin with `userId` filter returns that user's; pagination meta correct
-- [ ] T025 [P] [US4] Integration test list pagination in `src/modules/reservation/test/reservation.integration.spec.ts`: seed 3 for U + 1 for V, assert scoping
+- [X] T024 [P] [US4] Unit test `listByUser` in `src/modules/reservation/reservation.service.spec.ts`: non-admin returns only own reservations; admin with `userId` filter returns that user's; pagination meta correct
+- [X] T025 [P] [US4] Integration test list pagination in `src/modules/reservation/test/reservation.integration.spec.ts`: seed 3 for U + 1 for V, assert scoping
 
 ### Implementation for User Story 4
 
-- [ ] T026 [US4] Implement `listByUser(requestingUserId, pagination, filter?, role?)` in `src/modules/reservation/reservation.service.ts`: build `where` (own id unless ADMIN+filter), `findAndCount` with `skip/take`, return `{ data, meta }` matching existing pagination shape per plan.md §4
-- [ ] T027 [US4] Implement `GET /reservations` route in `src/modules/reservation/reservation.controller.ts`: `@Get()`, `@Query('page')`/`@Query('limit')`/`@Query('userId')`, call `service.listByUser` per contracts/reservation-api.md §3
+- [X] T026 [US4] Implement `listByUser(requestingUserId, pagination, filter?, role?)` in `src/modules/reservation/reservation.service.ts`: build `where` (own id unless ADMIN+filter), `findAndCount` with `skip/take`, return `{ data, meta }` matching existing pagination shape per plan.md §4
+- [X] T027 [US4] Implement `GET /reservations` route in `src/modules/reservation/reservation.controller.ts`: `@Get()`, `@Query('page')`/`@Query('limit')`/`@Query('userId')`, call `service.listByUser` per contracts/reservation-api.md §3
 
 **Checkpoint**: All four user stories independently functional.
 
@@ -137,10 +137,10 @@
 
 **Purpose**: Verify against real DB, docs, and quality gates.
 
-- [ ] T028 Run integration suite against real PostgreSQL: `docker-compose up -d` then `npm run test -- reservation.integration.spec` per quickstart.md (assert `CHECK quantity > 0`, unique `(reservationId, inventoryId)`, FKs, enum)
-- [ ] T029 [P] Update `AGENTS.md` Module map to add a `reservation` row (`ReservationModule`, REST, state machine) pointing to `src/modules/reservation` per plan.md §1
-- [ ] T030 Write an ADR in `docs/decisions/` recording the EntityManager Option B decision (service write methods require `EntityManager` now) and update `docs/plan.md` after the phase per AGENTS.md §8 (constitution IX / C2)
-- [ ] T031 Run `npm run migration:run`, `npm run lint`, `npm run build`, `npm run test` and execute the quickstart.md manual API flow (create → get → list → complete → cancel 409 → validation 400s); also verify SC-005 module-boundary rule — no `@InjectRepository(Reservation|ReservationItem)` outside `reservation` module (C1) — to confirm Phase 2 exit criteria (plan.md §12)
+- [X] T028 Run integration suite against real PostgreSQL: `docker-compose up -d` then `npm run test -- reservation.integration.spec` per quickstart.md (assert `CHECK quantity > 0`, unique `(reservationId, inventoryId)`, FKs, enum)
+- [X] T029 [P] Update `AGENTS.md` Module map to add a `reservation` row (`ReservationModule`, REST, state machine) pointing to `src/modules/reservation` per plan.md §1
+- [X] T030 Write an ADR in `docs/decisions/` recording the EntityManager Option B decision (service write methods require `EntityManager` now) and update `docs/plan.md` after the phase per AGENTS.md §8 (constitution IX / C2)
+- [X] T031 Run `npm run migration:run`, `npm run lint`, `npm run build`, `npm run test` and execute the quickstart.md manual API flow (create → get → list → complete → cancel 409 → validation 400s); also verify SC-005 module-boundary rule — no `@InjectRepository(Reservation|ReservationItem)` outside `reservation` module (C1) — to confirm Phase 2 exit criteria (plan.md §12)
 
 ---
 

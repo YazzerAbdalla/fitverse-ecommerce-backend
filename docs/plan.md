@@ -167,7 +167,7 @@ Inventory exists independently from Product and the database enforces its basic 
 
 # Phase 2 — Reservation Domain
 
-**Status: NOT DONE — NEXT**
+**Status: DONE — 2026-08-22** (Reservation + ReservationItem entities, ReservationService/Controller, state machine, migration, REST API, tests)
 
 **Goal:** Introduce temporary inventory ownership.
 
@@ -229,17 +229,17 @@ Create a dedicated reservation module.
 
 Responsibilities:
 
-* [ ] Create reservation
-* [ ] Add reservation items
-* [ ] Complete reservation
-* [ ] Cancel reservation
-* [ ] Expire reservation
-* [ ] Retrieve reservation
-* [ ] Validate reservation state transitions
+* [x] Create reservation (`POST /reservations` → `RESERVED`, default `expiresAt=now+15m`, validation `quantity>0`, future `expiresAt`, duplicate `inventoryId` rejected, FK `inventoryId`/`orderId` checked)
+* [x] Add reservation items (`ReservationItem` with `@Unique reservationId+inventoryId`, `@Check quantity>0`, FK `inventoryId`)
+* [x] Complete reservation (`PATCH /:id/complete` → `RESERVED→COMPLETED`, optional `orderId` validated)
+* [x] Cancel reservation (`PATCH /:id/cancel` → `RESERVED→CANCELLED`)
+* [x] Expire reservation (`PATCH /:id/expire` admin-only → `RESERVED→EXPIRED`, future worker will use `status+expiresAt` index)
+* [x] Retrieve reservation (`GET /:id` owner-or-admin, `GET /` paginated owner-scoped with admin `userId` filter)
+* [x] Validate reservation state transitions (`validateTransition` enforces `RESERVED→COMPLETED|EXPIRED|CANCELLED` only, others `409`)
 
 ### Phase 2 Exit Criteria
 
-The system can represent a temporary claim on one or more inventory records.
+The system can represent a temporary claim on one or more inventory records. — **MET**: `Reservation` (`userId` FK CASCADE, `orderId` FK SET NULL, `status` enum, `expiresAt` timestamptz, indexes `userId/status/expiresAt/status+expiresAt`) + `ReservationItem` (unique + CHECK) entities present; `ReservationService` (EntityManager writes `create/complete/cancel/expire`, `validateTransition`, `assertOwner`) + thin `ReservationController` (6 REST routes, `Auth`/`CurrentUser`, transaction wrapping) implemented; migration `1755850000000-CreateReservationAndReservationItem` (enum, tables, indexes, FKs) executed; unit 30 + integration 8 PASS (real PostgreSQL, constraints verified); `synchronize:false`, module boundaries respected.
 
 ---
 
@@ -1137,10 +1137,10 @@ Verification
 ## NOT DONE
 
 ```text
-[ ] Reservation entity
-[ ] ReservationItem entity
-[ ] Reservation module
-[ ] Reservation state machine
+[x] Reservation entity — DONE 2026-08-22 (Reservation + ReservationItem with constraints/indexes, migration 1755850000000)
+[x] ReservationItem entity — DONE
+[x] Reservation module — DONE (ReservationModule/Service/Controller, 6 REST routes)
+[x] Reservation state machine — DONE (RESERVED→COMPLETED|EXPIRED|CANCELLED, 409 on invalid)
 
 [ ] Transaction-safe reservation
 [ ] PostgreSQL row locking
