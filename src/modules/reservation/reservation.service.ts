@@ -206,7 +206,7 @@ export class ReservationService {
     dto?: { orderId?: string },
     role?: UserRoles,
   ): Promise<Reservation> {
-    return this.transition(
+    return this.transitionWithInventory(
       manager,
       requestingUserId,
       id,
@@ -222,7 +222,7 @@ export class ReservationService {
     id: string,
     role?: UserRoles,
   ): Promise<Reservation> {
-    return this.transition(
+    return this.transitionWithInventory(
       manager,
       requestingUserId,
       id,
@@ -233,13 +233,24 @@ export class ReservationService {
   }
 
   async expire(manager: EntityManager, id: string): Promise<Reservation> {
-    const repo = manager.getRepository(Reservation);
-    const reservation = await repo.findOne({ where: { id } });
-    if (!reservation)
-      throw new NotFoundException(`Reservation ${id} not found`);
-    this.validateTransition(reservation.status, ReservationStatus.EXPIRED);
-    reservation.status = ReservationStatus.EXPIRED;
-    return repo.save(reservation);
+    // Admin-only at controller; service does not enforce role, but still transactional with inventory
+    // Q1: immediate override — no expiresAt check
+    return this.transitionWithInventoryExpire(manager, id);
+  }
+
+  private async transitionWithInventoryExpire(
+    manager: EntityManager,
+    id: string,
+  ): Promise<Reservation> {
+    return this.transitionWithInventoryInternal(
+      manager,
+      null,
+      id,
+      ReservationStatus.EXPIRED,
+      undefined,
+      undefined,
+      false, // no owner check for expire (admin bypass, worker future)
+    );
   }
 
   private async transition(
@@ -250,16 +261,93 @@ export class ReservationService {
     orderId?: string,
     role?: UserRoles,
   ): Promise<Reservation> {
-    const repo = manager.getRepository(Reservation);
-    const reservation = await repo.findOne({
+    return this.transitionWithInventory(
+      manager,
+      requestingUserId,
+      id,
+      to,
+      orderId,
+      role,
+    );
+  }
+
+  private async transitionWithInventory(
+    manager: EntityManager,
+    requestingUserId: string,
+    id: string,
+    to: ReservationStatus,
+    orderId?: string,
+    role?: UserRoles,
+  ): Promise<Reservation> {
+    return this.transitionWithInventoryInternal(
+      manager,
+      requestingUserId,
+      id,
+      to,
+      orderId,
+      role,
+      true,
+    );
+  }
+
+  private async transitionWithInventoryInternal(
+    manager: EntityManager,
+    requestingUserId: string | null,
+    id: string,
+    to: ReservationStatus,
+    orderId?: string,
+    role?: UserRoles,
+    checkOwner = true,
+  ): Promise<Reservation> {
+    const reservationRepo = manager.getRepository(Reservation);
+    // Lock Reservation FOR UPDATE (D1) — avoid FOR UPDATE with outer join (cannot lock nullable side)
+    // First lock the row without relations, then load with relations (lock held for tx duration)
+    const lockedRow = await reservationRepo.findOne({
+      where: { id },
+      lock: { mode: 'pessimistic_write' },
+    } as any);
+    if (!lockedRow) throw new NotFoundException(`Reservation ${id} not found`);
+    const reservation = await reservationRepo.findOne({
       where: { id },
       relations: { items: true },
     });
     if (!reservation)
       throw new NotFoundException(`Reservation ${id} not found`);
-    this.assertOwner(reservation, requestingUserId, role);
 
-    this.validateTransition(reservation.status, to);
+    if (checkOwner && requestingUserId !== null) {
+      this.assertOwner(reservation, requestingUserId, role);
+    }
+
+    // Idempotent COMPLETED -> COMPLETED (Q4 B) — return 200 without inventory re-mutation
+    if (
+      reservation.status === ReservationStatus.COMPLETED &&
+      to === ReservationStatus.COMPLETED
+    ) {
+      // Still handle orderId overwrite per Q3 if supplied and different
+      if (orderId) {
+        const orderRepo = manager.getRepository(Order);
+        const order = await orderRepo.findOne({ where: { id: orderId } });
+        if (!order) throw new NotFoundException(`Order ${orderId} not found`);
+        if (reservation.orderId !== orderId) {
+          reservation.orderId = orderId;
+          const saved = await reservationRepo.save(reservation);
+          this.logger.log(
+            `Idempotent complete (with orderId overwrite) for ${id} -> ${to}, orderId ${orderId}`,
+          );
+          return reservationRepo.findOne({
+            where: { id: saved.id },
+            relations: { items: true },
+          }) as Promise<Reservation>;
+        }
+      }
+      this.logger.log(
+        `Idempotent complete for ${id} already COMPLETED — no inventory change`,
+      );
+      return reservation;
+    }
+
+    const fromStatus = reservation.status;
+    this.validateTransition(fromStatus, to);
 
     if (orderId) {
       const orderRepo = manager.getRepository(Order);
@@ -268,8 +356,73 @@ export class ReservationService {
       reservation.orderId = orderId;
     }
 
+    // No items? Still allow status change but no inventory mutation (edge)
+    if (!reservation.items || reservation.items.length === 0) {
+      reservation.status = to;
+      return reservationRepo.save(reservation);
+    }
+
+    // Deterministic lock ordering (D2)
+    const sortedIds = [
+      ...new Set(reservation.items.map((i) => i.inventoryId)),
+    ].sort();
+    let lockedInventories: Inventory[] = [];
+    if (sortedIds.length > 0) {
+      lockedInventories = await manager.find(Inventory, {
+        where: { id: In(sortedIds) },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (lockedInventories.length !== sortedIds.length) {
+        const foundIds = new Set(lockedInventories.map((r) => r.id));
+        const missing = sortedIds.find((mid) => !foundIds.has(mid))!;
+        throw new NotFoundException(`Inventory ${missing} not found`);
+      }
+    }
+    const inventoryMap = new Map(lockedInventories.map((inv) => [inv.id, inv]));
+
+    // Mutate inventory per FR-002/FR-003
+    const inventoryRepo = manager.getRepository(Inventory);
+    try {
+      for (const item of reservation.items) {
+        const inv = inventoryMap.get(item.inventoryId)!;
+        if (to === ReservationStatus.COMPLETED) {
+          // Q2: no explicit stock>=qty check, rely on DB CHECK
+          inv.stock -= item.quantity;
+          inv.reservedAmount -= item.quantity;
+        } else if (
+          to === ReservationStatus.CANCELLED ||
+          to === ReservationStatus.EXPIRED
+        ) {
+          inv.reservedAmount -= item.quantity;
+        }
+        await inventoryRepo.save(inv);
+      }
+    } catch (e: any) {
+      // Map DB CHECK violation to 409 per FR-007
+      const msg = e?.message ?? '';
+      if (
+        msg.includes('CHK_') ||
+        msg.includes('check constraint') ||
+        msg.includes('violates check') ||
+        e?.code === '23514'
+      ) {
+        throw new ConflictException(
+          `Inventory invariant violation on transition ${reservation.status} -> ${to}: ${msg}`,
+        );
+      }
+      throw e;
+    }
+
     reservation.status = to;
-    return repo.save(reservation);
+    const saved = await reservationRepo.save(reservation);
+    this.logger.log(
+      `Reservation ${id} ${fromStatus} -> ${to} (inventory updated)`,
+    );
+    // Return with items
+    return (await reservationRepo.findOne({
+      where: { id: saved.id },
+      relations: { items: true },
+    })) as Reservation;
   }
 
   private assertOwner(

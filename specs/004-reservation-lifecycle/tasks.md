@@ -27,10 +27,10 @@ description: "Task list for Reservation Lifecycle (Phase 4)"
 
 **Purpose**: Verify branch, dependencies, and existing PostgreSQL baseline before any lifecycle change
 
-- [ ] T001 Verify branch `004-reservation-lifecycle` and `specs/004-reservation-lifecycle/spec.md` clarifications Q1-Q5 integrated
-- [ ] T002 Ensure Docker infra healthy `docker compose ps` (postgres:17 healthy) and `.env` present in `D:\Projects\mini-e-commerce\.env`
-- [ ] T003 [P] Run baseline `npm run build` and `npm run lint` (0 errors) in `D:\Projects\mini-e-commerce\`
-- [ ] T004 [P] Run existing unit baseline `npm run test -- --runInBand` (pre-Phase 4: 89 tests) to confirm green before edits
+- [x] T001 Verify branch `004-reservation-lifecycle` and `specs/004-reservation-lifecycle/spec.md` clarifications Q1-Q5 integrated
+- [x] T002 Ensure Docker infra healthy `docker compose ps` (postgres:17 healthy) and `.env` present in `D:\Projects\mini-e-commerce\.env`
+- [x] T003 [P] Run baseline `npm run build` and `npm run lint` (0 errors) in `D:\Projects\mini-e-commerce\`
+- [x] T004 [P] Run existing unit baseline `npm run test -- --runInBand` (pre-Phase 4: 89 tests) to confirm green before edits
 
 ---
 
@@ -40,11 +40,11 @@ description: "Task list for Reservation Lifecycle (Phase 4)"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T005 Create or verify `src/modules/reservation/test/` helpers for lifecycle integration in `src/modules/reservation/test/reservation.lifecycle.integration.spec.ts` (skeleton, real PG DataSource setup per `quickstart.md`)
-- [ ] T006 Implement shared private helper `transition()` skeleton with `FOR UPDATE` Reservation lock + deterministic sorted Inventory locks in `src/modules/reservation/reservation.service.ts` (reuse Phase 3 `sortedIds` ordering, D1/D2)
-- [ ] T007 Add transactional error-mapping utility (DB `@Check` `QueryFailedError` → `409 ConflictException`) in `src/modules/reservation/reservation.service.ts`
-- [ ] T008 Verify existing `ReservationService.validateTransition` allows `RESERVED→COMPLETED|CANCELLED|EXPIRED` only and `assertOwner` guard in `src/modules/reservation/reservation.service.ts`
-- [ ] T009 Verify `Inventory` derived `available` and `@Check` constraints remain (`src/modules/inventory/entities/inventory.entity.ts`) — no DDL change per D10
+- [x] T005 Create or verify `src/modules/reservation/test/` helpers for lifecycle integration in `src/modules/reservation/test/reservation.lifecycle.integration.spec.ts` (skeleton, real PG DataSource setup per `quickstart.md`)
+- [x] T006 Implement shared private helper `transition()` skeleton with `FOR UPDATE` Reservation lock + deterministic sorted Inventory locks in `src/modules/reservation/reservation.service.ts` (reuse Phase 3 `sortedIds` ordering, D1/D2)
+- [x] T007 Add transactional error-mapping utility (DB `@Check` `QueryFailedError` → `409 ConflictException`) in `src/modules/reservation/reservation.service.ts`
+- [x] T008 Verify existing `ReservationService.validateTransition` allows `RESERVED→COMPLETED|CANCELLED|EXPIRED` only and `assertOwner` guard in `src/modules/reservation/reservation.service.ts`
+- [x] T009 Verify `Inventory` derived `available` and `@Check` constraints remain (`src/modules/inventory/entities/inventory.entity.ts`) — no DDL change per D10
 
 **Checkpoint**: Foundation ready — `transition()` helper exists (stubs returning 409/404), locks sorted, EntityManager pattern verified; US1-US4 can now proceed (sequentially or in parallel once this phase done)
 
@@ -58,17 +58,17 @@ description: "Task list for Reservation Lifecycle (Phase 4)"
 
 ### Tests for User Story 1 (write FIRST, ensure FAIL)
 
-- [ ] T010 [P] [US1] Unit test for `complete` success path + `stock`/`reserved` math in `src/modules/reservation/reservation.service.spec.ts`
-- [ ] T011 [P] [US1] Unit test for `orderId` overwrite vs `404` not-found and idempotent `COMPLETED→COMPLETED` `200` in `src/modules/reservation/reservation.service.spec.ts`
-- [ ] T012 [P] [US1] Integration test `RESERVED→COMPLETED` happy (multi-item atomic, stock/reserved decrement) in `src/modules/reservation/test/reservation.integration.spec.ts`
-- [ ] T013 [P] [US1] Integration test idempotent `COMPLETED→COMPLETED` retry `200` no re-mutation in `src/modules/reservation/test/reservation.integration.spec.ts`
-- [ ] T014 [P] [US1] Integration test `complete` with valid `orderId` overwrite + invalid `orderId` `404` rollback in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T010 [P] [US1] Unit test for `complete` success path + `stock`/`reserved` math in `src/modules/reservation/reservation.service.spec.ts`
+- [x] T011 [P] [US1] Unit test for `orderId` overwrite vs `404` not-found and idempotent `COMPLETED→COMPLETED` `200` in `src/modules/reservation/reservation.service.spec.ts`
+- [x] T012 [P] [US1] Integration test `RESERVED→COMPLETED` happy (multi-item atomic, stock/reserved decrement) in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T013 [P] [US1] Integration test idempotent `COMPLETED→COMPLETED` retry `200` no re-mutation in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T014 [P] [US1] Integration test `complete` with valid `orderId` overwrite + invalid `orderId` `404` rollback in `src/modules/reservation/test/reservation.integration.spec.ts`
 
 ### Implementation for User Story 1
 
-- [ ] T015 [US1] Implement `complete(manager,userId,id,dto,role)` with `FOR UPDATE` Reservation → `assertOwner` → idempotent `COMPLETED→COMPLETED` `200` early return → `validateTransition` → `orderId` existence check (overwrite per Q3) → lock sorted Inventories `FOR UPDATE` → mutate `stock-=qty` + `reserved-=qty` via `manager.getRepository(Inventory)` → save `Reservation.status=COMPLETED` in `src/modules/reservation/reservation.service.ts`
-- [ ] T016 [US1] Ensure `ReservationController.complete` wraps in `dataSource.transaction(manager=>service.complete(...))` and error mapping via `AllExceptionsFilter` in `src/modules/reservation/reservation.controller.ts`
-- [ ] T017 [US1] Verify `PATCH /reservations/:id/complete` contract per `specs/004-reservation-lifecycle/contracts/reservation-lifecycle-api.md` (201 vs 200 idempotent vs 409/404/403) — manual curl check per `quickstart.md` §3.1
+- [x] T015 [US1] Implement `complete(manager,userId,id,dto,role)` with `FOR UPDATE` Reservation → `assertOwner` → idempotent `COMPLETED→COMPLETED` `200` early return → `validateTransition` → `orderId` existence check (overwrite per Q3) → lock sorted Inventories `FOR UPDATE` → mutate `stock-=qty` + `reserved-=qty` via `manager.getRepository(Inventory)` → save `Reservation.status=COMPLETED` in `src/modules/reservation/reservation.service.ts`
+- [x] T016 [US1] Ensure `ReservationController.complete` wraps in `dataSource.transaction(manager=>service.complete(...))` and error mapping via `AllExceptionsFilter` in `src/modules/reservation/reservation.controller.ts`
+- [x] T017 [US1] Verify `PATCH /reservations/:id/complete` contract per `specs/004-reservation-lifecycle/contracts/reservation-lifecycle-api.md` (201 vs 200 idempotent vs 409/404/403) — manual curl check per `quickstart.md` §3.1
 
 **Checkpoint**: US1 fully functional — `complete` is transactional, `stock`/`reserved` synchronized, orderId overwrite, idempotent retry `200`; tests T010-T014 green (`--runInBand`)
 
@@ -82,14 +82,14 @@ description: "Task list for Reservation Lifecycle (Phase 4)"
 
 ### Tests for User Story 2
 
-- [ ] T018 [P] [US2] Unit test for `cancel` success + `reserved` only decrement + `409` on `CANCELLED→CANCELLED` in `src/modules/reservation/reservation.service.spec.ts`
-- [ ] T019 [P] [US2] Integration test `RESERVED→CANCELLED` happy (stock unchanged, reserved decrement, available +qty) in `src/modules/reservation/test/reservation.integration.spec.ts`
-- [ ] T020 [P] [US2] Integration test `cancel` invalid edges `COMPLETED→CANCELLED` `409` + `CANCELLED→CANCELLED` `409` + `403` non-owner in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T018 [P] [US2] Unit test for `cancel` success + `reserved` only decrement + `409` on `CANCELLED→CANCELLED` in `src/modules/reservation/reservation.service.spec.ts`
+- [x] T019 [P] [US2] Integration test `RESERVED→CANCELLED` happy (stock unchanged, reserved decrement, available +qty) in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T020 [P] [US2] Integration test `cancel` invalid edges `COMPLETED→CANCELLED` `409` + `CANCELLED→CANCELLED` `409` + `403` non-owner in `src/modules/reservation/test/reservation.integration.spec.ts`
 
 ### Implementation for User Story 2
 
-- [ ] T021 [US2] Implement `cancel(manager,userId,id,role)` via shared `transition()` helper → `RESERVED→CANCELLED` `reservedAmount-=qty` only in `src/modules/reservation/reservation.service.ts`
-- [ ] T022 [US2] Verify `ReservationController.cancel` transaction wrapper + `@Auth(User,Admin)` + `assertOwner` in `src/modules/reservation/reservation.controller.ts`
+- [x] T021 [US2] Implement `cancel(manager,userId,id,role)` via shared `transition()` helper → `RESERVED→CANCELLED` `reservedAmount-=qty` only in `src/modules/reservation/reservation.service.ts`
+- [x] T022 [US2] Verify `ReservationController.cancel` transaction wrapper + `@Auth(User,Admin)` + `assertOwner` in `src/modules/reservation/reservation.controller.ts`
 
 **Checkpoint**: US1 + US2 both work — cancel releases reserved without touching stock, invalid/terminal retries correctly `409`
 
@@ -103,14 +103,14 @@ description: "Task list for Reservation Lifecycle (Phase 4)"
 
 ### Tests for User Story 3
 
-- [ ] T023 [P] [US3] Unit test for `expire` admin-only guard + immediate override (no `expiresAt` check) in `src/modules/reservation/reservation.service.spec.ts`
-- [ ] T024 [P] [US3] Integration test `RESERVED→EXPIRED` immediate admin override even when `expiresAt` future in `src/modules/reservation/test/reservation.integration.spec.ts`
-- [ ] T025 [P] [US3] Integration test `expire` invalid edges `EXPIRED→EXPIRED` `409` + `COMPLETED→EXPIRED` `409` + non-admin `403` in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T023 [P] [US3] Unit test for `expire` admin-only guard + immediate override (no `expiresAt` check) in `src/modules/reservation/reservation.service.spec.ts`
+- [x] T024 [P] [US3] Integration test `RESERVED→EXPIRED` immediate admin override even when `expiresAt` future in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T025 [P] [US3] Integration test `expire` invalid edges `EXPIRED→EXPIRED` `409` + `COMPLETED→EXPIRED` `409` + non-admin `403` in `src/modules/reservation/test/reservation.integration.spec.ts`
 
 ### Implementation for User Story 3
 
-- [ ] T026 [US3] Implement `expire(manager,id)` (admin-only at controller) → shared `transition()` → `RESERVED→EXPIRED` `reserved-=qty` without `expiresAt <= NOW()` check per Q1 in `src/modules/reservation/reservation.service.ts`
-- [ ] T027 [US3] Verify `ReservationController.expire` remains `@Auth(Admin)` and `dataSource.transaction` wrapper in `src/modules/reservation/reservation.controller.ts` (service path bypassable for Phase 5 worker per D3)
+- [x] T026 [US3] Implement `expire(manager,id)` (admin-only at controller) → shared `transition()` → `RESERVED→EXPIRED` `reserved-=qty` without `expiresAt <= NOW()` check per Q1 in `src/modules/reservation/reservation.service.ts`
+- [x] T027 [US3] Verify `ReservationController.expire` remains `@Auth(Admin)` and `dataSource.transaction` wrapper in `src/modules/reservation/reservation.controller.ts` (service path bypassable for Phase 5 worker per D3)
 
 **Checkpoint**: US1-US3 work — all three terminal transitions have correct inventory effects and role/time semantics per Q1
 
@@ -124,17 +124,17 @@ description: "Task list for Reservation Lifecycle (Phase 4)"
 
 ### Tests for User Story 4
 
-- [ ] T028 [P] [US4] Unit test for `validateTransition` rejects all invalid edges (`COMPLETED→*`, `EXPIRED→*`, `CANCELLED→*`, `RESERVED→RESERVED`) in `src/modules/reservation/reservation.service.spec.ts`
-- [ ] T029 [P] [US4] Integration test invalid transitions `409` and inventory unchanged for each edge in `src/modules/reservation/test/reservation.integration.spec.ts`
-- [ ] T030 [P] [US4] Integration test concurrent race `complete` vs `cancel` on same `RESERVED` → single winner `200`/`409` and exactly one inventory mutation in `src/modules/reservation/test/reservation.integration.spec.ts`
-- [ ] T031 [P] [US4] Integration test rollback on missing `Inventory` (`404` inventory not found) + multi-item partial failure rollback in `src/modules/reservation/test/reservation.integration.spec.ts`
-- [ ] T032 [P] [US4] Integration test DB `CHECK` backstop (stock/reserved invariant `409`) and `reservedAmount<qty` guard in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T028 [P] [US4] Unit test for `validateTransition` rejects all invalid edges (`COMPLETED→*`, `EXPIRED→*`, `CANCELLED→*`, `RESERVED→RESERVED`) in `src/modules/reservation/reservation.service.spec.ts`
+- [x] T029 [P] [US4] Integration test invalid transitions `409` and inventory unchanged for each edge in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T030 [P] [US4] Integration test concurrent race `complete` vs `cancel` on same `RESERVED` → single winner `200`/`409` and exactly one inventory mutation in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T031 [P] [US4] Integration test rollback on missing `Inventory` (`404` inventory not found) + multi-item partial failure rollback in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [x] T032 [P] [US4] Integration test DB `CHECK` backstop (stock/reserved invariant `409`) and `reservedAmount<qty` guard in `src/modules/reservation/test/reservation.integration.spec.ts`
 
 ### Implementation for User Story 4
 
-- [ ] T033 [US4] Harden `validateTransition` + early idempotent `COMPLETED→COMPLETED` branch per Q4 in `src/modules/reservation/reservation.service.ts`
-- [ ] T034 [US4] Ensure `transition()` handles concurrent `FOR UPDATE` loss → detects `status != RESERVED` after lock and returns `409` (except idempotent `200`) + `reservedAmount` not double-decremented in `src/modules/reservation/reservation.service.ts`
-- [ ] T035 [US4] Add `Logger` audit for idempotent `COMPLETED→COMPLETED` second `200` path in `src/modules/reservation/reservation.service.ts` (per D6 risk mitigation)
+- [x] T033 [US4] Harden `validateTransition` + early idempotent `COMPLETED→COMPLETED` branch per Q4 in `src/modules/reservation/reservation.service.ts`
+- [x] T034 [US4] Ensure `transition()` handles concurrent `FOR UPDATE` loss → detects `status != RESERVED` after lock and returns `409` (except idempotent `200`) + `reservedAmount` not double-decremented in `src/modules/reservation/reservation.service.ts`
+- [x] T035 [US4] Add `Logger` audit for idempotent `COMPLETED→COMPLETED` second `200` path in `src/modules/reservation/reservation.service.ts` (per D6 risk mitigation)
 
 **Checkpoint**: US1-US4 all green — every invalid edge `409`, every race single-winner, no double-release/sell
 
@@ -144,12 +144,12 @@ description: "Task list for Reservation Lifecycle (Phase 4)"
 
 **Purpose**: Validate end-to-end (quickstart), harden observability, and documentation
 
-- [ ] T036 Run `npm run lint` (0 errors) and `npm run build` in `D:\Projects\mini-e-commerce\`
-- [ ] T037 Run full suite `npm run test -- --runInBand` (all 13+ suites green) and `npm run test:e2e -- --runInBand` in `D:\Projects\mini-e-commerce\`
-- [ ] T038 Validate `specs/004-reservation-lifecycle/quickstart.md` §3.1-3.7 manual flows: complete/cancel/expire, invalid `409`, concurrent race, idempotent retry, orderId overwrite in `D:\Projects\mini-e-commerce\`
-- [ ] T039 [P] Update `docs/plan.md` Phase 4 status `NOT DONE` → `DONE — YYYY-MM-DD` and `AGENTS.md` module map if needed (no new module, but verify reservation row) in `docs/plan.md`
-- [ ] T040 [P] Add ADR `docs/decisions/00xx-reservation-lifecycle-transaction-pattern.md` documenting `FOR UPDATE` reservation-first + sorted inventories, Q1-Q5 choices, idempotent `COMPLETED` semantics in `docs/decisions/`
-- [ ] T041 Final `git status` clean, `git log --oneline -5` confirms `004-reservation-lifecycle` history, ready for `/speckit.converge` and merge
+- [x] T036 Run `npm run lint` (0 errors) and `npm run build` in `D:\Projects\mini-e-commerce\`
+- [x] T037 Run full suite `npm run test -- --runInBand` (all 13+ suites green) and `npm run test:e2e -- --runInBand` in `D:\Projects\mini-e-commerce\`
+- [x] T038 Validate `specs/004-reservation-lifecycle/quickstart.md` §3.1-3.7 manual flows: complete/cancel/expire, invalid `409`, concurrent race, idempotent retry, orderId overwrite in `D:\Projects\mini-e-commerce\`
+- [x] T039 [P] Update `docs/plan.md` Phase 4 status `NOT DONE` → `DONE — 2026-09-14` and `AGENTS.md` module map if needed (no new module, but verify reservation row) in `docs/plan.md`
+- [x] T040 [P] Add ADR `docs/decisions/0010-reservation-lifecycle-transaction-pattern.md` documenting `FOR UPDATE` reservation-first + sorted inventories, Q1-Q5 choices, idempotent `COMPLETED` semantics in `docs/decisions/`
+- [x] T041 Final `git status` clean, `git log --oneline -5` confirms `004-reservation-lifecycle` history, ready for `/speckit.converge` and merge
 
 ---
 
