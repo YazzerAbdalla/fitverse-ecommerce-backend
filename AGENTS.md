@@ -14,7 +14,7 @@ and [`skills/`](./skills); do not duplicate that detail here.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at `specs/001-inventory-foundation/plan.md` (Phase 1 — Inventory Foundation).
+at `specs/003-transaction-safe-reservation/plan.md` (Phase 3 — Transaction-Safe Reservation).
 <!-- SPECKIT END -->
 
 ---
@@ -58,7 +58,7 @@ Client / GraphQL client
 NestJS HTTP API (REST controllers + GraphQL resolvers)
         │  Global: ValidationPipe, AllExceptionsFilter, CORS, Swagger
         ▼
-Modules / Services (auth, users, products, cart, order, inventory)
+Modules / Services (auth, users, products, cart, order, inventory, reservation)
         │  Cross-module calls go through exported Services, not repositories
         ▼
 PostgreSQL  ◄──── source of truth for transactional state
@@ -76,6 +76,7 @@ RabbitMQ    ◄──── async notifications (published AFTER the DB commit)
 | `cart` | REST | Per-user cart, cart items (eager product); stock checks via `InventoryService.getInventory` (available = stock - reservedAmount) |
 | `order` | REST | **Stub** — controller returns placeholder strings; `CreateOrderDto` empty; not implemented |
 | `inventory` | REST | `Inventory` entity (`stock`, `reservedAmount`, `available` derived) with DB constraints (`stock >=0`, `reservedAmount >=0`, `reservedAmount <= stock`, unique `productId`); `InventoryService` business API (`getInventory`, `checkAvailability`, `increaseStock`, `decreaseStock`, `decreaseStockForOrderMany`/`restoreStockForOrderMany` via `EntityManager`, plus `reserve`/`releaseReservation`/`completeSale` stubs); thin REST controller (`GET /inventory/:productId`, `GET .../availability?quantity=`, `POST .../increase`, `POST .../decrease`); `InventorySeeder` (idempotent `onModuleInit`) seeds & auto-creates inventory |
+| `reservation` | REST | `Reservation` + `ReservationItem` entities (`ReservationStatus` enum `RESERVED|COMPLETED|EXPIRED|CANCELLED`, FKs to `User`/`Order`/`Inventory`, `@Index` on `userId`/`status`/`expiresAt`/`status+expiresAt`, `@Unique reservationId+inventoryId`, `@Check quantity>0`, `ORDER SET NULL`, `USER CASCADE`); `ReservationService` (EntityManager write methods `create/complete/cancel/expire`, reads `findById/listByUser`, `validateTransition`, `assertOwner`); `ReservationController` (`POST /reservations`, `GET /:id`, `GET /`, `PATCH /:id/complete|cancel|expire`); `ReservationModule` (`src/modules/reservation`) |
 
 ### Boundaries (enforce)
 
@@ -143,7 +144,7 @@ Follow the existing structure under `src/modules/<name>/`:
   `Product.name`). Don't index every column. Candidates for future
   inventory/reservation tables are listed in `docs/plan.md` §26.
 - **Constraints** — enforce invariants in the DB, not only in code
-  (`@Check`, `@Unique`, `NOT NULL`). Examples: `Inventory` has `@Check('"stock" >= 0')`, `@Check('"reservedAmount" >= 0')`, `@Check('"reservedAmount" <= "stock"')`, `@Unique(['productId'])`; `Product` has `@Unique(['name'])`.
+  (`@Check`, `@Unique`, `NOT NULL`). Examples: `Inventory` has `@Check('"stock" >= 0')`, `@Check('"reservedAmount" >= 0')`, `@Check('"reservedAmount" <= "stock"')`, `@Unique(['productId'])`; `ReservationItem` has `@Check('"quantity" > 0')`, `@Unique(['reservationId','inventoryId'])`; `Product` has `@Unique(['name'])`; `Reservation` has composite `@Index(['status','expiresAt'])` for future expiration cleanup.
 - **Transactions** — mandatory for any write touching multiple related rows
   (reservation + inventory, order + inventory). Use `EntityManager` inside
   `dataSource.transaction`.

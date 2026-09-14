@@ -178,7 +178,9 @@ describe('InventoryService', () => {
       inv.stock = 10;
       inv.reservedAmount = 2;
       inventoryRepo.findOne.mockResolvedValue(inv);
-      inventoryRepo.save.mockImplementation(async (e: Inventory) => e);
+      inventoryRepo.save.mockImplementation(async (e) =>
+        Promise.resolve(e as Inventory),
+      );
 
       const result = await service.increaseStock('p1', 5);
       expect(result.stock).toBe(15);
@@ -206,7 +208,9 @@ describe('InventoryService', () => {
       inv.stock = 10;
       inv.reservedAmount = 2;
       inventoryRepo.findOne.mockResolvedValue(inv);
-      inventoryRepo.save.mockImplementation(async (e: Inventory) => e);
+      inventoryRepo.save.mockImplementation((e) =>
+        Promise.resolve(e as Inventory),
+      );
 
       const result = await service.decreaseStock('p1', 3);
       expect(result.stock).toBe(7);
@@ -254,7 +258,7 @@ describe('InventoryService', () => {
       await expect(
         service.decreaseStockForOrderMany(manager, [
           { id: '1', stock: 2, soldQuantity: 5 } as any,
-        ]),
+        ] as Array<Pick<Inventory, 'id' | 'stock'> & { soldQuantity: number }>),
       ).rejects.toThrow(ConflictException);
     });
   });
@@ -280,7 +284,9 @@ describe('InventoryService', () => {
       inv.stock = 10;
       inv.reservedAmount = 2;
       inventoryRepo.findOne.mockResolvedValue(inv);
-      inventoryRepo.save.mockImplementation(async (e) => e);
+      inventoryRepo.save.mockImplementation(async (e) =>
+        Promise.resolve(e as Inventory),
+      );
 
       const result = await service.reserve('p1', 3);
       expect(result.reservedAmount).toBe(5);
@@ -299,7 +305,9 @@ describe('InventoryService', () => {
       inv.stock = 10;
       inv.reservedAmount = 5;
       inventoryRepo.findOne.mockResolvedValue(inv);
-      inventoryRepo.save.mockImplementation(async (e) => e);
+      inventoryRepo.save.mockImplementation(async (e) =>
+        Promise.resolve(e as Inventory),
+      );
 
       const result = await service.releaseReservation('p1', 3);
       expect(result.reservedAmount).toBe(2);
@@ -320,7 +328,9 @@ describe('InventoryService', () => {
       inv.stock = 10;
       inv.reservedAmount = 3;
       inventoryRepo.findOne.mockResolvedValue(inv);
-      inventoryRepo.save.mockImplementation(async (e) => e);
+      inventoryRepo.save.mockImplementation(async (e) =>
+        Promise.resolve(e as Inventory),
+      );
 
       const result = await service.completeSale('p1', 2);
       expect(result.stock).toBe(8);

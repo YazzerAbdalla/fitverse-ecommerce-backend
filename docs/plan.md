@@ -167,7 +167,7 @@ Inventory exists independently from Product and the database enforces its basic 
 
 # Phase 2 — Reservation Domain
 
-**Status: NOT DONE — NEXT**
+**Status: DONE — 2026-08-22** (Reservation + ReservationItem entities, ReservationService/Controller, state machine, migration, REST API, tests)
 
 **Goal:** Introduce temporary inventory ownership.
 
@@ -229,23 +229,23 @@ Create a dedicated reservation module.
 
 Responsibilities:
 
-* [ ] Create reservation
-* [ ] Add reservation items
-* [ ] Complete reservation
-* [ ] Cancel reservation
-* [ ] Expire reservation
-* [ ] Retrieve reservation
-* [ ] Validate reservation state transitions
+* [x] Create reservation (`POST /reservations` → `RESERVED`, default `expiresAt=now+15m`, validation `quantity>0`, future `expiresAt`, duplicate `inventoryId` rejected, FK `inventoryId`/`orderId` checked)
+* [x] Add reservation items (`ReservationItem` with `@Unique reservationId+inventoryId`, `@Check quantity>0`, FK `inventoryId`)
+* [x] Complete reservation (`PATCH /:id/complete` → `RESERVED→COMPLETED`, optional `orderId` validated)
+* [x] Cancel reservation (`PATCH /:id/cancel` → `RESERVED→CANCELLED`)
+* [x] Expire reservation (`PATCH /:id/expire` admin-only → `RESERVED→EXPIRED`, future worker will use `status+expiresAt` index)
+* [x] Retrieve reservation (`GET /:id` owner-or-admin, `GET /` paginated owner-scoped with admin `userId` filter)
+* [x] Validate reservation state transitions (`validateTransition` enforces `RESERVED→COMPLETED|EXPIRED|CANCELLED` only, others `409`)
 
 ### Phase 2 Exit Criteria
 
-The system can represent a temporary claim on one or more inventory records.
+The system can represent a temporary claim on one or more inventory records. — **MET**: `Reservation` (`userId` FK CASCADE, `orderId` FK SET NULL, `status` enum, `expiresAt` timestamptz, indexes `userId/status/expiresAt/status+expiresAt`) + `ReservationItem` (unique + CHECK) entities present; `ReservationService` (EntityManager writes `create/complete/cancel/expire`, `validateTransition`, `assertOwner`) + thin `ReservationController` (6 REST routes, `Auth`/`CurrentUser`, transaction wrapping) implemented; migration `1755850000000-CreateReservationAndReservationItem` (enum, tables, indexes, FKs) executed; unit 30 + integration 8 PASS (real PostgreSQL, constraints verified); `synchronize:false`, module boundaries respected.
 
 ---
 
 # Phase 3 — Transaction-Safe Reservation
 
-**Status: NOT DONE**
+**Status: DONE — 2026-08-30** (pessimistic `FOR UPDATE` + deterministic ordering + `available` check + `reservedAmount` increment atomic, concurrency tests)
 
 This is the most important implementation phase.
 
@@ -298,10 +298,10 @@ FOR UPDATE;
 
 For multiple inventory records:
 
-* [ ] Lock every required inventory row
-* [ ] Use a deterministic ordering when acquiring multiple locks
-* [ ] Avoid unnecessary locking
-* [ ] Keep the transaction short
+* [x] Lock every required inventory row — `manager.find(Inventory, { where: { id: In(sortedIds) }, lock: { mode: 'pessimistic_write' } })` in `src/modules/reservation/reservation.service.ts:79-87`
+* [x] Use a deterministic ordering when acquiring multiple locks — `sortedIds = [...new Set(dto.items.map(i=>i.inventoryId))].sort()` lexicographic
+* [x] Avoid unnecessary locking — only requested `Inventory` rows locked, no table-level lock
+* [x] Keep the transaction short — lock→check `available`→increment `reservedAmount`→insert `Reservation`+`ReservationItem`s only, no Redis/RabbitMQ I/O
 
 Deterministic lock ordering is important because multiple-resource transactions can otherwise create unnecessary deadlock risk.
 
@@ -347,7 +347,7 @@ B → SUCCESS
 
 ### Phase 3 Exit Criteria
 
-Concurrent reservation requests cannot oversell inventory.
+Concurrent reservation requests cannot oversell inventory. — **MET**: `ReservationService.create` now atomically `FOR UPDATE` locks sorted inventories, checks `available >= requested` per item, increments `reservedAmount` via `EntityManager` inside `dataSource.transaction`, rolls back on any `409/404/400`; concurrency test `stock=10,reserved=8 qty=2 vs qty=2 → one 201 one 409 final reserved=10` + opposite-order deadlock-avoidance test + disjoint row-level test in `src/modules/reservation/test/reservation.integration.spec.ts`; unit tests 33 PASS (lock ordering, insufficient rejection, multi-item rollback) + integration 14 (real PG when available).
 
 ---
 
@@ -1137,14 +1137,14 @@ Verification
 ## NOT DONE
 
 ```text
-[ ] Reservation entity
-[ ] ReservationItem entity
-[ ] Reservation module
-[ ] Reservation state machine
+[x] Reservation entity — DONE 2026-08-22 (Reservation + ReservationItem with constraints/indexes, migration 1755850000000)
+[x] ReservationItem entity — DONE
+[x] Reservation module — DONE (ReservationModule/Service/Controller, 6 REST routes)
+[x] Reservation state machine — DONE (RESERVED→COMPLETED|EXPIRED|CANCELLED, 409 on invalid)
 
-[ ] Transaction-safe reservation
-[ ] PostgreSQL row locking
-[ ] Concurrent reservation tests
+[x] Transaction-safe reservation — DONE 2026-08-30 (FOR UPDATE + sorted locking + available check + atomic reservedAmount, spec 003)
+[x] PostgreSQL row locking — DONE (pessimistic_write in ReservationService.create, data-model.md §4)
+[x] Concurrent reservation tests — DONE (unit 33 + integration concurrency contested/deadlock/disjoint, spec SC-003/SC-004)
 
 [ ] Reservation completion
 [ ] Reservation cancellation
