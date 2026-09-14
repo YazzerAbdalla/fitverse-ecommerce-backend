@@ -41,7 +41,6 @@ type Product {
   name: String!
   price: Int!
   slug: String!
-  stock: Int!
 }
 
 type ProductPagination {
