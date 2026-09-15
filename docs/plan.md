@@ -1092,6 +1092,569 @@ Verification
 
 ---
 
+# Phase 16 — Auth Upgrades: Forgot Password, Recovery Token, WhatsApp OTP, Google OAuth
+
+**Status: NOT DONE — planned 2026-09-15**
+
+**Goal:** Harden the existing `auth`/`users` modules so users can recover a forgotten
+password securely (recovery token), verify identity via WhatsApp OTP, and sign in
+with Google OAuth — without weakening JWT/password invariants or introducing
+auth as a source of inventory/order truth.
+
+This phase is **orthogonal** to Phases 5–8 (reservation/order). It can be
+implemented in parallel by a dedicated auth owner, but must respect the same
+modular-monolith boundaries, PostgreSQL-as-source-of-truth, and global
+`ValidationPipe`/`AllExceptionsFilter` rules in `AGENTS.md`.
+
+## 16.0 Current Auth Snapshot (what exists)
+
+```text
+auth.controller.ts : POST /auth/register , POST /auth/login (LocalAuthGuard → AuthService.login → JwtService.sign)
+auth.service.ts    : register (bcrypt 10 rounds, duplicate 400), userValidation (bcrypt.compare), login (JwtPayload {sub,email,fullName,role})
+auth.module.ts     : JwtModule.registerAsync (JWT_SECRET / JWT_EXPIRES_IN), PassportModule, LocalStrategy
+users.entity.ts    : id uuid, firstName, lastName, email (@Index), role enum, password (NOT nullable), orders, cart
+guards             : LocalAuthGuard, JwtGuard (manual verify), RolesGuard via @Auth decorator
+config             : JWT_SECRET, JWT_EXPIRES_IN=60s
+```
+
+Gap: no `phoneNumber`, no `googleId`/`provider`, no `password nullable` for OAuth
+users, no reset-token/OTP persistence, no OAuth strategy, no rate limiting on
+auth endpoints.
+
+## 16.1 Forgot Password + Recovery Token
+
+### 16.1.1 User-facing flow
+
+```text
+POST /auth/forgot-password { email }            → 200 (always, anti-enumeration)
+        ↓
+  Find user by email (if exists)
+        ↓
+  Invalidate any prior active reset tokens for that user
+        ↓
+  Generate cryptographically random token (32 bytes → hex/base64url, 64 chars)
+        ↓
+  Store ONLY hashed token (sha256 or bcrypt) + expiresAt (now+15m) in DB
+        ↓
+  Publish event / send notification (email + optional WhatsApp) with link:
+      https://app.example.com/reset-password?token=<rawToken>&email=<email>
+        ↓
+POST /auth/reset-password { email, token, newPassword } → 200 + invalidates token
+        ↓
+POST /auth/validate-reset-token { email, token } (optional UX helper) → 200/400
+```
+
+Anti-enumeration: `forgot-password` returns `200 { message: "If an account exists, a reset link has been sent." }` even when email not found. Do not leak existence. Log at `debug` only.
+
+### 16.1.2 Data model
+
+**Alter `User`:**
+
+```text
+User
+  + phoneNumber: varchar nullable, @Index, @Unique where not null (optional, for OTP)
+  + phoneVerified: boolean default false
+  + googleId: varchar nullable, @Unique where not null
+  + provider: enum('local','google') default 'local'  OR authProvider
+  + password: varchar nullable  (nullable for pure-OAuth users; local users still require it)
+  + emailVerified: boolean default false (future use, not blocking)
+```
+
+Migration must: `ALTER COLUMN password DROP NOT NULL`, add new columns, add partial
+unique indexes (`WHERE "googleId" IS NOT NULL`, `WHERE "phoneNumber" IS NOT NULL`),
+keep `@Index(['email'])` unique (add `@Unique(['email'])` if not already enforced
+at DB — currently only `@Index`, so add unique constraint).
+
+**New entity `PasswordResetToken`:**
+
+```text
+PasswordResetToken
+------------------
+id              uuid PK
+userId          uuid FK → User.id ON DELETE CASCADE, @Index
+tokenHash       varchar(255)  -- sha256 hex of rawToken; indexed for lookup
+expiresAt       timestamptz   -- now + 15m (configurable via RESET_TOKEN_TTL)
+usedAt          timestamptz nullable
+createdAt       timestamptz
+-- constraints
+CHECK expiresAt > createdAt
+INDEX (userId, expiresAt)
+INDEX (tokenHash)  -- for verify path
+UNIQUE? no — multiple tokens per user allowed but only one active; old ones invalidated
+```
+
+Alternative considered: store JWT as reset token. Rejected — opaque random token
++ hash is simpler to revoke, shorter audit surface, no JWT secret rotation risk.
+JWT can still be used for short-lived `reset_jwt` if product prefers, but document
+choice in `docs/decisions/`.
+
+**Token generation details:**
+
+```text
+rawToken = crypto.randomBytes(32).toString('hex') // 64 chars, 256 bits
+tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex')
+store tokenHash, return rawToken once to caller (never log rawToken)
+```
+
+Expiry: `RESET_TOKEN_TTL=15m` (env), single-use (`usedAt` set on success),
+nightly cleanup job may purge `expiresAt < NOW() - 7d` (not critical path).
+
+### 16.1.3 Business API (AuthService)
+
+```text
+requestPasswordReset(email: string): Promise<void>
+  - validate email format (DTO)
+  - lookup user; if not found → return void (no error)
+  - within transaction (manager):
+      update prior tokens: SET usedAt=NOW() WHERE userId=? AND usedAt IS NULL AND expiresAt > NOW()
+      insert new token (tokenHash, expiresAt)
+  - after commit: emit event via RabbitMQ / BullMQ notification worker (do NOT block commit)
+  - rate-limit outside service (guard/interceptor) — see 16.5
+
+validateResetToken(email: string, rawToken: string): Promise<User>
+  - hash rawToken, find token by tokenHash + join user by email
+  - throw 400 if not found / expired / usedAt not null
+  - return user
+
+resetPassword(dto: ResetPasswordDto): Promise<void>
+  - dto { email, token, newPassword } — class-validator: IsEmail, IsString MinLength 8, MaxLength 72, password strength regex optional
+  - transaction:
+      SELECT PasswordResetToken FOR UPDATE where tokenHash = hash(token) AND userId = user.id
+      verify not expired / not used
+      bcrypt.hash(newPassword, 10) → update User.password
+      SET token.usedAt = NOW()
+      optionally: invalidate all other active tokens for user
+  - after commit: revoke existing JWTs? V1: no JWT revocation (stateless); document as open question; optionally rotate via short JWT_EXPIRES_IN
+```
+
+All writes inside `dataSource.transaction` with `EntityManager`; no Redis/RabbitMQ
+I/O inside the transaction.
+
+### 16.1.4 REST API
+
+| Method | Path | Auth | Body | Success | Errors |
+|--------|------|------|------|---------|--------|
+| POST | `/auth/forgot-password` | public | `{ email }` | `200 { message }` | `400 validation`, `429 rate limit` |
+| POST | `/auth/reset-password` | public | `{ email, token, newPassword }` | `200 { message }` | `400 invalid/expired token`, `400 weak password` |
+| POST | `/auth/validate-reset-token` | public | `{ email, token }` | `200 { valid:true }` | `400 invalid` |
+
+DTOs: `ForgotPasswordDto`, `ResetPasswordDto`, `ValidateResetTokenDto` (`class-validator`,
+`@ApiProperty` for Swagger). Reuse global `ValidationPipe` (whitelist/forbid).
+
+### 16.1.5 Security / constraints
+
+* [ ] `tokenHash` is `sha256`, never store rawToken
+* [ ] Constant-time compare not needed for sha256 hex (hash lookup), but do not log rawToken
+* [ ] Expiry enforced in DB (`CHECK`) and service (`expiresAt > now`)
+* [ ] Single-use (`usedAt`); second use → `400`
+* [ ] Rate limit `forgot-password` per IP + per email (Redis, see 16.5)
+* [ ] Password rules: `MinLength 8`, forbid `password === email`, optional strength check
+* [ ] Invalidate tokens on successful reset; do not allow `COMPLETED→COMPLETED` reuse (unlike reservation idempotency)
+* [ ] Audit log via `Logger` (hashed token prefix only)
+
+## 16.2 WhatsApp OTP
+
+### 16.2.1 Purpose
+
+* Primary: second factor / passwordless login / phone verification / reset-password
+  alternative delivery channel.
+* User explicitly chooses WhatsApp; never auto-fallback without consent (privacy).
+
+Provider abstraction: `WhatsAppService` interface so tests don't hit real API and
+prod can swap Twilio / Meta Cloud API / local mock.
+
+```text
+interface WhatsAppProvider {
+  sendOtp(phoneNumber: string, otp: string, expiresInMinutes: number): Promise<{ messageId: string }>;
+}
+```
+
+Implementations: `TwilioWhatsAppProvider`, `MetaCloudWhatsAppProvider`, `NoopWhatsAppProvider` (dev/test).
+
+### 16.2.2 OTP lifecycle
+
+```text
+POST /auth/otp/request { phoneNumber }  (or { email } → lookup phoneNumber)
+        ↓
+  Normalize phone (E.164, e.g. +2010...) validate via regex / libphonenumber
+        ↓
+  Rate-limit check (Redis)
+        ↓
+  Generate 6-digit numeric OTP: crypto.randomInt(100000, 999999).toString()
+        ↓
+  Store hashed OTP (sha256 or bcrypt) in Redis with TTL 5m (OTP_TTL)
+     key = otp:whatsapp:<phone>
+     value = { hash, attempts:0, createdAt }
+  + also persist audit row in PostgreSQL (OtpAttempt) for analytics/replay protection
+        ↓
+  Send via WhatsAppProvider (outside DB transaction — Redis is source for verify)
+        ↓
+POST /auth/otp/verify { phoneNumber, otp }
+        ↓
+  Fetch from Redis, compare hash, increment attempts
+        ↓
+  Success (≤3 attempts, not expired) → mark phoneVerified=true (if user exists)
+     issue JWT (login) OR return { verified:true, verificationToken } for next step
+        ↓
+  Failure → 400 (invalid/expired), after 3 attempts → invalidate OTP, require resend
+```
+
+Config: `OTP_TTL=5m`, `OTP_MAX_ATTEMPTS=3`, `OTP_RESEND_COOLDOWN=60s`,
+`OTP_LENGTH=6`, `WHATSAPP_PROVIDER=twilio|meta|noop`, `WHATSAPP_FROM_NUMBER`.
+
+### 16.2.3 Data model
+
+**Redis (primary for verify, authoritative for TTL):**
+
+```text
+key: otp:whatsapp:+2010xxxxxxx
+value: { tokenHash: string, attempts: number, createdAt: number, expiresAt: number }
+TTL: 300s
+```
+
+**PostgreSQL audit (optional but recommended for idempotency & forensics):**
+
+```text
+OtpVerification
+---------------
+id            uuid PK
+phoneNumber   varchar @Index
+userId        uuid nullable FK → User
+purpose       enum('login','verify_phone','reset_password') default 'login'
+codeHash      varchar -- sha256 of OTP
+expiresAt     timestamptz
+attempts      int default 0
+verifiedAt    timestamptz nullable
+createdAt     timestamptz
+-- indexes: (phoneNumber, createdAt), (expiresAt)
+-- CHECK attempts <= 3
+```
+
+If Redis is unavailable, verify path must degrade gracefully: return `503`
+with retry-after, do not fall back to stale DB row as source of OTP truth
+(Redis is cache-but-for-OTP it is the TTL authority; keep PG as audit only
+per AGENTS.md infra rule — here OTP is ephemeral, so Redis-as-TTL is acceptable;
+document exception in ADR).
+
+### 16.2.4 REST API
+
+| Method | Path | Auth | Body | Success | Errors |
+|--------|------|------|------|---------|--------|
+| POST | `/auth/otp/request` | public (or `JwtGuard` for verify-phone) | `{ phoneNumber, purpose? }` | `200 { message, expiresIn:300 }` | `400 invalid phone`, `429 cooldown` |
+| POST | `/auth/otp/verify` | public | `{ phoneNumber, otp, purpose? }` | `200 { accessToken }` OR `200 { verified:true }` | `400 invalid/expired`, `429 too many attempts` |
+| POST | `/auth/otp/request` (authenticated) | `JwtGuard` | `{}` (uses current user phone) | same | `404 no phone on file` |
+
+DTOs: `RequestOtpDto` (`@Matches(/^\+[1-9]\d{1,14}$/)` E.164, `@IsEnum(OtpPurpose)`),
+`VerifyOtpDto` (`@Length(6,6)`).
+
+Flow variants:
+* `purpose=login` → verify success issues JWT directly (passwordless).
+* `purpose=verify_phone` → marks `user.phoneVerified=true`, returns no JWT.
+* `purpose=reset_password` → returns short-lived `verificationToken` (JWT 5m) that
+  `POST /auth/reset-password` can accept as alternative to email token.
+
+### 16.2.5 Security / reliability
+
+* [ ] Hash OTP before storage (sha256), never log raw OTP
+* [ ] TTL enforced by Redis + service check `expiresAt > now`
+* [ ] Max 3 attempts, then delete key (brute-force mitigation)
+* [ ] Resend cooldown 60s per phone (Redis `SET NX EX`)
+* [ ] Rate limit per IP (10/hour) + per phone (5/hour)
+* [ ] OTP is numeric but generated via `crypto.randomInt` (not `Math.random`)
+* [ ] WhatsApp send failures do not leak whether phone exists; log provider error
+* [ ] Idempotent resend: if active OTP exists and cooldown not passed → `429`
+* [ ] Provider abstraction keeps business logic testable via mock
+
+## 16.3 Google OAuth Login
+
+### 16.3.1 User-facing flow
+
+```text
+GET /auth/google
+        ↓
+  Passport GoogleStrategy (scope: profile email) → redirect to Google
+        ↓
+GET /auth/google/callback?code=...
+        ↓
+  GoogleStrategy.validate(accessToken, refreshToken, profile) → { googleId, email, firstName, lastName, avatar }
+        ↓
+  AuthService.handleGoogleLogin(profile)
+      if user exists by googleId → return user
+      else if user exists by email → link googleId to existing user (if local) → return user
+      else → create new User { email, firstName, lastName, googleId, provider:'google', password:null, phoneVerified:false }
+        ↓
+  Issue JWT (same as local login) → redirect or JSON { accessToken }
+```
+
+Optional link flow for already-authenticated users: `GET /auth/google/link` with
+`JwtGuard` → links Google to current user.
+
+### 16.3.2 Data model
+
+Reuses `User` alterations from 16.1.2 (`googleId`, `provider`, `password nullable`).
+No separate token table needed; OAuth tokens are not persisted beyond session
+unless refresh-token feature is added later (future: `UserOAuthAccount` table).
+
+If app later supports multiple providers, extract to:
+
+```text
+UserOAuthAccount
+----------------
+id          uuid PK
+userId      uuid FK → User
+provider    enum('google','github',...)
+providerId  varchar
+email       varchar nullable
+createdAt   timestamptz
+@Unique([provider, providerId])
+@Unique([userId, provider])
+```
+
+For Phase 16 V1 keep single `googleId` column to minimize migration churn.
+
+### 16.3.3 Module / service changes
+
+Dependencies (add to `package.json`):
+
+```text
+passport-google-oauth20
+@types/passport-google-oauth20
+```
+
+New files:
+
+```text
+auth/
+├── strategies/
+│   ├── local.strategy.ts        (exists)
+│   ├── jwt.strategy.ts          (add — replaces manual JwtGuard verify with Passport JWT)
+│   └── google.strategy.ts       (new — PassportStrategy(Strategy, 'google'))
+├── guards/
+│   ├── google-auth.guard.ts     (extends AuthGuard('google'))
+│   └── jwt-auth.guard.ts        (optional wrapper over AuthGuard('jwt'))
+├── dto/
+│   ├── forgot-password.dto.ts
+│   ├── reset-password.dto.ts
+│   ├── request-otp.dto.ts
+│   └── verify-otp.dto.ts
+├── entities/
+│   ├── password-reset-token.entity.ts
+│   └── otp-verification.entity.ts (optional audit)
+└── providers/
+    └── whatsapp.provider.ts     (interface + implementations)
+```
+
+`AuthModule` imports:
+
+```text
+PassportModule.register({ session: false })
+JwtModule.registerAsync(...)  (exists, keep global)
+TypeOrmModule.forFeature([PasswordResetToken, OtpVerification])
+CacheModule (already global, for OTP rate limit)
+```
+
+`ConfigService` keys: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL`
+(e.g. `http://localhost:3000/auth/google/callback`), `FRONTEND_URL` for redirect.
+
+`AuthService` new methods:
+
+```text
+handleGoogleLogin(profile: GoogleProfile): Promise<{ user: User, accessToken: string }>
+linkGoogleAccount(userId: string, profile: GoogleProfile): Promise<User>
+requestPasswordReset / validateResetToken / resetPassword (16.1)
+requestWhatsAppOtp / verifyWhatsAppOtp (16.2)
+```
+
+`AuthController` new routes (see combined table below).
+
+### 16.3.4 REST API
+
+| Method | Path | Auth | Notes |
+|--------|------|------|-------|
+| GET | `/auth/google` | public | `GoogleAuthGuard` → 302 to Google |
+| GET | `/auth/google/callback` | public (guard) | `GoogleAuthGuard` → `AuthService.handleGoogleLogin` → `200 { accessToken }` or `302 ${FRONTEND_URL}/auth/callback?token=...` |
+| GET | `/auth/google/link` | `JwtGuard` | links Google to current user |
+| POST | `/auth/forgot-password` | public | see 16.1.4 |
+| POST | `/auth/reset-password` | public | see 16.1.4 |
+| POST | `/auth/otp/request` | public / JwtGuard | see 16.2.4 |
+| POST | `/auth/otp/verify` | public | see 16.2.4 |
+
+Swagger: add `@ApiOperation`, `@ApiResponse` for each; Google redirect is
+`@ApiExcludeEndpoint` or documented as redirect.
+
+### 16.3.5 Security / decisions
+
+* [ ] `GOOGLE_CLIENT_SECRET` never committed; via `.env` + `ConfigService`
+* [ ] `state` param via Passport `state: true` (CSRF protection on OAuth)
+* [ ] Email from Google is trusted but still verify `profile.emails[0].verified === true`; if not verified → reject or require OTP
+* [ ] If email already exists as `local` with password, linking is allowed but
+  requires either password confirmation or email-OTP before linking (prevent
+  account takeover) — specify in `clarify` step
+* [ ] JWT payload unchanged (`sub,email,fullName,role`) — Google users get same
+  shape; `role` defaults to `User`
+* [ ] `password` nullable migration must not break existing login: `userValidation`
+  should return `null` if `password` is null and strategy is `local` (force OAuth path)
+* [ ] Rate limit `/auth/google` and `/auth/google/callback` (per IP)
+
+### 16.4 Cross-cutting concerns (all auth upgrades)
+
+#### 16.4.1 Configuration (`.env` additions)
+
+```text
+# Password reset
+RESET_TOKEN_TTL=15m
+RESET_TOKEN_CLEANUP_DAYS=7
+
+# OTP / WhatsApp
+OTP_TTL=5m
+OTP_MAX_ATTEMPTS=3
+OTP_RESEND_COOLDOWN=60s
+WHATSAPP_PROVIDER=noop          # noop|twilio|meta
+WHATSAPP_FROM_NUMBER=+14155238886
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+META_WHATSAPP_TOKEN=
+META_PHONE_NUMBER_ID=
+
+# Google OAuth
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_CALLBACK_URL=http://localhost:3000/auth/google/callback
+FRONTEND_URL=http://localhost:3000
+
+# JWT (existing)
+JWT_SECRET=...
+JWT_EXPIRES_IN=15m              # tighten from 60s if desired; document rotation
+```
+
+All read via `ConfigService`; never hardcode.
+
+#### 16.4.2 Rate limiting
+
+Reuse existing Redis infra (`@nestjs/cache-manager` + `@keyv/redis`) with a thin
+`ThrottlerGuard` or custom `RateLimitGuard` (do not add `@nestjs/throttler`
+unless justified; keep dependency minimal). Limits:
+
+```text
+forgot-password:  5 req / hour / IP  + 3 / hour / email
+reset-password:  10 req / hour / IP
+otp/request:  5 req / hour / phone + 10 / hour / IP, cooldown 60s per phone
+otp/verify:  10 req / hour / phone, max 3 attempts per OTP
+google/callback: 20 req / hour / IP
+login/register: 10 req / hour / IP (existing, now enforced)
+```
+
+Use Redis `INCR` + `EXPIRE` or `SET NX EX` for atomic counters; on Redis
+unavailable → fail open with log for auth (availability over strict limit) but
+emit metric.
+
+#### 16.4.3 Events / notifications
+
+After `forgot-password` commit and after `otp/request`, publish async notification
+after DB commit (pattern from `docs/architecture/data-flow.md` — commit then publish):
+
+```text
+DB commit
+  ↓
+Event: PasswordResetRequested { userId, email, token, expiresAt } or OtpRequested { phone, otp }
+  ↓
+RabbitMQ (NOTIFICATION_SERVICE) or BullMQ job
+  ↓
+Worker → email service / WhatsAppProvider
+```
+
+Tests mock the provider; integration tests assert event published, not actual
+WhatsApp delivery.
+
+#### 16.4.4 Module boundaries
+
+* `AuthService` owns all auth business logic; `UsersService` owns user CRUD.
+  `AuthModule` imports `UsersModule` and `TypeOrmModule.forFeature`.
+* No other module should `@InjectRepository(User)` directly — go through
+  `UsersService` or `AuthService` as appropriate (enforce in `AGENTS.md` §2).
+* `Inventory`/`Reservation`/`Order` remain unaware of auth internals.
+
+#### 16.4.5 Database constraints & indexes
+
+```text
+User:  UNIQUE(email)  -- add if missing; currently only Index
+       UNIQUE(googleId) WHERE googleId IS NOT NULL
+       UNIQUE(phoneNumber) WHERE phoneNumber IS NOT NULL
+       CHECK provider IN ('local','google')
+PasswordResetToken:  FK userId CASCADE, INDEX(userId), INDEX(tokenHash), INDEX(expiresAt)
+OtpVerification:  FK userId SET NULL, INDEX(phoneNumber), INDEX(expiresAt)
+```
+
+Migrations: `17xxxxx-AuthUpgradesUserAndResetToken` and `17xxxxx-AddOtpAndGoogleFields`
+— never edit committed migrations; `synchronize:false`.
+
+#### 16.4.6 Error handling
+
+Throw Nest HTTP exceptions: `BadRequestException` (invalid token/OTP/phone),
+`NotFoundException` (user not found only internally; externally still 200 anti-enum),
+`TooManyRequestsException`/`429` via `HttpException`, `UnauthorizedException`
+for OAuth failures. Global `AllExceptionsFilter` serializes.
+
+### 16.5 Implementation Plan (Spec Kit tasks)
+
+Order matters — smallest increments:
+
+```text
+1. Spec: /speckit.specify auth-upgrades (forgot, token, otp, google) → clarify Q&A
+2. Design: data-model.md (User alters, PasswordResetToken, OtpVerification), research.md (passport-google vs next-auth, twilio vs meta)
+3. Contract: OpenAPI for 7 new endpoints + Google redirect
+4. Migration 1: User alterations (googleId, phoneNumber, provider, password nullable, uniques)
+5. Migration 2: PasswordResetToken entity + repo + service methods + controller (forgot/reset/validate)
+6. Unit tests: requestPasswordReset (anti-enum, hash, expiry), validateResetToken, resetPassword (single-use, expiry, bcrypt)
+7. Integration tests: real PG transaction, concurrent reset-password with same token → one wins
+8. Migration 3 / Redis: OtpVerification audit + WhatsAppProvider interface + Noop provider + OTP request/verify flow
+9. Unit + integration tests for OTP (TTL, max attempts, cooldown, hash, resend)
+10. Migration 4: GoogleStrategy + AuthService.handleGoogleLogin + controller routes + JwtStrategy migration
+11. E2E: register→forgot→reset→login, otp/request→otp/verify→login, google callback→JWT→access protected route
+12. Rate limiting guard + config + tests (redis mock, fail-open)
+13. Docs: docs/architecture/modules.md, docs/decisions/ADR-auth-upgrades.md, Swagger, Postman
+```
+
+### 16.6 Testing (must cover)
+
+**Unit (mock repos, mock Redis/WhatsApp/Google):**
+
+* [ ] forgot-password: existing email creates hashed token + expiresAt=now+15m, non-existing email still 200, prior tokens invalidated
+* [ ] validate-reset-token: valid → user, expired → 400, used → 400, wrong hash → 400
+* [ ] reset-password: success updates password bcrypt + sets usedAt, second use 400, expired 400, weak password 400
+* [ ] otp: request generates 6-digit, hashes, sets Redis TTL, verify within attempts succeeds, 4th attempt invalidates, expired 400
+* [ ] google: existing googleId returns same user, existing email links, new email creates user with provider google and null password, unverified Google email rejected
+
+**Integration (real PostgreSQL, real Redis when available):**
+
+* [ ] DB constraints: duplicate email 409, duplicate googleId partial unique, password nullable allowed, tokenHash insert
+* [ ] Transaction: concurrent `reset-password` with same token → one 200 one 400, no double-use
+* [ ] OTP Redis TTL: request → verify within TTL 200, after TTL 400
+* [ ] Rate limit: exceed limit → 429, Redis down → request still succeeds with log
+
+**E2E (supertest):**
+
+* [ ] `POST /auth/register` → `POST /auth/forgot-password` → capture rawToken via test hook → `POST /auth/reset-password` → `POST /auth/login` with new password 200
+* [ ] `POST /auth/otp/request` → `POST /auth/otp/verify` (mock provider captures OTP) → `GET /cart` with JWT 200
+* [ ] `GET /auth/google` → 302, `GET /auth/google/callback` with mocked profile → 200 + JWT
+
+### 16.7 Exit Criteria
+
+Auth upgrades are complete when:
+
+```text
+[x] POST /auth/forgot-password returns 200 anti-enum, creates sha256-hashed token expires 15m, invalidates prior tokens
+[x] POST /auth/reset-password validates token (hash, expiry, single-use), bcrypt-hashes new password, marks token used, all inside EntityManager transaction
+[x] POST /auth/otp/request and POST /auth/otp/verify implement 6-digit OTP via WhatsAppProvider abstraction (Noop in dev/test, Twilio/Meta in prod), Redis TTL 5m, hash, 3 attempts, 60s cooldown
+[x] GET /auth/google and GET /auth/google/callback via passport-google-oauth20 issue same JWT shape as local login, link-by-email or create, password nullable, state CSRF
+[x] User migration applied (googleId, phoneNumber, provider, password nullable, partial uniques), PasswordResetToken + OtpVerification (audit) migrations
+[x] Rate limiting on all new auth endpoints via Redis (fail-open on Redis down)
+[x] Unit 30+ and integration 10+ and E2E 3 flows PASS, including concurrent token reuse → single winner
+[x] Swagger updated, docs/decisions ADR recorded, no secrets in repo, AllExceptionsFilter handles 400/401/429
+```
+
+---
+
 # Current Backlog Status
 
 ## DONE
@@ -1159,6 +1722,14 @@ Verification
 
 [ ] Order cancellation
 
+[ ] Auth upgrades — Phase 16 (planned 2026-09-15)
+[ ]   Forgot password (POST /auth/forgot-password anti-enum, sha256 hashed token, 15m TTL, invalidate priors)
+[ ]   Recovery token (POST /auth/reset-password + validate, single-use, EntityManager tx, bcrypt)
+[ ]   WhatsApp OTP (POST /auth/otp/request|verify, 6-digit crypto, Redis TTL 5m, 3 attempts, 60s cooldown, Twilio/Meta abstraction)
+[ ]   Google OAuth login (GET /auth/google + callback, passport-google-oauth20, link-by-email or create, password nullable, state CSRF)
+[ ]   User alterations (googleId, phoneNumber, provider, password nullable, partial uniques)
+[ ]   Rate limiting on auth endpoints (Redis, fail-open)
+
 [ ] Async events
 [ ] Notification workers
 [ ] RabbitMQ/BullMQ responsibilities
@@ -1211,6 +1782,17 @@ Order Completion
         ↓
 Phase 8
 Cancellation
+```
+
+Then auth (orthogonal, can run in parallel with Phases 5–8):
+
+```text
+Phase 16
+Auth Upgrades
+  16.1 Forgot Password + Recovery Token
+  16.2 WhatsApp OTP (provider abstraction, Redis TTL)
+  16.3 Google OAuth Login (passport-google-oauth20)
+  16.4 Rate limiting + config + events
 ```
 
 Then infrastructure/reliability:
