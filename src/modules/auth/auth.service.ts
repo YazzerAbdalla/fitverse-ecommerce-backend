@@ -218,7 +218,9 @@ export class AuthService {
     this.logger.log(`Password reset successful for ${dto.email}`);
   }
 
-  // ============ Phase 16: WhatsApp OTP ============
+  // ============ Phase 16: WhatsApp OTP — TODO (Future) DEFERRED per 2026-09-16 ============
+  // Logic remains implemented but controller returns 501 until WhatsApp Business setup.
+  // Password-only login is enforced in V1. Re-enable by removing 501 guard in auth.controller.ts.
   async requestWhatsAppOtp(
     dto: { phoneNumber?: string; purpose?: OtpPurpose },
     currentUser?: Partial<User>,

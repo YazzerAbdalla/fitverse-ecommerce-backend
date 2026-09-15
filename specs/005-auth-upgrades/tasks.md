@@ -68,29 +68,31 @@
 
 ---
 
-## Phase 4: User Story 2 - WhatsApp OTP Verification & Passwordless Login (Priority: P2)
+## Phase 4: User Story 2 - WhatsApp OTP Verification & Passwordless Login — **DEFERRED / TODO (Future) per 2026-09-16** (Priority: P2 → Future)
 
-**Goal**: `POST /auth/otp/request` + `POST /auth/otp/verify` with `WhatsAppProvider` Noop/Twilio/Meta, E.164, `crypto.randomInt` 6-digit sha256, Redis TTL 300s + PG `OtpVerification` fallback (Q4), 3 attempts, 60s cooldown, purpose `login` (JWT) + `verify_phone` (verified:true) — registration still requires password, email OTP deferred (§16.8)
+**Status**: **DEFERRED** — login is **password-only** (`POST /auth/login` requires password) in V1. `POST /auth/otp/request|verify` return `501 Not Implemented` until WhatsApp Business setup. DTOs/provider/entities still migrate but OTP logic is **paused (TODO)**.
 
-**Independent Test**: `POST /auth/register` (password required) → `POST /auth/login` password 200 AND `POST /auth/otp/request` phone → mock captures OTP → `POST /auth/otp/verify` purpose login →200 JWT (same shape) + `GET /cart` 200; purpose verify_phone →200 verified:true; expired/4th attempt 400/429; resend cooldown 60s →429. Also stop Redis → verify still succeeds via PG fallback (Q4).
+**Goal** (Future): `POST /auth/otp/request` + `POST /auth/otp/verify` with `WhatsAppProvider` Noop/Twilio/Meta, E.164, `crypto.randomInt` 6-digit sha256, Redis TTL 300s + PG `OtpVerification` fallback (Q4), 3 attempts, 60s cooldown, purpose `login` (JWT) + `verify_phone` (verified:true) — registration still requires password, email OTP deferred (§16.8)
 
-### Tests for User Story 2 ⚠️
+**Independent Test** (Future — TODO): `POST /auth/register` (password required) → `POST /auth/login` password 200 AND `POST /auth/otp/request` phone → mock captures OTP → `POST /auth/otp/verify` purpose login →200 JWT (same shape) + `GET /cart` 200; purpose verify_phone →200 verified:true; expired/4th attempt 400/429; resend cooldown 60s →429. Also stop Redis → verify still succeeds via PG fallback (Q4). **Currently 501 TODO**.
 
-- [ ] T026 [P] [US2] Unit test OTP request generation in `src/modules/auth/auth.service.spec.ts` (E.164 validation, `crypto.randomInt` 6-digit, sha256 hash, Redis SET EX 300, DB row, Noop provider capture, cooldown 60s →429)
-- [ ] T027 [P] [US2] Unit test OTP verify in `src/modules/auth/auth.service.spec.ts` (correct within TTL → JWT or verified:true, expired →400, 4th attempt invalidates →400/429, `purpose=reset_password` in V1 →400, phoneVerified flag)
-- [ ] T028 [P] [US2] Integration test Redis TTL + PG fallback in `src/modules/auth/test/otp.integration.spec.ts` (real PG+Redis: request → verify within TTL 200, after TTL 400, Redis down fallback via DB row per Q4)
-- [ ] T029 [US2] E2E test passwordless login in `test/auth.e2e-spec.ts` (register → `otp/request` → `otp/verify` purpose login → JWT → `GET /cart` 200; also `purpose verify_phone`)
+### Tests for User Story 2 ⚠️ — TODO Future
 
-### Implementation for User Story 2
+- [ ] T026 [P] [US2] Unit test OTP request generation in `src/modules/auth/auth.service.spec.ts` (E.164 validation, `crypto.randomInt` 6-digit, sha256 hash, Redis SET EX 300, DB row, Noop provider capture, cooldown 60s →429) — **TODO Future, deferred**
+- [ ] T027 [P] [US2] Unit test OTP verify in `src/modules/auth/auth.service.spec.ts` (correct within TTL → JWT or verified:true, expired →400, 4th attempt invalidates →400/429, `purpose=reset_password` in V1 →400, phoneVerified flag) — **TODO Future**
+- [ ] T028 [P] [US2] Integration test Redis TTL + PG fallback in `src/modules/auth/test/otp.integration.spec.ts` (real PG+Redis: request → verify within TTL 200, after TTL 400, Redis down fallback via DB row per Q4) — **TODO Future**
+- [ ] T029 [US2] E2E test passwordless login in `test/auth.e2e-spec.ts` (register → `otp/request` → `otp/verify` purpose login → JWT → `GET /cart` 200; also `purpose verify_phone`) — **TODO Future**
 
-- [X] T030 [P] [US2] Create DTOs in `src/modules/auth/dto/request-otp.dto.ts` (`phoneNumber @Matches E.164, purpose @IsEnum login|verify_phone`) and `src/modules/auth/dto/verify-otp.dto.ts` (`phoneNumber, otp @Length 6, purpose`)
-- [X] T031 [P] [US2] Create `WhatsAppProvider` interface and `NoopWhatsAppProvider`/`TwilioWhatsAppProvider`/`MetaCloudWhatsAppProvider` in `src/modules/auth/providers/whatsapp.provider.ts` (Research D6, `WHATSAPP_PROVIDER` selector)
-- [X] T032 [US2] Implement `AuthService.requestWhatsAppOtp(dto, currentUser?)` in `src/modules/auth/auth.service.ts` (normalize E.164, rate-limit with full headers B1, `SET NX EX` cooldown, `crypto.randomInt` → sha256 → Redis + `OtpVerification` insert with timingSafeEqual ready, send via BullMQ `authOtpSend` per hybrid C after commit — no I/O inside PG tx)
-- [X] T033 [US2] Implement `AuthService.verifyWhatsAppOtp(dto)` in `src/modules/auth/auth.service.ts` (fetch Redis first, fallback to DB when Redis down per Q4 — check expiresAt/attempts via timingSafeEqual, increment `attempts` on **every** attempt including success per B2 choice B before delete, mark phoneVerified, delete key/verifiedAt on success/3 fails, issue JWT `tokenVersion` for login vs verified:true for verify_phone)
-- [X] T034 [US2] Add controller routes in `src/modules/auth/auth.controller.ts` (`POST /auth/otp/request` public+JwtGuard optional phone, `POST /auth/otp/verify` public — service calls, Swagger)
-- [X] T035 [US2] Ensure login choice is discoverable: `POST /auth/login` (LocalAuthGuard) remains password path, OTP path issues same JWT shape (`sub,email,fullName,role,tokenVersion`) per Q2 + F2 C — update `src/modules/auth/types.ts` to include `tokenVersion`
+### Implementation for User Story 2 — TODO Future (code paused, returns 501)
 
-**Checkpoint**: US1+US2 both work — `npm run test -- --runInBand` passes; quickstart WhatsApp OTP curls (including Redis-down fallback) succeed; Swagger shows both login options
+- [X] T030 [P] [US2] Create DTOs in `src/modules/auth/dto/request-otp.dto.ts` (`phoneNumber @Matches E.164, purpose @IsEnum login|verify_phone`) and `src/modules/auth/dto/verify-otp.dto.ts` (`phoneNumber, otp @Length 6, purpose`) — **done, but guarded TODO**
+- [X] T031 [P] [US2] Create `WhatsAppProvider` interface and `NoopWhatsAppProvider`/`TwilioWhatsAppProvider`/`MetaCloudWhatsAppProvider` in `src/modules/auth/providers/whatsapp.provider.ts` (Research D6, `WHATSAPP_PROVIDER` selector) — **done, paused**
+- [X] T032 [US2] Implement `AuthService.requestWhatsAppOtp(dto, currentUser?)` in `src/modules/auth/auth.service.ts` (normalize E.164, rate-limit with full headers B1, `SET NX EX` cooldown, `crypto.randomInt` → sha256 → Redis + `OtpVerification` insert with timingSafeEqual ready, send via BullMQ `authOtpSend` per hybrid C after commit — no I/O inside PG tx) — **implemented but TODO-guarded to 501 in controller per 2026-09-16**
+- [X] T033 [US2] Implement `AuthService.verifyWhatsAppOtp(dto)` in `src/modules/auth/auth.service.ts` (fetch Redis first, fallback to DB when Redis down per Q4 — check expiresAt/attempts via timingSafeEqual, increment `attempts` on **every** attempt including success per B2 choice B before delete, mark phoneVerified, delete key/verifiedAt on success/3 fails, issue JWT `tokenVersion` for login vs verified:true for verify_phone) — **implemented but TODO-guarded**
+- [X] T034 [US2] Add controller routes in `src/modules/auth/auth.controller.ts` (`POST /auth/otp/request` public+JwtGuard optional phone, `POST /auth/otp/verify` public — service calls, Swagger) — **now returns 501 TODO in V1 password-only mode**
+- [X] T035 [US2] Ensure login choice is discoverable: `POST /auth/login` (LocalAuthGuard) remains password path, OTP path issues same JWT shape (`sub,email,fullName,role,tokenVersion`) per Q2 + F2 C — update `src/modules/auth/types.ts` to include `tokenVersion` — **password-only in V1, OTP TODO**
+
+**Checkpoint**: US1 works password-only; US2 is **DEFERRED — TODO Future** (501). `npm run test -- --runInBand` skips OTP flows until re-enabled; Swagger shows login password-only.
 
 ---
 

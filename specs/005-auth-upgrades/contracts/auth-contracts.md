@@ -59,9 +59,11 @@ Second use of same `rawToken` → `400`. Concurrent same token → one `200` one
 
 **Errors**: `400` invalid/expired/used token or weak password (`MinLength`/`MaxLength`/`===email`), `429` rate limit.
 
-## 4. `POST /auth/otp/request`
+## 4. `POST /auth/otp/request` — **TODO (Future) DEFERRED per 2026-09-16 — password-only login**
 
-**Auth**: public, or `JwtGuard` variant `POST /auth/otp/request` with `CurrentUser` (uses phone on file).
+**Status**: DEFERRED — returns `501 Not Implemented` in V1. No WhatsApp setup required now. Spec kept for future.
+
+**Auth**: public, or `JwtGuard` variant `POST /auth/otp/request` with `CurrentUser` (uses phone on file) — TODO Future.
 
 **Request** `RequestOtpDto`:
 ```json
@@ -70,31 +72,33 @@ Second use of same `rawToken` → `400`. Concurrent same token → one `200` one
 ```
 `purpose` default `login`. Public path requires `phoneNumber`; authenticated path `phoneNumber` optional (uses `user.phoneNumber`).
 
-**Success** `200`:
+**Success** `501` in V1:
 ```json
-{ "message": "OTP sent via WhatsApp.", "expiresIn": 300 }
+{ "statusCode": 501, "message": "WhatsApp OTP not enabled — password login only. TODO future." }
 ```
-Flow: normalize E.164, rate-limit (`otp/request 5/h/phone +10/h/IP`), cooldown `SET NX EX 60` per phone → `429` if active (full headers per B1), `crypto.randomInt(100000,999999)`, `codeHash=sha256(otp)`, store Redis `otp:whatsapp:<phone>` `EX 300` `{ hash, attempts:0, createdAt, expiresAt, purpose }` **and** insert `OtpVerification` row `purpose, expiresAt: now+5m`; after commit send via `WhatsAppProvider.sendOtp(phone, otp, 5)` (Noop in dev/test) through BullMQ `authOtpSend {phone,otp,expiresIn}` per hybrid C. Redis unavailable → still create DB row, log `Logger.warn` + metric `auth_rate_limit_fallback_total`, return `200`.
+Future flow (TODO): normalize E.164, rate-limit (`otp/request 5/h/phone +10/h/IP`), cooldown `SET NX EX 60` per phone → `429` if active (full headers per B1), `crypto.randomInt(100000,999999)`, `codeHash=sha256(otp)`, store Redis `otp:whatsapp:<phone>` `EX 300` `{ hash, attempts:0, createdAt, expiresAt, purpose }` **and** insert `OtpVerification` row `purpose, expiresAt: now+5m`; after commit send via `WhatsAppProvider.sendOtp(phone, otp, 5)` (Noop in dev/test) through BullMQ `authOtpSend {phone,otp,expiresIn}` per hybrid C. Redis unavailable → still create DB row, log `Logger.warn` + metric `auth_rate_limit_fallback_total`, return `200`.
 
-**Errors**: `400` invalid phone/purpose, `404` no phone on file (JwtGuard path), `429` cooldown/limit.
+**Errors**: `501` in V1 (paused). Future: `400` invalid phone/purpose, `404` no phone on file (JwtGuard path), `429` cooldown/limit.
 
-## 5. `POST /auth/otp/verify`
+## 5. `POST /auth/otp/verify` — **TODO (Future) DEFERRED per 2026-09-16**
+
+**Status**: DEFERRED — returns `501 Not Implemented` in V1.
 
 **Request** `VerifyOtpDto`:
 ```json
 { "phoneNumber": "+2010xxxxxxx", "otp": "123456", "purpose": "login" }
 // @Matches E.164, @Length(6,6), @IsEnum login|verify_phone
 ```
-**Success** — depends on `purpose`:
+**Success** `501` in V1. Future — depends on `purpose`:
 
 - `purpose=login` → `200 { "accessToken": "<jwt>" }` (same `{sub,email,fullName,role}` as `POST /auth/login`; `JwtService.sign`); mark `user.phoneVerified=true` if user exists, delete Redis key + set `OtpVerification.verifiedAt=NOW()`.
 - `purpose=verify_phone` → `200 { "verified": true }` (no JWT); mark `user.phoneVerified=true`.
 
-Fallback (Q4): if Redis down or key missing, lookup latest `OtpVerification` where `phoneNumber` + `verifiedAt IS NULL` + `expiresAt > NOW()`, verify `sha256(otp) === codeHash` via `timingSafeEqual`, enforce `attempts < 3`, increment `attempts` on **every** attempt (including success per B2 choice B) before deleting, on success set `verifiedAt`, on 3 fails delete/invalidate. `X-RateLimit-*` headers still returned per B1.
+Fallback (Q4) Future: if Redis down or key missing, lookup latest `OtpVerification` where `phoneNumber` + `verifiedAt IS NULL` + `expiresAt > NOW()`, verify `sha256(otp) === codeHash` via `timingSafeEqual`, enforce `attempts < 3`, increment `attempts` on **every** attempt (including success per B2 choice B) before deleting, on success set `verifiedAt`, on 3 fails delete/invalidate. `X-RateLimit-*` headers still returned per B1.
 
-**Errors**: `400` invalid/expired OTP or `purpose=reset_password` in V1, `400/429` after 3 attempts (key deleted, require resend), `429` `otp/verify 10/h/phone`.
+**Errors**: `501` in V1. Future: `400` invalid/expired OTP or `purpose=reset_password` in V1, `400/429` after 3 attempts (key deleted, require resend), `429` `otp/verify 10/h/phone`.
 
-**Login choice** (Q2): `POST /auth/login` (email+password, `LocalAuthGuard`) and `POST /auth/otp/request|verify` (phone, passwordless) are independent; both issue same JWT shape; registration `POST /auth/register` still requires password.
+**Login choice** (Q2 → deferred 2026-09-16): **Password-only in V1** — `POST /auth/login` (email+password, `LocalAuthGuard`) is the sole login path; `POST /auth/otp/request|verify` is `501 TODO` until WhatsApp Business setup. Registration `POST /auth/register` still requires password.
 
 ## 6. `GET /auth/google`
 

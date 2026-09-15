@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   Get,
+  HttpException,
+  HttpStatus,
   Post,
   Request,
   UseGuards,
@@ -66,22 +68,33 @@ export class AuthController {
     return { message: 'Password reset successful.' };
   }
 
+  // TODO (Future) — WhatsApp OTP deferred per 2026-09-16, password-only login in V1
+  // Endpoints return 501 until WhatsApp Business setup ready. Logic in AuthService remains but is paused.
   @Post('/otp/request')
   @UseGuards(RateLimitGuard)
-  @ApiOperation({ summary: 'Request WhatsApp OTP (login / verify_phone)' })
+  @ApiOperation({
+    summary: 'Request WhatsApp OTP (login / verify_phone) — TODO Future (501)',
+  })
   async requestOtp(
-    @Body() dto: RequestOtpDto,
-    @CurrentUser() user?: Partial<User>,
+    @Body() _dto: RequestOtpDto,
+    @CurrentUser() _user?: Partial<User>,
   ) {
-    // if authenticated and no phone in dto, use currentUser
-    return this.authService.requestWhatsAppOtp(dto, user);
+    throw new HttpException(
+      'WhatsApp OTP not enabled — password login only. TODO future.',
+      HttpStatus.NOT_IMPLEMENTED,
+    );
+    // TODO future: return this.authService.requestWhatsAppOtp(dto, user);
   }
 
   @Post('/otp/verify')
   @UseGuards(RateLimitGuard)
-  @ApiOperation({ summary: 'Verify WhatsApp OTP' })
-  async verifyOtp(@Body() dto: VerifyOtpDto) {
-    return this.authService.verifyWhatsAppOtp(dto);
+  @ApiOperation({ summary: 'Verify WhatsApp OTP — TODO Future (501)' })
+  async verifyOtp(@Body() _dto: VerifyOtpDto) {
+    throw new HttpException(
+      'WhatsApp OTP not enabled — password login only. TODO future.',
+      HttpStatus.NOT_IMPLEMENTED,
+    );
+    // TODO future: return this.authService.verifyWhatsAppOtp(dto);
   }
 
   @Get('/google')

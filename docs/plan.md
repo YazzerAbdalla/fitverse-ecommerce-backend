@@ -1736,13 +1736,13 @@ Deferred to Phase 16.x / Phase 17:
 
 [ ] Order cancellation
 
-[ ] Auth upgrades — Phase 16 (planned 2026-09-15)
+[ ] Auth upgrades — Phase 16 (planned 2026-09-15) — password-only login in V1 per 2026-09-16
 [ ]   Forgot password (POST /auth/forgot-password anti-enum, sha256 hashed token, 15m TTL, invalidate priors)
-[ ]   Recovery token (POST /auth/reset-password + validate, single-use, EntityManager tx, bcrypt)
-[ ]   WhatsApp OTP (POST /auth/otp/request|verify, 6-digit crypto, Redis TTL 5m, 3 attempts, 60s cooldown, Twilio/Meta abstraction)
+[ ]   Recovery token (POST /auth/reset-password + validate, single-use, EntityManager tx, bcrypt, tokenVersion revocation)
+[ ]   WhatsApp OTP (POST /auth/otp/request|verify, 6-digit crypto, Redis TTL 5m, 3 attempts, 60s cooldown, Twilio/Meta abstraction) — TODO (Future) DEFERRED per 2026-09-16: endpoints return 501, no WhatsApp setup required, login is password-only
 [ ]   Google OAuth login (GET /auth/google + callback, passport-google-oauth20, link-by-email or create, password nullable, state CSRF)
-[ ]   User alterations (googleId, phoneNumber, provider, password nullable, partial uniques)
-[ ]   Rate limiting on auth endpoints (Redis, fail-open)
+[ ]   User alterations (googleId, phoneNumber, provider, password nullable, partial uniques, tokenVersion)
+[ ]   Rate limiting on auth endpoints (Redis, fail-open, full headers) — OTP limits TODO until WhatsApp re-enable
 
 [ ] Async events
 [ ] Notification workers

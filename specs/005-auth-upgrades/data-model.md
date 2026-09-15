@@ -52,9 +52,11 @@ Indexes: `@Index(['userId'])`, `@Index(['tokenHash'])`, `@Index(['expiresAt'])`,
 
 **File**: `src/modules/auth/entities/password-reset-token.entity.ts`
 
-### OtpVerification (NEW — audit + fallback)
+### OtpVerification (NEW — audit + fallback) — **TODO (Future) DEFERRED per 2026-09-16**
 
-Ephemeral phone verification. Research D5 + Q4 fallback.
+**Status**: DEFERRED — migrates but not used in V1 password-only login. Endpoints `501 TODO` until WhatsApp Business setup.
+
+Ephemeral phone verification. Research D5 + Q4 fallback. **TODO Future**.
 
 | Field | Type | Constraints | Notes |
 |-------|------|-------------|-------|
@@ -75,9 +77,9 @@ Indexes: `@Index(['phoneNumber'])`, `@Index(['expiresAt'])`, `@Index(['phoneNumb
 
 **File**: `src/modules/auth/entities/otp-verification.entity.ts`
 
-### WhatsApp OTP (Redis — not DB entity but part of model)
+### WhatsApp OTP (Redis — not DB entity but part of model) — **TODO (Future) DEFERRED per 2026-09-16**
 
-Transient `key = otp:whatsapp:<E.164>` value `{ tokenHash: string, attempts: number, createdAt: number, expiresAt: number, purpose: string }` `TTL 300s`. Resend cooldown via `SET NX EX 60` per phone. Not authoritative for inventory/order; OTP-specific TTL exception (constitution Additional Constraints) documented in ADR.
+Transient `key = otp:whatsapp:<E.164>` value `{ tokenHash: string, attempts: number, createdAt: number, expiresAt: number, purpose: string }` `TTL 300s`. Resend cooldown via `SET NX EX 60` per phone. Not authoritative for inventory/order; OTP-specific TTL exception — **paused in V1 password-only login, 501 TODO**.
 
 ## Relationships Diagram (text)
 
