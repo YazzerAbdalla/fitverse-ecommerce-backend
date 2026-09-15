@@ -26,14 +26,14 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T005 Create `User` entity alterations in `src/modules/users/entity/user.entity.ts` (add `phoneNumber` nullable partial unique, `phoneVerified` bool default false, `googleId` nullable partial unique, `provider` enum local|google default local, `password nullable`, `passwordChangedAt` timestamptz nullable indexed, `UNIQUE(email)` plus checks)
-- [ ] T006 Create migration `src/migration/17xxxxx-AuthUpgradesUserAndResetToken.ts` for User alterations and `PasswordResetToken` table (or combined migration — never edit committed, `synchronize:false`)
+- [ ] T005 Create `User` entity alterations in `src/modules/users/entity/user.entity.ts` (add `phoneNumber` nullable partial unique, `phoneVerified` bool default false, `googleId` nullable partial unique, `provider` enum local|google default local, `password nullable`, `tokenVersion int default 0` for revocation per F2 choice C (plus `passwordChangedAt` nullable kept for compat), `UNIQUE(email)` plus checks, `CHECK provider IN ('local','google')`, add `JwtPayload` `tokenVersion` field in `src/modules/auth/types.ts`)
+- [ ] T006 Create migration `src/migration/17xxxxx-AuthUpgradesUserAndResetToken.ts` for User alterations (including `tokenVersion`, `phoneNumber`, `googleId`, `provider`, `password nullable`, `UNIQUE(email)`) and `PasswordResetToken` table per F3 (never edit committed, `synchronize:false`)
 - [ ] T007 Create `PasswordResetToken` entity in `src/modules/auth/entities/password-reset-token.entity.ts` (id uuid PK, userId FK CASCADE indexed, tokenHash varchar(255) indexed, expiresAt timestamptz CHECK > createdAt, usedAt nullable, createdAt)
 - [ ] T008 Create `OtpVerification` entity in `src/modules/auth/entities/otp-verification.entity.ts` (id uuid PK, phoneNumber indexed, userId nullable FK SET NULL, purpose enum login|verify_phone, codeHash, expiresAt indexed CHECK, attempts int <=3, verifiedAt, createdAt) per [data-model.md](./data-model.md)
-- [ ] T009 Create second migration `src/migration/17xxxxx-AddOtpAndGoogleFields.ts` for `OtpVerification` table + indexes/FKs + `User.googleId`/`phoneNumber` partial indexes if not in T006
+- [ ] T009 Create second migration `src/migration/17xxxxx-AddOtpAndGoogleFields.ts` for `OtpVerification` table + indexes/FKs only (per F3 `User` provider/tokenVersion not duplicated — owned by T006)
 - [ ] T010 Run and verify migrations via `npm run build` + `npm run migration:run` against docker PostgreSQL and ensure `User`/`PasswordResetToken`/`OtpVerification` tables + `CHECK`/`UNIQUE` constraints exist in `psql \d`
-- [ ] T011 [P] Update `src/modules/users/users.service.ts` to expose helpers `findById`, `findByGoogleId`, `updatePassword(userId, hash, passwordChangedAt)` used by AuthService
-- [ ] T012 [P] Add `JwtStrategy` in `src/modules/auth/strategies/jwt.strategy.ts` (extends `PassportStrategy(Strategy,'jwt')`, validates `passwordChangedAt` vs `iat` for Q3 revocation) and `JwtAuthGuard` in `src/modules/auth/guards/jwt-auth.guard.ts`
+- [ ] T011 [P] Update `src/modules/users/users.service.ts` to expose helpers `findById`, `findByGoogleId`, `updatePassword(userId, hash, tokenVersion)` (increment tokenVersion per F2 C) and `findByIdWithVersion` for JwtStrategy
+- [ ] T012 [P] Add `JwtStrategy` in `src/modules/auth/strategies/jwt.strategy.ts` (extends `PassportStrategy(Strategy,'jwt')`, validates `tokenVersion` equality per F2 choice C — `payload.tokenVersion === user.tokenVersion` else 401, no cache no DB fallback window) and `JwtAuthGuard` in `src/modules/auth/guards/jwt-auth.guard.ts`; update `src/modules/auth/types.ts` JwtPayload to include `tokenVersion: number`
 - [ ] T013 Configure `AuthModule` imports in `src/modules/auth/auth.module.ts` (add `TypeOrmModule.forFeature([PasswordResetToken, OtpVerification])`, register `JwtStrategy`, `GoogleStrategy` placeholder, `WhatsAppProvider` providers, export `AuthService`)
 
 **Checkpoint**: Foundation ready — migrations pass, `User` nullable password + uniques work, `JwtStrategy` revocation check wired
@@ -42,7 +42,7 @@
 
 ## Phase 3: User Story 1 - Forgot Password & Secure Recovery (Priority: P1) 🎯 MVP
 
-**Goal**: Secure anti-enumeration `POST /auth/forgot-password`, `POST /auth/validate-reset-token`, `POST /auth/reset-password` with sha256 single-use token (15m) + bcrypt + `passwordChangedAt` revocation (Q3) + `FOR UPDATE` concurrency
+**Goal**: Secure anti-enumeration `POST /auth/forgot-password`, `POST /auth/validate-reset-token`, `POST /auth/reset-password` with sha256 single-use token (15m) + bcrypt + `tokenVersion` revocation per F2 C (Q3) + `FOR UPDATE` concurrency + hybrid publish per C2 + full headers per B1
 
 **Independent Test**: Register → `forgot-password` existing+non-existing both 200 → capture rawToken → `validate-reset-token` 200/400 → `reset-password` 200 (old password fails, new succeeds, second reuse 400, expired 400) → old JWT 401 after reset. SC-001/002/003.
 
@@ -56,13 +56,13 @@
 ### Implementation for User Story 1
 
 - [ ] T018 [P] [US1] Create DTOs in `src/modules/auth/dto/forgot-password.dto.ts` (`@IsEmail`), `src/modules/auth/dto/validate-reset-token.dto.ts` (`email, token`), `src/modules/auth/dto/reset-password.dto.ts` (`email, token, newPassword MinLength 8 MaxLength 72`)
-- [ ] T019 [US1] Implement `AuthService.requestPasswordReset(email)` in `src/modules/auth/auth.service.ts` (validate, lookup user, `dataSource.transaction` invalidate priors + insert sha256 tokenHash, after commit emit RabbitMQ/BullMQ event via `Logger`, Research D10 — no I/O inside tx)
+- [ ] T019 [US1] Implement `AuthService.requestPasswordReset(email)` in `src/modules/auth/auth.service.ts` (validate, lookup user, `dataSource.transaction` invalidate priors + insert sha256 tokenHash `timingSafeEqual` compare per B2, after commit emit **RabbitMQ** `auth.password_reset_requested` `{userId,email,rawToken,expiresAt}` per hybrid C choice — no I/O inside tx, `Retry-After` full headers B1 ready)
 - [ ] T020 [US1] Implement `AuthService.validateResetToken(email, rawToken)` in `src/modules/auth/auth.service.ts` (hash, join user, check expiry/usedAt, throw 400)
-- [ ] T021 [US1] Implement `AuthService.resetPassword(dto)` in `src/modules/auth/auth.service.ts` (transaction `SELECT FOR UPDATE` tokenHash+userId, verify, bcrypt 10, update `User.password` + `passwordChangedAt=NOW()`, set `usedAt`, invalidate others, per FR-004)
+- [ ] T021 [US1] Implement `AuthService.resetPassword(dto)` in `src/modules/auth/auth.service.ts` (transaction `SELECT FOR UPDATE` tokenHash+userId, timingSafeEqual verify, bcrypt 10, update `User.password` + increment `User.tokenVersion` (F2 C) atomically, set `usedAt`, invalidate others, per FR-004; old JWTs with stale tokenVersion →401)
 - [ ] T022 [US1] Add controller routes in `src/modules/auth/auth.controller.ts` (`POST /auth/forgot-password` public always 200, `POST /auth/validate-reset-token`, `POST /auth/reset-password` all via service, Swagger `@ApiProperty`)
-- [ ] T023 [US1] Wire `passwordChangedAt` check in `src/modules/auth/strategies/jwt.strategy.ts` validate (reject `iat < passwordChangedAt`) and ensure old JWT →401 after reset per Q3
+- [ ] T023 [US1] Wire `tokenVersion` check in `src/modules/auth/strategies/jwt.strategy.ts` validate (reject `payload.tokenVersion !== user.tokenVersion` per F2 C) and ensure old JWT →401 after reset per Q3; extend `login()` to embed `tokenVersion` in JWT
 - [ ] T024 [US1] Update `AuthService.userValidation` in `src/modules/auth/auth.service.ts` to return null when `User.password IS NULL` (pure OAuth) for local strategy per Assumptions
-- [ ] T025 [US1] Add post-commit notification publish after `forgot-password` commit (RabbitMQ `NOTIFICATION_SERVICE` or BullMQ job) and mock in unit/integration tests
+- [ ] T025 [US1] Add post-commit notification publish after `forgot-password` commit (RabbitMQ topic `auth.password_reset_requested` per hybrid C) and mock in unit/integration tests; verify payload includes rawToken only in event, never logged
 
 **Checkpoint**: US1 independently testable — `npm run test -- --runInBand` + `quickstart.md` forgot/validate/reset curls pass, concurrent token SINGLE-WINNER verified
 
@@ -85,10 +85,10 @@
 
 - [ ] T030 [P] [US2] Create DTOs in `src/modules/auth/dto/request-otp.dto.ts` (`phoneNumber @Matches E.164, purpose @IsEnum login|verify_phone`) and `src/modules/auth/dto/verify-otp.dto.ts` (`phoneNumber, otp @Length 6, purpose`)
 - [ ] T031 [P] [US2] Create `WhatsAppProvider` interface and `NoopWhatsAppProvider`/`TwilioWhatsAppProvider`/`MetaCloudWhatsAppProvider` in `src/modules/auth/providers/whatsapp.provider.ts` (Research D6, `WHATSAPP_PROVIDER` selector)
-- [ ] T032 [US2] Implement `AuthService.requestWhatsAppOtp(dto, currentUser?)` in `src/modules/auth/auth.service.ts` (normalize E.164, rate-limit check facade, `SET NX EX` cooldown, `crypto.randomInt` → sha256 → Redis + `OtpVerification` insert, send via `WhatsAppProvider` after commit — no I/O inside PG tx)
-- [ ] T033 [US2] Implement `AuthService.verifyWhatsAppOtp(dto)` in `src/modules/auth/auth.service.ts` (fetch Redis first, fallback to DB when Redis down per Q4 — check expiresAt/attempts, increment attempts, mark phoneVerified, delete key/verifiedAt on success/3 fails, issue JWT for login vs verified:true for verify_phone)
+- [ ] T032 [US2] Implement `AuthService.requestWhatsAppOtp(dto, currentUser?)` in `src/modules/auth/auth.service.ts` (normalize E.164, rate-limit with full headers B1, `SET NX EX` cooldown, `crypto.randomInt` → sha256 → Redis + `OtpVerification` insert with timingSafeEqual ready, send via BullMQ `authOtpSend` per hybrid C after commit — no I/O inside PG tx)
+- [ ] T033 [US2] Implement `AuthService.verifyWhatsAppOtp(dto)` in `src/modules/auth/auth.service.ts` (fetch Redis first, fallback to DB when Redis down per Q4 — check expiresAt/attempts via timingSafeEqual, increment `attempts` on **every** attempt including success per B2 choice B before delete, mark phoneVerified, delete key/verifiedAt on success/3 fails, issue JWT `tokenVersion` for login vs verified:true for verify_phone)
 - [ ] T034 [US2] Add controller routes in `src/modules/auth/auth.controller.ts` (`POST /auth/otp/request` public+JwtGuard optional phone, `POST /auth/otp/verify` public — service calls, Swagger)
-- [ ] T035 [US2] Ensure login choice is discoverable: `POST /auth/login` (LocalAuthGuard) remains password path, OTP path issues same JWT shape (`sub,email,fullName,role`) per Q2 — update `src/modules/auth/types.ts` if needed
+- [ ] T035 [US2] Ensure login choice is discoverable: `POST /auth/login` (LocalAuthGuard) remains password path, OTP path issues same JWT shape (`sub,email,fullName,role,tokenVersion`) per Q2 + F2 C — update `src/modules/auth/types.ts` to include `tokenVersion`
 
 **Checkpoint**: US1+US2 both work — `npm run test -- --runInBand` passes; quickstart WhatsApp OTP curls (including Redis-down fallback) succeed; Swagger shows both login options
 
@@ -132,7 +132,7 @@
 
 ### Implementation for User Story 4
 
-- [ ] T047 [US4] Implement `RateLimitGuard` (or shared) in `src/modules/auth/guards/rate-limit.guard.ts` (per-endpoint limits from FR-014, IP+email/phone keys, atomic Redis, fail-open on error, `TooManyRequestsException` with `Retry-After`)
+- [ ] T047 [US4] Implement `RateLimitGuard` (or shared) in `src/modules/auth/guards/rate-limit.guard.ts` (per-endpoint limits from FR-014, IP+email/phone keys, atomic Redis `INCR+EXPIRE`/`SET NX EX`, fail-open with `Logger.warn` + metric `auth_rate_limit_fallback_total`, return `429` with `Retry-After` + `X-RateLimit-Limit/Remaining/Reset` per B1 choice B)
 - [ ] T048 [US4] Apply guard to all new auth routes in `src/modules/auth/auth.controller.ts` (and existing `POST /auth/login|register` per plan) — decorator `@UseGuards(RateLimitGuard)` with metadata limits or centralized map
 - [ ] T049 [US4] Add config keys `THROTTLE_*`/`RATE_LIMIT_*` via `ConfigService` and expose in `.env.example` (reuse `RESET_TOKEN_TTL` etc.)
 
@@ -145,11 +145,11 @@
 **Purpose**: Docs, Swagger, ADRs, cleanup, full verification (affects all stories)
 
 - [ ] T050 [P] Update Swagger in `src/modules/auth/auth.controller.ts` (add `@ApiOperation`, `@ApiResponse` for all 7 new endpoints, E.164 example `+201012345678`, JWT bearer auth for `/google/link` + `/otp/request` JwtGuard variant)
-- [ ] T051 [P] Write ADR in `docs/decisions/ADR-auth-upgrades.md` (record auto-link per Q1, login OTP choice per Q2, passwordChangedAt revocation per Q3, Redis+PG fallback per Q4, OAuth JSON per Q5, email OTP deferred §16.8, infra exception for ephemeral OTP)
+- [ ] T051 [P] Write ADR in `docs/decisions/ADR-auth-upgrades.md` (record auto-link Q1, login OTP choice Q2, tokenVersion revocation Q3 + F2 choice C stateless, Redis+PG fallback Q4, OAuth JSON Q5, hybrid queue C2 (RabbitMQ password reset + BullMQ OTP), full headers B1, every-attempt B2, email OTP deferred §16.8, infra exception for ephemeral OTP)
 - [ ] T052 [P] Update `docs/architecture/modules.md` and `docs/api/conventions.md` (auth module expands: password reset token, OTP provider, Google strategy, rate limits; keep inventory/reservation unchanged)
 - [ ] T053 [P] Add Postman/Swagger examples and verify `http://localhost:3000/api` lists all new auth endpoints
 - [ ] T054 Remove leftover `console.log` in `src/modules/auth/auth.service.ts:21` when touching that file (replace with `Logger`)
-- [ ] T055 Run full verification: `npm run lint` + `npm run build` + `npm run test -- --runInBand` + `npm run test:e2e` — ensure 30+ unit, 10+ integration, 3 E2E flows (forgot→reset→login, otp/request→verify→JWT, google callback→JWT→protected) + concurrent token single-winner pass
+- [ ] T055 Run full verification: `npm run lint` + `npm run build` + `npm run test -- --runInBand` + `npm run test:e2e` — ensure 30+ unit, 10+ integration, 3 E2E flows (forgot→reset→login, otp/request→verify→JWT, google callback→JWT→protected) + concurrent token single-winner pass; verify `AllExceptionsFilter` returns `{statusCode, message, timestamp}` for `429` with `Retry-After` + `X-RateLimit-*` per E1, and `grep -r "@InjectRepository(User)" src/modules --exclude-dir=users` →0 per E2, and `ConfigService` env keys loaded
 - [ ] T056 [P] Verify PostgreSQL constraints via `psql` (duplicate email 409, duplicate non-null googleId/phoneNumber 409, Check expiresAt>createdAt, attempts<=3)
 - [ ] T057 [P] Manual quickstart validation per `specs/005-auth-upgrades/quickstart.md` (all curl scenarios including JWT revocation old JWT 401, Redis-down fallback, Google mocked 302/200)
 - [ ] T058 Update `docs/plan.md` backlog `NOT DONE → DONE` markers for Phase 16 items if/when implemented (track in `Current Backlog Status`)

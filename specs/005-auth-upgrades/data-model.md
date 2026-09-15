@@ -22,10 +22,11 @@ Existing `User` (`src/modules/users/entity/user.entity.ts`) — `@Entity()` `@In
 | `phoneVerified` | `boolean` | `@Column({ default:false })` | set true on `purpose=verify_phone` success or `purpose=login` if user exists |
 | `googleId` | `varchar` nullable | `@Column({ nullable:true })`, `@Unique` partial `WHERE googleId IS NOT NULL` (`UQ_user_googleId`) | from Google profile.id |
 | `provider` | enum `('local','google')` | `@Column({ type:'enum', enum:['local','google'], default:'local' })` + `@Check provider IN ('local','google')` | `local` for existing rows (migration default) |
-| `passwordChangedAt` | `timestamptz` nullable | `@Column({ type:'timestamptz', nullable:true })`, `@Index` | set `NOW()` on `reset-password` success; JWT `iat < passwordChangedAt` → `401` per Q3 |
+| `tokenVersion` | `int` | `@Column({ default:0 })` | increment on `reset-password` success; JWT payload includes `tokenVersion`, `JwtStrategy.validate` checks `payload.tokenVersion === user.tokenVersion` per chosen revocation strategy C (fresh, no cache) |
+| `passwordChangedAt` | `timestamptz` nullable | `@Column({ type:'timestamptz', nullable:true })`, `@Index` nullable | alternative revocation field (if strategy A) — not used when `tokenVersion` chosen; keep nullable for migration compatibility |
 | `emailVerified` | `boolean` | `@Column({ default:false })` optional | future use, not blocking V1 (plan notes) |
 
-Migrations: `ALTER COLUMN password DROP NOT NULL`, `ADD COLUMN phoneNumber/googlId/provider/passwordChangedAt/phoneVerified/emailVerified`, `ADD CONSTRAINT UQ_user_email UNIQUE(email)`, `CREATE UNIQUE INDEX UQ_user_googleId WHERE googleId IS NOT NULL`, `CREATE UNIQUE INDEX UQ_user_phoneNumber WHERE phoneNumber IS NOT NULL`, `CHECK(provider)`.
+Migrations: `ALTER COLUMN password DROP NOT NULL`, `ADD COLUMN phoneNumber/googleId/provider/tokenVersion/passwordChangedAt/phoneVerified/emailVerified`, `ADD CONSTRAINT UQ_user_email UNIQUE(email)`, `CREATE UNIQUE INDEX UQ_user_googleId WHERE googleId IS NOT NULL`, `CREATE UNIQUE INDEX UQ_user_phoneNumber WHERE phoneNumber IS NOT NULL`, `CHECK(provider)`. Note: `tokenVersion` ownership is migration 1 (AuthUpgradesUserAndResetToken) per F3; OtpVerification table only in migration 2.
 
 **Relations**: `OneToMany Order`, `OneToOne Cart` — unchanged.
 
@@ -70,7 +71,7 @@ Ephemeral phone verification. Research D5 + Q4 fallback.
 
 Indexes: `@Index(['phoneNumber'])`, `@Index(['expiresAt'])`, `@Index(['phoneNumber','createdAt'])` per plan.
 
-**Lifecycle**: Created on `POST /auth/otp/request` (alongside Redis `SET ... EX 300`). On `POST /auth/otp/verify`: check Redis first; if Redis down or key missing, fallback to latest `OtpVerification` row for phone where `expiresAt > NOW()` and `verifiedAt IS NULL`, verify `sha256(otp) === codeHash`, `attempts < OTP_MAX_ATTEMPTS`, increment `attempts`, set `verifiedAt` on success or delete/invalidate on limits. Redis delete on success/3 fails + mark `verifiedAt`.
+**Lifecycle**: Created on `POST /auth/otp/request` (alongside Redis `SET ... EX 300`). On `POST /auth/otp/verify`: check Redis first; if Redis down or key missing, fallback to latest `OtpVerification` row for phone where `expiresAt > NOW()` and `verifiedAt IS NULL`, verify `sha256(otp) === codeHash` via `timingSafeEqual`, check `attempts < OTP_MAX_ATTEMPTS`, increment `attempts` on **every** attempt (including success) per B2 choice B, set `verifiedAt` on success before deleting Redis key, delete/invalidate on limits. Metric `auth_rate_limit_fallback_total` increments on Redis fail-open per B1.
 
 **File**: `src/modules/auth/entities/otp-verification.entity.ts`
 
@@ -91,11 +92,11 @@ User phoneNumber (E.164) 1──* OtpVerification + Redis key otp:whatsapp:<phon
 - **PasswordResetToken**: `expiresAt > createdAt` CHECK; hash lookup only; `usedAt` once; invalid/expired/used → `400`
 - **OtpVerification**: `expiresAt > createdAt` CHECK; `attempts <= 3` CHECK; `purpose` enum check; TTL enforced by Redis + service `expiresAt > now`; 4th attempt → delete + `400/429`
 - **User**: `password` nullable CHECK (pure OAuth allowed); `provider` CHECK; partial uniques ensure `null` duplicates allowed
-- **JWT revocation**: `User.passwordChangedAt` — `JwtStrategy.validate` compares `payload.iat` (seconds) vs `passwordChangedAt` (ms); if `iat*1000 < passwordChangedAt` → throw `UnauthorizedException`
+- **JWT revocation** (chosen C): `User.tokenVersion int default 0` — `JwtStrategy.validate` compares `payload.tokenVersion === user.tokenVersion`; on `reset-password` increment `user.tokenVersion` atomically inside same transaction. `attempts` increments on **every** verify (including success before delete) per B2 choice B; `codeHash` compare via `timingSafeEqual`/sha256 lookup. Alternative `passwordChangedAt` `iat` check also valid but not used in V1.
 
 ## Migrations
 
-1. `17xxxxx-AuthUpgradesUserAndResetToken` — alter `User` (new columns, nullables, uniques, checks) + create `PasswordResetToken` table + indexes/FKs + `passwordChangedAt`
-2. `17xxxxx-AddOtpAndGoogleFields` — create `OtpVerification` table + indexes/FKs (can be merged into #1 if desired; keep `synchronize:false`, never edit committed migration)
+1. `17xxxxx-AuthUpgradesUserAndResetToken` — alter `User` (adds `phoneNumber`, `googleId`, `provider`, `password nullable`, `tokenVersion default 0`, `passwordChangedAt` nullable, partial uniques) + create `PasswordResetToken` table + indexes/FKs
+2. `17xxxxx-AddOtpAndGoogleFields` — create `OtpVerification` table + indexes/FKs only (keep `synchronize:false`, never edit committed migration; per F3 `provider`/`tokenVersion` owned by migration 1, not duplicated)
 
 `data-source.ts` already lists `migrations: ['src/migration/**/*.ts']`; run `npm run migration:run` (or `typeorm migration:run`) after DDL.
