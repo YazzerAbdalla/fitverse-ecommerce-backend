@@ -353,7 +353,7 @@ Concurrent reservation requests cannot oversell inventory. — **MET**: `Reserva
 
 # Phase 4 — Reservation Lifecycle
 
-**Status: NOT DONE**
+**Status: DONE — 2026-09-14** (transactional `RESERVED→COMPLETED` `stock-=qty` `reserved-=qty`, `RESERVED→CANCELLED/EXPIRED` `reserved-=qty`, `FOR UPDATE` Reservation-first + sorted Inventories, immediate admin expire override, orderId overwrite, idempotent `COMPLETED→COMPLETED` `200`, single-winner races)
 
 **Goal:** Make reservation state transitions explicit and safe.
 
@@ -451,7 +451,7 @@ must not be silently accepted.
 
 ### Phase 4 Exit Criteria
 
-Every reservation has a well-defined lifecycle and inventory remains synchronized with the reservation state.
+Every reservation has a well-defined lifecycle and inventory remains synchronized with the reservation state. — **MET**: `ReservationService.transitionWithInventoryInternal` now atomically `FOR UPDATE` locks Reservation then sorted Inventories, `RESERVED→COMPLETED` (`stock-=qty`+`reserved-=qty`, orderId overwrite, idempotent `COMPLETED→COMPLETED` `200` per Q4) vs `RESERVED→CANCELLED/EXPIRED` (`reserved-=qty` only, stock unchanged, immediate admin `expire` per Q1, `CANCELLED/EXPIRED→*` remain `409` per Q5), DB `CHECK` backstop per Q2; `ReservationController` wraps in `dataSource.transaction`; unit 33 + integration 89 PASS (`--runInBand`), manual `verify-phase4-simple.ts` (complete/cancel/expire/concurrent/orderId) PASS.
 
 ---
 
@@ -1709,9 +1709,9 @@ Auth upgrades are complete when:
 [x] PostgreSQL row locking — DONE (pessimistic_write in ReservationService.create, data-model.md §4)
 [x] Concurrent reservation tests — DONE (unit 33 + integration concurrency contested/deadlock/disjoint, spec SC-003/SC-004)
 
-[ ] Reservation completion
-[ ] Reservation cancellation
-[ ] Reservation expiration
+[x] Reservation completion — DONE 2026-09-14 (RESERVED→COMPLETED `stock-=qty`+`reserved-=qty`, orderId overwrite, idempotent COMPLETED→COMPLETED 200, spec 004 Q3/Q4, FOR UPDATE Reservation+sorted Inventories)
+[x] Reservation cancellation — DONE 2026-09-14 (RESERVED→CANCELLED `reserved-=qty` only, stock unchanged, `CANCELLED→CANCELLED` 409 per Q5, spec 004)
+[x] Reservation expiration — DONE 2026-09-14 (RESERVED→EXPIRED `reserved-=qty` only, immediate admin override per Q1, `EXPIRED→EXPIRED` 409 per Q5, spec 004)
 
 [ ] Expiration cleanup worker
 
@@ -1872,13 +1872,19 @@ DONE — 2026-08-21 (entity, API, migration, tests, seed)
     ↓
 Reservation
     ↓
->>> CURRENT TARGET <<<
+DONE — 2026-08-22 (entity, module, state machine)
     ↓
 Concurrency
     ↓
+DONE — 2026-08-30 (FOR UPDATE + available check, 33 unit + 14 integration concurrency)
+    ↓
 Lifecycle
     ↓
-Expiration
+DONE — 2026-09-14 (RESERVED→COMPLETED/CANCELLED/EXPIRED transactional, inventory sync, spec 004)
+    ↓
+>>> CURRENT TARGET <<<
+    ↓
+Expiration Cleanup (Phase 5 — automated worker)
     ↓
 Orders
     ↓
@@ -1895,20 +1901,19 @@ Documentation
 
 The next task should be:
 
-**Phase 2 — Reservation Domain**
+**Phase 5 — Reservation Expiration / Cleanup**
 
 Start with:
 
 ```text
-1. Design Reservation + ReservationItem entities (one-to-many, FK inventoryId)
-2. Add reservation statuses (RESERVED, COMPLETED, EXPIRED, CANCELLED)
-3. Create ReservationModule with service + repository
-4. Implement create/add/complete/cancel/expire/retrieve + state-transition validation
-5. Wire InventoryService reserve/release/completeSale (Phase 3 locking)
-6. Add unit/integration tests (real PostgreSQL)
-7. Verify DB constraints + indexes (reservation.status, expires_at, etc.)
+1. Design expiration scanner query (status=RESERVED AND expiresAt<=NOW()) using existing composite index (status,expiresAt)
+2. Decide job infra (BullMQ vs scheduler) per `docs/plan.md` §5.4 + `research.md` D3 (worker enforces expiresAt, manual expire immediate)
+3. Implement cleanup transaction (lock reservation FOR UPDATE → verify RESERVED → lock sorted inventories → reserved-=qty → status=EXPIRED)
+4. Handle race with concurrent complete/cancel (single-winner via FOR UPDATE, loser 409)
+5. Add unit + integration tests (real PG, time-based expiration, concurrent worker vs complete)
+6. Verify no double-release on reprocessing (idempotent EXPIRED→EXPIRED 409)
 ```
 
-Do not implement transaction-safe locking or expiration cleanup yet (Phases 3-5).
+Do not implement Order integration yet (Phases 6-8) before expiration is stable.
 
-The purpose of the next phase is to represent a temporary claim on inventory that later phases can make transactional and expirable.
+The purpose of the next phase is to automatically release expired inventory via a background worker, complementing the manual admin expire completed in Phase 4.
