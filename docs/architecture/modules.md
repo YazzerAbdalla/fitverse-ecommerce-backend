@@ -4,29 +4,22 @@ Per-module detail. Each module lives under `src/modules/<name>/`. Follow the
 existing `imports / providers / controllers / exports` shape and export any
 service another module needs.
 
-## auth (REST)
+## auth (REST) — Phase 16
 
-- `auth.module.ts` — imports `UsersModule`, registers `JwtModule` (global, secret
-  from `ConfigService`), `PassportModule`; provides `AuthService`,
-  `LocalStrategy`; exports `AuthService`.
-- `auth.controller.ts` — `POST /auth/register`, `POST /auth/login`.
-- `auth.service.ts` — `register` (bcrypt hash, salt 10, duplicate-email check),
-  `userValidation` (bcrypt compare), `login` (sign JWT).
-  - **Note:** contains a leftover `console.log` (see `docs/decisions/` open
-    questions) — remove when touched.
-- Guards: `JwtGuard` (verifies bearer token, sets `request.user`), `RolesGuard`
-  (reflects `roles` metadata). Decorators: `Auth(...roles)` (applies both
-  guards), `CurrentUser(prop?)`.
-- Strategy: `local.strategy.ts` (passport-local) delegates to `AuthService.
-  userValidation`.
+- `auth.module.ts` — imports `UsersModule`, `TypeOrmModule.forFeature([PasswordResetToken, OtpVerification])`, registers `JwtModule` (global, secret from `ConfigService`), `PassportModule({session:false})`; provides `AuthService`, `LocalStrategy`, `JwtStrategy` (tokenVersion revocation per F2 C), `GoogleStrategy` (passport-google-oauth20, state true), `RateLimitGuard` (Redis fail-open, full headers B1), `NoopWhatsAppProvider` (`WHATSAPP_PROVIDER`); exports `AuthService`.
+- `auth.controller.ts` — `POST /auth/register`, `POST /auth/login` (rate-limited), plus Phase 16: `POST /auth/forgot-password` (anti-enum 200, T019), `POST /auth/validate-reset-token`, `POST /auth/reset-password` (FOR UPDATE single-winner, T021 tokenVersion increment), `POST /auth/otp/request` (public+JwtGuard, T032 hybrid BullMQ, cooldown 60s), `POST /auth/otp/verify` (Q4 fallback, every-attempt B2, T033), `GET /auth/google` (302, GoogleAuthGuard), `GET /auth/google/callback` (JSON per Q5), `GET /auth/google/link` (JwtAuthGuard+GoogleAuthGuard).
+- `auth.service.ts` — `register` (bcrypt 10, duplicate check, Logger.debug), `userValidation` (handles `password IS NULL` → null per pure OAuth), `login` (signs `{sub,email,fullName,role,tokenVersion}`), plus `requestPasswordReset` (sha256, 15m, invalidate priors, hybrid RabbitMQ), `validateResetToken`, `resetPassword` (bcrypt + tokenVersion increment, single-winner), `requestWhatsAppOtp`/`verifyWhatsAppOtp` (crypto.randomInt, sha256, Redis+PG fallback, 3 attempts, 60s cooldown, WhatsAppProvider), `handleGoogleLogin`/`linkGoogleAccount` (auto-link verified email Q1, password null).
+- DTOs: `forgot-password.dto.ts`, `reset-password.dto.ts` (Min 8 Max 72), `validate-reset-token.dto.ts`, `request-otp.dto.ts` (`@Matches E.164`, optional phone when authed per C1), `verify-otp.dto.ts` (`@Length 6`).
+- Entities: `password-reset-token.entity.ts` (FK CASCADE, CHECK expiresAt>createdAt), `otp-verification.entity.ts` (purpose login|verify_phone, CHECK attempts<=3, Q4 fallback).
+- Providers: `whatsapp.provider.ts` (interface + Noop/Twilio/Meta per D6).
+- Guards: `JwtAuthGuard` (AuthGuard jwt, checks tokenVersion), `GoogleAuthGuard`, `RateLimitGuard` (per-route limits, Retry-After + X-RateLimit-* per B1, fail-open metric), plus existing `JwtGuard` (manual) now delegated to `JwtStrategy`, `RolesGuard` retained.
+- Strategies: `local.strategy.ts` (passport-local), `jwt.strategy.ts` (passport-jwt, tokenVersion vs passwordChangedAt fallback), `google.strategy.ts` (passport-google-oauth20, scope profile email, validate maps profile → GoogleProfile).
 
-## users (no API)
+## users (no API) — Phase 16 altered
 
-- `users.module.ts` — `TypeOrmModule.forFeature([User])`, exports
-  `UsersService`.
-- `users.service.ts` — `findUserByEmail`, `createNewUser`.
-- `user.entity.ts` — UUID PK, `role` enum (`UserRoles`), `password` (hashed),
-  relations to `Order` and `Cart`.
+- `users.module.ts` — `TypeOrmModule.forFeature([User])`, exports `UsersService`.
+- `users.service.ts` — `findUserByEmail`, `findUserById`, `findByGoogleId`, `updatePassword`/`incrementTokenVersion`, `createNewUser` (now `any` for OAuth null password).
+- `user.entity.ts` — UUID PK, `role` enum, `password` **nullable** (pure OAuth), plus `phoneNumber` (partial unique `WHERE phoneNumber IS NOT NULL`, E.164), `phoneVerified`, `googleId` (partial unique `WHERE googleId IS NOT NULL`), `provider enum local|google` (`CHECK`), `tokenVersion int default 0` (F2 C revocation), `passwordChangedAt` nullable (compat), `emailVerified`, `UNIQUE(email)` (was only Index), relations to `Order`/`Cart` unchanged. Migration `1755900000000-AuthUpgradesUserAndResetToken` owns these per F3.
 
 ## products (GraphQL, Apollo code-first)
 

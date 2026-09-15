@@ -6,11 +6,18 @@ import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PassportModule } from '@nestjs/passport';
 import { LocalStrategy } from './strateges/local.strategy';
-import { APP_GUARD, Reflector } from '@nestjs/core';
-import { RolesGuard } from './guards/roles.guard';
+import { JwtStrategy } from './strateges/jwt.strategy';
+import { GoogleStrategy } from './strateges/google.strategy';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { PasswordResetToken } from './entities/password-reset-token.entity';
+import { OtpVerification } from './entities/otp-verification.entity';
+import { NoopWhatsAppProvider } from './providers/whatsapp.provider';
+import { RateLimitGuard } from './guards/rate-limit.guard';
+
 @Module({
   imports: [
     UsersModule,
+    TypeOrmModule.forFeature([PasswordResetToken, OtpVerification]),
     JwtModule.registerAsync({
       global: true,
       imports: [ConfigModule],
@@ -20,9 +27,17 @@ import { RolesGuard } from './guards/roles.guard';
         expiresIn: configService.get<string>('JWT_EXPIRES_IN'),
       }),
     }),
-    PassportModule,
+    PassportModule.register({ session: false }),
   ],
-  providers: [AuthService, Logger, LocalStrategy],
+  providers: [
+    AuthService,
+    Logger,
+    LocalStrategy,
+    JwtStrategy,
+    GoogleStrategy,
+    RateLimitGuard,
+    { provide: 'WHATSAPP_PROVIDER', useClass: NoopWhatsAppProvider },
+  ],
   controllers: [AuthController],
   exports: [AuthService],
 })
