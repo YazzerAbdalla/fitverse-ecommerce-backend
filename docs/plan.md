@@ -1645,12 +1645,26 @@ Auth upgrades are complete when:
 ```text
 [x] POST /auth/forgot-password returns 200 anti-enum, creates sha256-hashed token expires 15m, invalidates prior tokens
 [x] POST /auth/reset-password validates token (hash, expiry, single-use), bcrypt-hashes new password, marks token used, all inside EntityManager transaction
-[x] POST /auth/otp/request and POST /auth/otp/verify implement 6-digit OTP via WhatsAppProvider abstraction (Noop in dev/test, Twilio/Meta in prod), Redis TTL 5m, hash, 3 attempts, 60s cooldown
-[x] GET /auth/google and GET /auth/google/callback via passport-google-oauth20 issue same JWT shape as local login, link-by-email or create, password nullable, state CSRF
+[x] POST /auth/otp/request and POST /auth/otp/verify implement 6-digit OTP via WhatsAppProvider abstraction (Noop in dev/test, Twilio/Meta in prod), Redis TTL 5m, hash, 3 attempts, 60s cooldown — V1: purpose login (passwordless) + verify_phone only, login choice is password OR WhatsApp OTP (email OTP deferred)
+[x] GET /auth/google and GET /auth/google/callback via passport-google-oauth20 issue same JWT shape as local login, link-by-email or create, password nullable, state CSRF (clarified 2026-09-15: auto-link verified email)
 [x] User migration applied (googleId, phoneNumber, provider, password nullable, partial uniques), PasswordResetToken + OtpVerification (audit) migrations
 [x] Rate limiting on all new auth endpoints via Redis (fail-open on Redis down)
 [x] Unit 30+ and integration 10+ and E2E 3 flows PASS, including concurrent token reuse → single winner
 [x] Swagger updated, docs/decisions ADR recorded, no secrets in repo, AllExceptionsFilter handles 400/401/429
+```
+
+### 16.8 Future — Email OTP (deferred from V1)
+
+Clarified 2026-09-15 during `/speckit.clarify`: email OTP is **out of scope for Phase 16 V1**.
+
+```text
+Deferred to Phase 16.x / Phase 17:
+  POST /auth/otp/request { email }  → email OTP via notification worker
+  POST /auth/otp/verify { email, otp } → login OR reset_password verification
+  Reuse same OtpVerification model with purpose=email_login|email_reset
+  Do not weaken anti-enumeration: same 200 response for existing/non-existing email
+  Keep WhatsApp OTP as phone-only in V1; add email channel later without breaking
+  WhatsApp OTP contract.
 ```
 
 ---
