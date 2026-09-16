@@ -106,7 +106,7 @@ PoisonMap: Map<reservationId, failureCount>
   skip: when count >= EXPIRATION_MAX_RETRIES (default 3), skip further auto-retries until manual fix or data corrected
 ```
 
-- Not persisted to PG; may be backed by BullMQ `attempts` if preferred. Everyretry logged (`warn`), final skip logged `error`. Every candidate still scanned each tick; service-side `skipSet` filters poison after N failures.
+- In-memory, **reset on process restart** (acceptable for Phase 5, per analysis U1) — restart resets `failureCount` to 0 and poison will be retried up to N again; persistent alternative is BullMQ `attempts` but not required. Every retry logged (`warn`), final skip logged `error`. Every candidate still scanned each tick; service-side `skipSet` filters poison after N failures. Documents at-most-N-per-incarnation semantics.
 
 ---
 
