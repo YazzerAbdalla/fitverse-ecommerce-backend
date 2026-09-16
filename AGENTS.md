@@ -14,7 +14,7 @@ and [`skills/`](./skills); do not duplicate that detail here.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at `specs/005-auth-upgrades/plan.md` (Phase 16 — Auth Upgrades).
+at `specs/006-reservation-expiration-cleanup/plan.md` (Phase 5 — Reservation Expiration Cleanup).
 <!-- SPECKIT END -->
 
 ---
