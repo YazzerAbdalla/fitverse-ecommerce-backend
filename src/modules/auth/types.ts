@@ -5,4 +5,7 @@ export interface JwtPayloadProps {
   email?: string;
   fullName: string;
   role?: UserRoles;
+  tokenVersion?: number;
+  iat?: number;
+  exp?: number;
 }
