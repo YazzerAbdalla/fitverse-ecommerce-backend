@@ -18,15 +18,14 @@ export enum OtpPurpose {
 @Entity()
 @Check(`"expiresAt" > "createdAt"`)
 @Check(`"attempts" <= 3`)
-@Index(['phoneNumber'])
-@Index(['expiresAt'])
-@Index(['phoneNumber', 'createdAt'])
+@Index('IDX_otp_phoneNumber', ['phoneNumber'])
+@Index('IDX_otp_expiresAt', ['expiresAt'])
+@Index('IDX_otp_phoneNumber_createdAt', ['phoneNumber', 'createdAt'])
 export class OtpVerification {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
   @Column()
-  @Index()
   phoneNumber!: string;
 
   @Column({ type: 'uuid', nullable: true })

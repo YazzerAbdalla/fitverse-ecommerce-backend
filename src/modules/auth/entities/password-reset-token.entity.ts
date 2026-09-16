@@ -12,16 +12,15 @@ import User from '../../users/entity/user.entity';
 
 @Entity()
 @Check(`"expiresAt" > "createdAt"`)
-@Index(['userId'])
-@Index(['tokenHash'])
-@Index(['expiresAt'])
-@Index(['userId', 'expiresAt'])
+@Index('IDX_prt_userId', ['userId'])
+@Index('IDX_prt_tokenHash', ['tokenHash'])
+@Index('IDX_prt_expiresAt', ['expiresAt'])
+@Index('IDX_prt_userId_expiresAt', ['userId', 'expiresAt'])
 export class PasswordResetToken {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
   @Column({ type: 'uuid' })
-  @Index()
   userId!: string;
 
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
@@ -29,7 +28,6 @@ export class PasswordResetToken {
   user!: User;
 
   @Column({ type: 'varchar', length: 255 })
-  @Index()
   tokenHash!: string;
 
   @Column({ type: 'timestamptz' })

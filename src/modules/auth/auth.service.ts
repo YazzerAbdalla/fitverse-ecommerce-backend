@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Inject,
   Injectable,
   Logger,
@@ -492,10 +493,16 @@ export class AuthService {
     );
     if (existingByEmail) {
       // auto-link per Q1
-      await this.dataSource.getRepository(User).update(existingByEmail.id, {
-        googleId: profile.googleId,
-        provider: AuthProvider.Google,
-      });
+      try {
+        await this.dataSource.getRepository(User).update(existingByEmail.id, {
+          googleId: profile.googleId,
+          provider: AuthProvider.Google,
+        });
+      } catch (e: any) {
+        if (this.isUniqueViolation(e))
+          throw new ConflictException('Google account already linked');
+        throw e;
+      }
       const updated = await this.usersService.findUserById(existingByEmail.id);
       const token = (await this.login(updated as any)).accessToken;
       return { user: updated!, accessToken: token };
@@ -511,9 +518,28 @@ export class AuthService {
       phoneVerified: false,
       emailVerified: profile.verified,
     } as any);
-    const saved = (await repo.save(created as any)) as unknown as User;
+    let saved: User;
+    try {
+      saved = (await repo.save(created as any)) as unknown as User;
+    } catch (e: any) {
+      if (this.isUniqueViolation(e))
+        throw new ConflictException('Google account already linked');
+      throw e;
+    }
     const token = (await this.login(saved)).accessToken;
     return { user: saved, accessToken: token };
+  }
+
+  private isUniqueViolation(e: any): boolean {
+    const msg = e?.message || '';
+    const code = e?.code;
+    return (
+      code === '23505' ||
+      msg.includes('duplicate') ||
+      msg.includes('UNIQUE') ||
+      msg.includes('UQ_user_googleId') ||
+      msg.includes('unique')
+    );
   }
 
   async linkGoogleAccount(
@@ -524,11 +550,17 @@ export class AuthService {
       throw new BadRequestException('Google email not verified');
     const existing = await this.usersService.findByGoogleId(profile.googleId);
     if (existing && existing.id !== userId)
-      throw new BadRequestException('Google account already linked');
-    await this.dataSource.getRepository(User).update(userId, {
-      googleId: profile.googleId,
-      provider: AuthProvider.Google,
-    });
+      throw new ConflictException('Google account already linked');
+    try {
+      await this.dataSource.getRepository(User).update(userId, {
+        googleId: profile.googleId,
+        provider: AuthProvider.Google,
+      });
+    } catch (e: any) {
+      if (this.isUniqueViolation(e))
+        throw new ConflictException('Google account already linked');
+      throw e;
+    }
     return (await this.usersService.findUserById(userId))!;
   }
 }

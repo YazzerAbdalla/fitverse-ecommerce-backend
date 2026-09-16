@@ -48,10 +48,10 @@
 
 ### Tests for User Story 1 ⚠️ Write FIRST, ensure FAIL before implementation
 
-- [ ] T014 [P] [US1] Unit test `requestPasswordReset` anti-enum in `src/modules/auth/auth.service.spec.ts` (existing email creates hashed token + invalidates priors, non-existing still 200, tokenHash sha256, expiresAt 15m)
-- [ ] T015 [P] [US1] Unit test `validateResetToken` and `resetPassword` in `src/modules/auth/auth.service.spec.ts` (valid → user, expired/used/wrong →400, weak password 400, newPassword===email 400, second use 400)
-- [ ] T016 [P] [US1] Integration test `PasswordResetToken` constraints + `FOR UPDATE` single-winner in `src/modules/auth/test/auth.integration.spec.ts` (real PG: duplicate email 409 already, token CHECK, concurrent reset same token → one 200 one 400)
-- [ ] T017 [US1] E2E test forgot→reset→login flow in `test/auth.e2e-spec.ts` (supertest `POST /auth/register` → `forgot-password` → test hook rawToken → `reset-password` → `login` new password 200)
+- [X] T014 [P] [US1] Unit test `requestPasswordReset` anti-enum in `src/modules/auth/auth.service.spec.ts` (existing email creates hashed token + invalidates priors, non-existing still 200, tokenHash sha256, expiresAt 15m)
+- [X] T015 [P] [US1] Unit test `validateResetToken` and `resetPassword` in `src/modules/auth/auth.service.spec.ts` (valid → user, expired/used/wrong →400, weak password 400, newPassword===email 400, second use 400)
+- [X] T016 [P] [US1] Integration test `PasswordResetToken` constraints + `FOR UPDATE` single-winner in `src/modules/auth/test/auth.integration.spec.ts` (real PG: duplicate email 409 already, token CHECK, concurrent reset same token → one 200 one 400)
+- [X] T017 [US1] E2E test forgot→reset→login flow in `test/auth.e2e-spec.ts` (supertest `POST /auth/register` → `forgot-password` → test hook rawToken → `reset-password` → `login` new password 200)
 
 ### Implementation for User Story 1
 
@@ -104,9 +104,9 @@
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T036 [P] [US3] Unit test `handleGoogleLogin` in `src/modules/auth/auth.service.spec.ts` (existing googleId returns same user, existing verified email auto-links per Q1, new email creates provider google null password, unverified → reject, duplicate googleId partial unique 409)
-- [ ] T037 [P] [US3] Unit test `GoogleStrategy` validate in `src/modules/auth/strategies/google.strategy.test.ts` (profile mapping, scope profile email, state true)
-- [ ] T038 [US3] E2E test Google mocked callback in `test/auth.e2e-spec.ts` (GET /auth/google 302, GET /auth/google/callback mocked →200 JWT → `GET /cart` 200; link flow)
+- [X] T036 [P] [US3] Unit test `handleGoogleLogin` in `src/modules/auth/auth.service.spec.ts` (existing googleId returns same user, existing verified email auto-links per Q1, new email creates provider google null password, unverified → reject, duplicate googleId partial unique 409)
+- [X] T037 [P] [US3] Unit test `GoogleStrategy` validate in `src/modules/auth/strategies/google.strategy.test.ts` (profile mapping, scope profile email, state true)
+- [X] T038 [US3] E2E test Google mocked callback in `test/auth.e2e-spec.ts` (GET /auth/google 302, GET /auth/google/callback mocked →200 JWT → `GET /cart` 200; link flow)
 
 ### Implementation for User Story 3
 
@@ -129,8 +129,8 @@
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T045 [P] [US4] Unit test `RateLimitGuard` in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock CACHE_MANAGER, INCR+EXPIRE increments, threshold →429, Redis down fail-open logs)
-- [ ] T046 [US4] Integration test rate limiting with real Redis in `src/modules/auth/test/rate-limit.integration.spec.ts` (exceed forgot/otp/google/login →429, Redis down →200 + warn)
+- [X] T045 [P] [US4] Unit test `RateLimitGuard` in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock CACHE_MANAGER, INCR+EXPIRE increments, threshold →429, Redis down fail-open logs)
+- [X] T046 [US4] Integration test rate limiting with real Redis in `src/modules/auth/test/rate-limit.integration.spec.ts` (exceed forgot/otp/google/login →429, Redis down →200 + warn)
 
 ### Implementation for User Story 4
 
@@ -251,6 +251,7 @@ Stories integrate via shared `User` columns but are file-disjoint (service metho
 - Q1-Q5 clarifications are in code: Q1 auto-link handled in T041, Q2 login choice in T035, Q3 revocation in T021/T023, Q4 fallback in T032/T033, Q5 JSON in T042
 - Deferred email OTP (spec §16.8) intentionally has **no tasks** — it is future work; do not implement in this phase
 - Keep `console.log` removal (T054) and verification (T055-T058) until Polish
+
 
 
 

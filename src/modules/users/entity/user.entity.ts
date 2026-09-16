@@ -18,7 +18,6 @@ export enum AuthProvider {
 }
 
 @Entity()
-@Index(['email'])
 @Unique(['email'])
 @Check(`"provider" IN ('local','google')`)
 export default class User {
@@ -37,18 +36,18 @@ export default class User {
   @Column({ type: 'enum', enum: UserRoles, default: UserRoles.User })
   role!: UserRoles;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   password!: string | null;
 
-  @Column({ nullable: true })
-  @Index()
+  @Column({ type: 'varchar', nullable: true })
+  @Index('IDX_user_phoneNumber')
   phoneNumber!: string | null;
 
   @Column({ default: false })
   phoneVerified!: boolean;
 
-  @Column({ nullable: true })
-  @Index()
+  @Column({ type: 'varchar', nullable: true })
+  @Index('IDX_user_googleId')
   googleId!: string | null;
 
   @Column({ type: 'enum', enum: AuthProvider, default: AuthProvider.Local })
