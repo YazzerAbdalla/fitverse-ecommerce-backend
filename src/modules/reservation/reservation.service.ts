@@ -15,6 +15,7 @@ import { CreateReservationDto } from './dto/create-reservation.dto';
 import { UserRoles } from '../users/enum/roles';
 import { Inventory } from '../inventory/entities/inventory.entity';
 import { Order } from '../order/entities/order.entity';
+import { ReservationTransitionBuilder } from './reservation-transition.builder';
 
 const ALLOWED_TRANSITIONS: Record<ReservationStatus, ReservationStatus[]> = {
   [ReservationStatus.RESERVED]: [
@@ -238,19 +239,18 @@ export class ReservationService {
     return this.transitionWithInventoryExpire(manager, id);
   }
 
+  /**
+   * Builds an EXPIRED transition without owner check via builder (admin/worker bypass).
+   * Replaces positional boolean args with fluent builder per TODO.
+   */
   private async transitionWithInventoryExpire(
     manager: EntityManager,
     id: string,
   ): Promise<Reservation> {
-    return this.transitionWithInventoryInternal(
-      manager,
-      null,
-      id,
-      ReservationStatus.EXPIRED,
-      undefined,
-      undefined,
-      false, // no owner check for expire (admin bypass, worker future)
-    );
+    return new ReservationTransitionBuilder(this, manager, id)
+      .to(ReservationStatus.EXPIRED)
+      .withoutOwnerCheck()
+      .execute();
   }
 
   private async transition(

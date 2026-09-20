@@ -457,7 +457,7 @@ Every reservation has a well-defined lifecycle and inventory remains synchronize
 
 # Phase 5 — Reservation Expiration / Cleanup
 
-**Status: NOT DONE**
+**Status: DONE — 2026-09-21** (BullMQ repeat 30s / 60s SLA, `FOR UPDATE` single-winner, batch paging, Redis tick lock + poison TTL, `reservation.expired` post-commit; `specs/006-reservation-expiration-cleanup` 45 tasks, `npm run test -- --runInBand` 20 suites 169 tests pass, `npm run build` pass)
 
 **Goal:** Automatically release expired inventory.
 
@@ -540,9 +540,9 @@ Decide during implementation whether this workload belongs in:
 
 Do not introduce infrastructure without a reason.
 
-### Phase 5 Exit Criteria
+  ### Phase 5 Exit Criteria
 
-Expired reservations eventually release inventory and concurrent expiration/completion/cancellation cannot corrupt inventory.
+  Expired reservations eventually release inventory and concurrent expiration/completion/cancellation cannot corrupt inventory. — **MET 2026-09-21**: `ReservationExpirationService` (`findExpiredCandidateIds` `status=RESERVED AND expiresAt<=NOW()` + per-candidate `FOR UPDATE` via builder `ReservationTransitionBuilder` `src/modules/reservation/reservation-transition.builder.ts`) + `ReservationExpirationProcessor` (`@Processor concurrency:1` + Redis `SET NX expiration:tick:lock` `src/modules/reservation/reservation-expiration.processor.ts:52` + BullMQ repeat `30s`/`EXPIRATION_CRON` jobId singleton) + Redis poison `expiration:poison:count/quarantine` `24h TTL` (`src/modules/reservation/reservation-expiration.service.ts:19`, `EXPIRATION_MAX_RETRIES=3`) + RabbitMQ `reservation.expired` post-commit (`spec.md` Q3, `.env.example:34`); SC-001..008 verified in `src/modules/reservation/test/expiration.integration.spec.ts` (single/multi-item, immunity, worker-vs-complete/cancel/worker single-winner, idempotency, batch 25/10, EXPLAIN composite index `status+expiresAt`, poison 3→quarantine); `jest --runInBand` now default (`package.json:16`, `transformIgnorePatterns` for `@nestjs/bullmq` ESM).
 
 ---
 

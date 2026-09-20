@@ -55,17 +55,20 @@ service another module needs.
     order state machine in `docs/plan.md`. Open question in `docs/decisions/`.
 - `CreateOrderDto` is **empty** (`export class CreateOrderDto {}`).
 
-## inventory (no API — Partial)
+## inventory (REST — Phase 1 DONE)
 
-- `inventory.module.ts` — provides `InventoryService`.
-- `inventory.service.ts` —
-  - `decreaseStockForOrderMany(manager, products)` — decrement `stock` by
-    `soldQuantity` via the passed `EntityManager` (caller owns the transaction).
-  - `restoreStockForOrderMany(manager, products)` — increment `stock` (refund/
-    cancel).
-  - `checkAvailability(productId, neededQuantity)` — **logic is inverted** (it
-    throws when stock *is* sufficient); flagged as a bug in `docs/decisions/`.
-  - `increaseStock()`, `checkAvailabilityMany()` — empty stubs.
-- **No `Inventory` entity yet.** The service mutates `Product.stock` directly.
-  The intended entity/model is in
-  [`inventory-reservation.md`](./inventory-reservation.md).
+- `inventory.module.ts` — `TypeOrmModule.forFeature([Inventory])` + `InventorySeeder` (idempotent `onModuleInit`); exports `InventoryService`.
+- `inventory.entity.ts` — `id uuid PK`, `productId FK Product CASCADE @Index + @Unique`, `stock CHECK >=0`, `reservedAmount CHECK >=0 && <=stock`, `available` derived `stock - reservedAmount` (getter), `@Check` + `@Unique` enforced; migration `1755800000000-CreateInventoryAndDropProductStock` owns DDL (`synchronize:false`).
+- `inventory.service.ts` — `getInventory(productId)`, `checkAvailability(productId,qty)` (`available = stock - reservedAmount`), `increaseStock`/`decreaseStock`, `decreaseStockForOrderMany(manager, items)` / `restoreStockForOrderMany(manager, items)` via passed `EntityManager` (caller owns tx), `reserve`/`releaseReservation`/`completeSale` stubs; deterministic `FOR UPDATE` owned by reservation layer.
+- `inventory.controller.ts` — thin REST `GET /inventory/:productId`, `GET .../availability?quantity=`, `POST .../increase|decrease` (admin).
+
+## reservation (REST — Phases 2-5 DONE)
+
+- `reservation.module.ts` — `TypeOrmModule.forFeature([Reservation, ReservationItem])`, `BullModule.registerQueue({name:'reservation-expiration'})`, provides `ReservationService` + `ReservationExpirationService` + `ReservationExpirationProcessor` + `REDIS_CLIENT` (`ioredis` lazy, `REDIS_URL` precedence `src/app.module.ts:45`), exports both services.
+- `reservation.entity.ts` / `reservation-item.entity.ts` — `Reservation` `id uuid PK`, `userId FK CASCADE @Index`, `orderId FK SET NULL`, `status enum RESERVED|COMPLETED|EXPIRED|CANCELLED`, `expiresAt timestamptz` `DEFAULT_TTL_MS 15m`, `OneToMany items`; `ReservationItem` `quantity CHECK >0`, `@Unique([reservationId,inventoryId])`; indexes `userId/status/expiresAt` + composite `status+expiresAt` for scan; migration `1755850000000`.
+- `reservation.service.ts` — `create(manager,userId,dto)` (`FOR UPDATE` sorted `Inventory` `In(sortedIds)`, `available>=qty`, `reserved+=qty`), `findById`/`listByUser` (paginated, admin filter), `complete`/`cancel`/`expire` via `ReservationTransitionBuilder` `src/modules/reservation/reservation-transition.builder.ts` → `transitionWithInventoryInternal` (`FOR UPDATE Reservation` first then sorted `Inventory`, `validateTransition`, idempotent `COMPLETED→COMPLETED 200`, `CANCELLED/EXPIRED→* 409`, inventory `COMPLETED: stock-=qty+reserved-=qty` vs `CANCELLED/EXPIRED: reserved-=qty` only, `CHECK 23514→409`, no external I/O inside tx); `validateTransition`/`assertOwner`.
+- `reservation-transition.builder.ts` — fluent builder replacing positional `checkOwner` boolean: `new ReservationTransitionBuilder(service,manager,id).to(EXPIRED).withoutOwnerCheck().execute()`.
+- `reservation-expiration.service.ts` — `findExpiredCandidateIds(limit)` `status='RESERVED' AND expiresAt <= NOW() ORDER BY expiresAt,id LIMIT`, `expireOne` delegates to `service.expire`, `processExpiredBatch(limit)` (scan outside tx, loop per-candidate `dataSource.transaction`, `isQuarantined`/`incrementPoisonCount`/`setQuarantined` via Redis `expiration:poison:count/quarantine` `TTL 86400` fallback to in-memory `Map/Set`, `EXPIRATION_MAX_RETRIES=3`, `Conflict Invalid transition` → `skipped` not retried, RabbitMQ `reservation.expired` emit post-commit), `processAll` / `clearPoisonState`.
+- `reservation-expiration.processor.ts` — `@Processor('reservation-expiration', concurrency:1)` `WorkerHost`, `onModuleInit` registers BullMQ repeat `30s`/`EXPIRATION_CRON` `jobId` singleton, `process` guards `EXPIRATION_ENABLED=false`, in-memory `processing` + distributed `SET expiration:tick:lock NX EX ttlSec` (`Math.ceil(interval/1000)+5`) via `REDIS_CLIENT` (skip if `skippedByLock`), then `service.processExpiredBatch(batchSize)`.
+- `reservation.controller.ts` — thin `POST /reservations`, `GET /:id` (owner/admin), `GET /` (paginated), `PATCH /:id/complete|cancel` (owner/admin), `PATCH /:id/expire` (admin immediate override, no `expiresAt` check Q1) all wrap `dataSource.transaction`.
+- DTOs: `create-reservation.dto.ts` (`items: {inventoryId,quantity>0}[]`, `orderId`, `expiresAt` future validated, `Global ValidationPipe` whitelist).

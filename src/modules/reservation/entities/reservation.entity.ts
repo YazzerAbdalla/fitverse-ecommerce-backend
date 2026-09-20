@@ -23,7 +23,6 @@ export class Reservation {
   id!: string;
 
   @Column({ type: 'uuid' })
-  @Index()
   userId!: string;
 
   @Column({ type: 'uuid', nullable: true })

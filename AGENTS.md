@@ -127,6 +127,64 @@ Follow the existing structure under `src/modules/<name>/`:
 - **Database access** — only through repositories / `EntityManager`. No raw SQL
   unless justified; if used, keep it in a repository/service and document why.
 
+### Code Documentation — JSDoc / Comments (Required)
+
+All new and modified code **must** be documented. This is not optional.
+
+- **Class-level JSDoc (required)** — every `Service`, `Controller`/`Resolver`,
+  `Entity`, `Guard`, `Interceptor`, `Filter`, and `Module` gets a `/** ... */`
+  block immediately above the class declaration. For services, use the form:
+  ```ts
+  /**
+   * This service is responsible for <bounded context / domain>.
+   * It handles <key responsibilities> and enforces <invariants>.
+   */
+  @Injectable()
+  export class InventoryService { ... }
+  ```
+  Controllers/resolvers/entities follow the same pattern (e.g. `/** This controller exposes ... */`,
+  `/** This entity represents ... */`).
+
+- **Method-level JSDoc (required)** — every **public** method (and any
+  non-trivial `private`/`protected` method) gets a `/** ... */` block with:
+  `@param`, `@returns`, and `@throws` where applicable. Describe *what* the
+  method does, not *how* it is implemented. Example:
+  ```ts
+  /**
+   * Reserves inventory for a reservation inside the caller's transaction.
+   * @param manager - EntityManager of the enclosing transaction (caller owns commit/rollback).
+   * @param productId - Product to reserve.
+   * @param quantity - Units to reserve (must be > 0, validated by DTO + service).
+   * @returns The updated Inventory row.
+   * @throws NotFoundException if inventory row missing, ConflictException if insufficient available stock.
+   */
+  async reserve(manager: EntityManager, productId: string, quantity: number): Promise<Inventory> { ... }
+  ```
+
+- **Complex conditions & formulas (required inline comments)** — any non-trivial
+  branching, guard, or calculation must have a short `//` comment explaining
+  the *intent/business rule*, not just restating the code. Examples that
+  require a comment:
+  - `if`/`while` with ≥2 predicates, negations, or null/edge-case checks
+  - availability / stock arithmetic (`available = stock - reservedAmount`)
+  - pagination (`skip = (page - 1) * limit`), expiration/TTL (`expiresAt = now + ttlMs`),
+    pricing/discount/tax formulas, optimistic/pessimistic lock predicates
+  - Example:
+    ```ts
+    // Available stock excludes already-reserved units to prevent overselling
+    const available = inventory.stock - inventory.reservedAmount;
+    if (available < requestedQty) throw new ConflictException('Insufficient stock');
+    ```
+
+- **Style** — use `/** ... */` (JSDoc) for class/method docs, `//` for inline
+  condition/formula explanations. Keep comments concise and factual — no
+  chain-of-thought, no redundant restatement of obvious code, no emojis unless
+  requested. Update comments when you change the code they describe.
+
+- **Verification** — code review (`skills/code-review/SKILL.md`) must reject PRs
+  missing required JSDoc or unexplained complex logic. Treat missing docs as a
+  lint failure.
+
 ---
 
 ## 4. Database Rules (PostgreSQL + TypeORM)
@@ -243,6 +301,8 @@ Run: `npm run test`, `npm run test:e2e`, `npm run test:cov`.
 - edit committed migrations
 - store secrets in source control
 - claim tests passed or work is complete without running/verifying
+- leave `Service`/`Controller`/`Resolver`/`Entity`/`Guard` classes or public methods without JSDoc (`/** ... */`) — see §3 Code Documentation
+- leave complex conditions (multi-predicate `if`/`while`, negations, edge-case guards) or formulas (stock/availability, pagination, TTL/expiration, pricing) without an inline `//` intent comment
 
 **Always**
 - read `AGENTS.md` + relevant `skills/` + existing code before changing anything
@@ -253,6 +313,7 @@ Run: `npm run test`, `npm run test:e2e`, `npm run test:cov`.
 - add/update tests for behavior changes
 - update plan.md after implement any phase 
 - update `docs/` and `docs/decisions/` when an architecture decision is made
+- document every new/modified `Service`/`Controller`/`Resolver`/`Entity`/`Guard` with class-level `/** This service is responsible for ... */` and every public method with `/** ... @param @returns @throws */` JSDoc; add `//` comments for all complex conditions and formulas (see §3 Code Documentation)
 - verify (`lint`, `build`, `test`) before declaring done
 
 ---

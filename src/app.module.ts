@@ -4,6 +4,7 @@ import { CacheModule } from '@nestjs/cache-manager';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GraphQLModule } from '@nestjs/graphql';
+import { BullModule } from '@nestjs/bullmq';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { join } from 'path';
@@ -40,6 +41,21 @@ import { UsersModule } from './modules/users/users.module';
         ttl: 60 * 1000,
       }),
       isGlobal: true,
+    }),
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => {
+        // REDIS_URL takes precedence when provided (ioredis ignores url when host is set)
+        const url = configService.get<string>('REDIS_URL');
+        if (url) return { connection: { url } };
+        return {
+          connection: {
+            host: configService.get<string>('REDIS_HOST', '127.0.0.1'),
+            port: parseInt(configService.get<string>('REDIS_PORT', '6379'), 10),
+          },
+        };
+      },
     }),
     ClientsModule.registerAsync([
       {
