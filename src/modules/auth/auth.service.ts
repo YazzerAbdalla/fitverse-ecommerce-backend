@@ -520,7 +520,7 @@ export class AuthService {
     } as any);
     let saved: User;
     try {
-      saved = (await repo.save(created as any)) as unknown as User;
+      saved = await repo.save(created as any);
     } catch (e: any) {
       if (this.isUniqueViolation(e))
         throw new ConflictException('Google account already linked');

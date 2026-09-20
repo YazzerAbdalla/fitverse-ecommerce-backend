@@ -51,7 +51,8 @@ describe('RateLimit Integration (real Redis)', () => {
     return { ctx, req, res };
   };
 
-  const uniqueIp = () => `10.${Math.floor(Math.random() * 254) + 1}.${Math.floor(Math.random() * 254) + 1}.${Math.floor(Math.random() * 254) + 1}`;
+  const uniqueIp = () =>
+    `10.${Math.floor(Math.random() * 254) + 1}.${Math.floor(Math.random() * 254) + 1}.${Math.floor(Math.random() * 254) + 1}`;
 
   beforeAll(async () => {
     try {
@@ -78,15 +79,18 @@ describe('RateLimit Integration (real Redis)', () => {
       if (v === 1) {
         redisAvailable = true;
         await cache.del('__rl_integration_ping');
-        // eslint-disable-next-line no-console
+
         console.log('[rate-limit integration] Redis available at', REDIS_URL);
       } else {
         throw new Error('ping mismatch');
       }
     } catch (e) {
       redisAvailable = false;
-      // eslint-disable-next-line no-console
-      console.warn('[rate-limit integration] Redis not available, integration tests will be skipped gracefully. Set REDIS_URL or start docker redis. Error:', (e as Error).message);
+
+      console.warn(
+        '[rate-limit integration] Redis not available, integration tests will be skipped gracefully. Set REDIS_URL or start docker redis. Error:',
+        (e as Error).message,
+      );
       // fallback to mock cache so fail-open test still runs
       if (!guard) {
         const mockCache: any = {
@@ -95,10 +99,13 @@ describe('RateLimit Integration (real Redis)', () => {
           del: jest.fn().mockResolvedValue(undefined),
         };
         const fallbackMod = await Test.createTestingModule({
-          providers: [RateLimitGuard, { provide: CACHE_MANAGER, useValue: mockCache }],
+          providers: [
+            RateLimitGuard,
+            { provide: CACHE_MANAGER, useValue: mockCache },
+          ],
         }).compile();
         guard = fallbackMod.get<RateLimitGuard>(RateLimitGuard);
-        cache = mockCache as unknown as Cache;
+        cache = mockCache;
       }
     }
   });
@@ -118,8 +125,9 @@ describe('RateLimit Integration (real Redis)', () => {
 
   it('should note skip gracefully when Redis unavailable', () => {
     if (!redisAvailable) {
-      // eslint-disable-next-line no-console
-      console.warn('[rate-limit integration] SKIP: Redis not available — tests gracefully skipped (mock fail-open will still be verified)');
+      console.warn(
+        '[rate-limit integration] SKIP: Redis not available — tests gracefully skipped (mock fail-open will still be verified)',
+      );
     }
     expect(guard).toBeDefined();
   });
@@ -127,8 +135,9 @@ describe('RateLimit Integration (real Redis)', () => {
   describe('exceed forgot-password 5/h IP -> 6th 429', () => {
     it('6th request returns 429 with Retry-After + X-RateLimit headers', async () => {
       if (!redisAvailable) {
-        // eslint-disable-next-line no-console
-        console.warn('SKIP real redis: forgot-password 6th 429 — redis unavailable');
+        console.warn(
+          'SKIP real redis: forgot-password 6th 429 — redis unavailable',
+        );
         return;
       }
       const ip = uniqueIp();
@@ -152,7 +161,9 @@ describe('RateLimit Integration (real Redis)', () => {
         ip,
         body: {},
       });
-      await expect(guard.canActivate(ctx)).rejects.toMatchObject({ status: HttpStatus.TOO_MANY_REQUESTS });
+      await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+        status: HttpStatus.TOO_MANY_REQUESTS,
+      });
       try {
         await guard.canActivate(ctx);
       } catch (e: any) {
@@ -169,7 +180,6 @@ describe('RateLimit Integration (real Redis)', () => {
   describe('otp/request 429 and otp/verify 429', () => {
     it('otp/request phone 5/h -> 6th 429', async () => {
       if (!redisAvailable) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP real redis: otp/request');
         return;
       }
@@ -192,14 +202,17 @@ describe('RateLimit Integration (real Redis)', () => {
         ip,
         body: { phoneNumber: phone },
       });
-      await expect(guard.canActivate(ctx)).rejects.toMatchObject({ status: 429 });
-      await cache.del(`rl:POST /auth/otp/request:phone:${phone}`).catch(() => {});
+      await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+        status: 429,
+      });
+      await cache
+        .del(`rl:POST /auth/otp/request:phone:${phone}`)
+        .catch(() => {});
       await cache.del(`rl:POST /auth/otp/request:ip:${ip}`).catch(() => {});
     });
 
     it('otp/verify 10/h -> 11th 429', async () => {
       if (!redisAvailable) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP real redis: otp/verify');
         return;
       }
@@ -221,7 +234,9 @@ describe('RateLimit Integration (real Redis)', () => {
         ip,
         body: { phoneNumber: '+201012345678', otp: '123456' },
       });
-      await expect(guard.canActivate(ctx)).rejects.toMatchObject({ status: 429 });
+      await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+        status: 429,
+      });
       await cache.del(`rl:POST /auth/otp/verify:ip:${ip}`).catch(() => {});
     });
   });
@@ -229,7 +244,6 @@ describe('RateLimit Integration (real Redis)', () => {
   describe('google/callback 20/h IP -> 21st 429', () => {
     it('21st returns 429', async () => {
       if (!redisAvailable) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP real redis: google/callback');
         return;
       }
@@ -249,7 +263,9 @@ describe('RateLimit Integration (real Redis)', () => {
         path: '/auth/google/callback',
         ip,
       });
-      await expect(guard.canActivate(ctx)).rejects.toMatchObject({ status: 429 });
+      await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+        status: 429,
+      });
       try {
         await guard.canActivate(ctx);
       } catch (e: any) {
@@ -263,7 +279,6 @@ describe('RateLimit Integration (real Redis)', () => {
   describe('login/register 10/h IP -> 11th 429', () => {
     it('login 11th returns 429', async () => {
       if (!redisAvailable) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP real redis: login');
         return;
       }
@@ -285,7 +300,9 @@ describe('RateLimit Integration (real Redis)', () => {
         ip,
         body: { email: 'a@b.com', password: 'x' },
       });
-      await expect(guard.canActivate(ctx)).rejects.toMatchObject({ status: 429 });
+      await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+        status: 429,
+      });
       await cache.del(`rl:POST /auth/login:ip:${ip}`).catch(() => {});
     });
   });
@@ -299,10 +316,15 @@ describe('RateLimit Integration (real Redis)', () => {
         del: jest.fn(),
       };
       const mod = await Test.createTestingModule({
-        providers: [RateLimitGuard, { provide: CACHE_MANAGER, useValue: failingCache }],
+        providers: [
+          RateLimitGuard,
+          { provide: CACHE_MANAGER, useValue: failingCache },
+        ],
       }).compile();
       const failingGuard = mod.get<RateLimitGuard>(RateLimitGuard);
-      const warnSpy = jest.spyOn((failingGuard as any).logger, 'warn').mockImplementation(() => {});
+      const warnSpy = jest
+        .spyOn((failingGuard as any).logger, 'warn')
+        .mockImplementation(() => {});
 
       const { ctx } = createContext({
         method: 'POST',
@@ -312,7 +334,9 @@ describe('RateLimit Integration (real Redis)', () => {
         body: { email: 'down@example.com' },
       });
       await expect(failingGuard.canActivate(ctx)).resolves.toBe(true);
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('RateLimit Redis fail-open'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('RateLimit Redis fail-open'),
+      );
       // metric auth_rate_limit_fallback_total would increment here (guard comment)
       await mod.close();
     });
@@ -323,8 +347,12 @@ describe('RateLimit Integration (real Redis)', () => {
         expect(true).toBe(true);
         return;
       }
-      const spy = jest.spyOn(cache as any, 'get').mockRejectedValueOnce(new Error('Redis down'));
-      const warnSpy = jest.spyOn((guard as any).logger, 'warn').mockImplementation(() => {});
+      const spy = jest
+        .spyOn(cache as any, 'get')
+        .mockRejectedValueOnce(new Error('Redis down'));
+      const warnSpy = jest
+        .spyOn((guard as any).logger, 'warn')
+        .mockImplementation(() => {});
       const { ctx } = createContext({
         method: 'POST',
         routePath: '/auth/reset-password',

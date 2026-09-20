@@ -8,15 +8,17 @@ describe('RateLimitGuard', () => {
   let cacheMock: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
   let loggerWarnSpy: jest.SpyInstance;
 
-  const createContext = (overrides: {
-    method?: string;
-    routePath?: string;
-    path?: string;
-    ip?: string;
-    headers?: Record<string, string>;
-    body?: any;
-    res?: any;
-  } = {}) => {
+  const createContext = (
+    overrides: {
+      method?: string;
+      routePath?: string;
+      path?: string;
+      ip?: string;
+      headers?: Record<string, string>;
+      body?: any;
+      res?: any;
+    } = {},
+  ) => {
     const {
       method = 'POST',
       routePath = '/auth/forgot-password',
@@ -60,7 +62,9 @@ describe('RateLimitGuard', () => {
 
     guard = module.get<RateLimitGuard>(RateLimitGuard);
     // spy on internal logger.warn
-    loggerWarnSpy = jest.spyOn((guard as any).logger, 'warn').mockImplementation(() => {});
+    loggerWarnSpy = jest
+      .spyOn((guard as any).logger, 'warn')
+      .mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -91,7 +95,11 @@ describe('RateLimitGuard', () => {
         body: {},
       });
       await expect(guard.canActivate(ctx)).resolves.toBe(true);
-      expect(cacheMock.set).toHaveBeenCalledWith(expect.stringContaining('ip'), 1, 3600_000);
+      expect(cacheMock.set).toHaveBeenCalledWith(
+        expect.stringContaining('ip'),
+        1,
+        3600_000,
+      );
       expect(res.setHeader).toHaveBeenCalledWith('X-RateLimit-Limit', '5');
       expect(res.setHeader).toHaveBeenCalledWith('X-RateLimit-Remaining', '4');
     });
@@ -132,8 +140,14 @@ describe('RateLimitGuard', () => {
         body: {},
       });
       await guard.canActivate(ctx);
-      expect(cacheMock.get).toHaveBeenCalledWith(expect.stringContaining('rl:POST /auth/forgot-password:ip:'));
-      expect(cacheMock.set).toHaveBeenCalledWith(expect.stringContaining('rl:POST /auth/forgot-password:ip:'), 3, 3600_000);
+      expect(cacheMock.get).toHaveBeenCalledWith(
+        expect.stringContaining('rl:POST /auth/forgot-password:ip:'),
+      );
+      expect(cacheMock.set).toHaveBeenCalledWith(
+        expect.stringContaining('rl:POST /auth/forgot-password:ip:'),
+        3,
+        3600_000,
+      );
     });
   });
 
@@ -159,7 +173,9 @@ describe('RateLimitGuard', () => {
         expect(e.options.headers['X-RateLimit-Limit']).toBe('3');
         expect(e.options.headers['Retry-After']).toBe('3600');
       }
-      expect(cacheMock.get).toHaveBeenCalledWith(expect.stringContaining(':email:alice@example.com'));
+      expect(cacheMock.get).toHaveBeenCalledWith(
+        expect.stringContaining(':email:alice@example.com'),
+      );
     });
 
     it('should allow when email under limit but IP at limit -> IP throws 429 with limit 5', async () => {
@@ -174,7 +190,9 @@ describe('RateLimitGuard', () => {
         path: '/auth/forgot-password',
         body: { email: 'bob@example.com' },
       });
-      await expect(guard.canActivate(ctx)).rejects.toMatchObject({ status: 429 });
+      await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+        status: 429,
+      });
       try {
         await guard.canActivate(ctx);
       } catch (e: any) {
@@ -211,13 +229,25 @@ describe('RateLimitGuard', () => {
       it(`should allow 10 and block 11th for ${route}`, async () => {
         // 10th request: get returns 9 -> count 10 OK
         cacheMock.get.mockResolvedValue(9);
-        const { ctx } = createContext({ method, routePath: path, path, body: {} });
+        const { ctx } = createContext({
+          method,
+          routePath: path,
+          path,
+          body: {},
+        });
         await expect(guard.canActivate(ctx)).resolves.toBe(true);
 
         // 11th: get 10 -> count 11 >10 -> 429
         cacheMock.get.mockResolvedValue(10);
-        const { ctx: ctx2 } = createContext({ method, routePath: path, path, body: {} });
-        await expect(guard.canActivate(ctx2)).rejects.toMatchObject({ status: 429 });
+        const { ctx: ctx2 } = createContext({
+          method,
+          routePath: path,
+          path,
+          body: {},
+        });
+        await expect(guard.canActivate(ctx2)).rejects.toMatchObject({
+          status: 429,
+        });
         try {
           await guard.canActivate(ctx2);
         } catch (e: any) {
@@ -239,7 +269,11 @@ describe('RateLimitGuard', () => {
         path: '/auth/google/callback',
       });
       await expect(guard.canActivate(ctx)).resolves.toBe(true);
-      expect(cacheMock.set).toHaveBeenCalledWith(expect.stringContaining('rl:GET /auth/google/callback:ip:'), 20, 3600_000);
+      expect(cacheMock.set).toHaveBeenCalledWith(
+        expect.stringContaining('rl:GET /auth/google/callback:ip:'),
+        20,
+        3600_000,
+      );
 
       cacheMock.get.mockResolvedValue(20);
       const { ctx: ctx2 } = createContext({
@@ -247,7 +281,9 @@ describe('RateLimitGuard', () => {
         routePath: '/auth/google/callback',
         path: '/auth/google/callback',
       });
-      await expect(guard.canActivate(ctx2)).rejects.toMatchObject({ status: 429 });
+      await expect(guard.canActivate(ctx2)).rejects.toMatchObject({
+        status: 429,
+      });
       try {
         await guard.canActivate(ctx2);
       } catch (e: any) {
@@ -269,7 +305,9 @@ describe('RateLimitGuard', () => {
         path: '/auth/otp/request',
         body: { phoneNumber: '+201012345678' },
       });
-      await expect(guard.canActivate(ctx)).rejects.toMatchObject({ status: 429 });
+      await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+        status: 429,
+      });
       try {
         await guard.canActivate(ctx);
       } catch (e: any) {
@@ -311,7 +349,9 @@ describe('RateLimitGuard', () => {
         path: '/auth/otp/verify',
         body: { phoneNumber: '+201012345678', otp: '123456' },
       });
-      await expect(guard.canActivate(ctx2)).rejects.toMatchObject({ status: 429 });
+      await expect(guard.canActivate(ctx2)).rejects.toMatchObject({
+        status: 429,
+      });
     });
   });
 
@@ -325,7 +365,9 @@ describe('RateLimitGuard', () => {
         body: { email: 'a@b.com' },
       });
       await expect(guard.canActivate(ctx)).resolves.toBe(true);
-      expect(loggerWarnSpy).toHaveBeenCalledWith(expect.stringContaining('RateLimit Redis fail-open'));
+      expect(loggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('RateLimit Redis fail-open'),
+      );
       // metric auth_rate_limit_fallback_total would increment here (comment in guard)
     });
 
@@ -354,7 +396,9 @@ describe('RateLimitGuard', () => {
         body: {},
       });
       // should still throw 429, not fail-open to true
-      await expect(guard.canActivate(ctx)).rejects.toMatchObject({ status: 429 });
+      await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+        status: 429,
+      });
       expect(loggerWarnSpy).not.toHaveBeenCalled();
     });
 
@@ -368,7 +412,9 @@ describe('RateLimitGuard', () => {
         ip: '1.1.1.1',
       });
       await guard.canActivate(ctx);
-      expect(cacheMock.get).toHaveBeenCalledWith(expect.stringContaining('9.9.9.9'));
+      expect(cacheMock.get).toHaveBeenCalledWith(
+        expect.stringContaining('9.9.9.9'),
+      );
     });
   });
 

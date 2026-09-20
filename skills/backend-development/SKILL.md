@@ -56,3 +56,15 @@ Multi-row writes (order + inventory, reservation + inventory) go inside
 `dataSource.transaction(async manager => { … })`; do **all** writes through
 `manager`. See `products.service.ts:updateMany` for the `pessimistic_write` lock
 pattern.
+
+## Documentation (required — see AGENTS.md §3)
+
+- Add class-level JSDoc `/** This service is responsible for ... */` to every `Service`/`Controller`/`Resolver`/`Entity`/`Guard`.
+- Add method-level JSDoc (`@param`, `@returns`, `@throws`) to every public method.
+- Add `//` intent comments for complex conditions and formulas (e.g. `// Available stock excludes already-reserved units` before `stock - reservedAmount` checks, `// skip pagination: (page-1)*limit`).
+
+## Tests, docs & verification
+
+- Mirror existing test style (`*.spec.ts`).
+- Update `docs/` and `docs/decisions/` when behavior/architecture changes.
+- Run `npm run lint && npm run build && npm run test` before marking complete.

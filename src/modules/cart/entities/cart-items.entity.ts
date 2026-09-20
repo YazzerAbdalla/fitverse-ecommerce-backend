@@ -9,7 +9,6 @@ import {
 import { Cart } from './cart.entity';
 
 @Entity()
-@Unique(['id'])
 export class CartItem {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

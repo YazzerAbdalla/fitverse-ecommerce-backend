@@ -26,13 +26,15 @@ describe('GoogleStrategy', () => {
   it('should have scope profile and email', () => {
     const strategy = createStrategy();
     // PassportStrategy stores options in private `_options` or instance
-    const opts: any = (strategy as any)._options || (strategy as any).options || (strategy as any)._strategyOptions;
+    const opts: any =
+      (strategy as any)._options ||
+      (strategy as any).options ||
+      (strategy as any)._strategyOptions;
     // fallback: check internal strategy instance
-    const inner: any = (strategy as any)._strategy || (strategy as any).strategy;
+    const inner: any =
+      (strategy as any)._strategy || (strategy as any).strategy;
     const scope =
-      opts?.scope ||
-      inner?.options?.scope ||
-      (strategy as any).options?.scope;
+      opts?.scope || inner?.options?.scope || (strategy as any).options?.scope;
 
     // GoogleStrategy super called with scope ['profile','email']
     // We can verify by checking config construction via spy, but also assert that
@@ -137,7 +139,10 @@ describe('GoogleStrategy', () => {
       };
       const done = jest.fn();
       await strategy.validate('at', 'rt', profile, done);
-      expect(done).toHaveBeenCalledWith(null, expect.objectContaining({ verified: false }));
+      expect(done).toHaveBeenCalledWith(
+        null,
+        expect.objectContaining({ verified: false }),
+      );
     });
 
     it('handles missing emails (email undefined, verified false)', async () => {
@@ -149,11 +154,14 @@ describe('GoogleStrategy', () => {
       };
       const done = jest.fn();
       await strategy.validate('at', 'rt', profile, done);
-      expect(done).toHaveBeenCalledWith(null, expect.objectContaining({
-        googleId: 'google-123',
-        email: undefined,
-        verified: false,
-      }));
+      expect(done).toHaveBeenCalledWith(
+        null,
+        expect.objectContaining({
+          googleId: 'google-123',
+          email: undefined,
+          verified: false,
+        }),
+      );
     });
 
     it('handles missing name (firstName/lastName defaults to empty string)', async () => {
@@ -165,10 +173,13 @@ describe('GoogleStrategy', () => {
       };
       const done = jest.fn();
       await strategy.validate('at', 'rt', profile, done);
-      expect(done).toHaveBeenCalledWith(null, expect.objectContaining({
-        firstName: '',
-        lastName: '',
-      }));
+      expect(done).toHaveBeenCalledWith(
+        null,
+        expect.objectContaining({
+          firstName: '',
+          lastName: '',
+        }),
+      );
     });
 
     it('maps name with only givenName', async () => {
@@ -180,10 +191,13 @@ describe('GoogleStrategy', () => {
       };
       const done = jest.fn();
       await strategy.validate('at', 'rt', profile, done);
-      expect(done).toHaveBeenCalledWith(null, expect.objectContaining({
-        firstName: 'Alice',
-        lastName: '',
-      }));
+      expect(done).toHaveBeenCalledWith(
+        null,
+        expect.objectContaining({
+          firstName: 'Alice',
+          lastName: '',
+        }),
+      );
     });
 
     it('avatar undefined when no photos', async () => {
@@ -195,9 +209,12 @@ describe('GoogleStrategy', () => {
       };
       const done = jest.fn();
       await strategy.validate('at', 'rt', profile, done);
-      expect(done).toHaveBeenCalledWith(null, expect.objectContaining({
-        avatar: undefined,
-      }));
+      expect(done).toHaveBeenCalledWith(
+        null,
+        expect.objectContaining({
+          avatar: undefined,
+        }),
+      );
     });
 
     it('extracts googleId from profile.id', async () => {
@@ -209,7 +226,10 @@ describe('GoogleStrategy', () => {
       };
       const done = jest.fn();
       await strategy.validate('at', 'rt', profile, done);
-      expect(done).toHaveBeenCalledWith(null, expect.objectContaining({ googleId: 'google-unique-999' }));
+      expect(done).toHaveBeenCalledWith(
+        null,
+        expect.objectContaining({ googleId: 'google-unique-999' }),
+      );
     });
   });
 });

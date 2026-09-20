@@ -54,30 +54,49 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
       await dataSource.query('SELECT 1');
       // clean
       // truncate in order respecting FKs
-      await dataSource.query('TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE');
+      await dataSource.query(
+        'TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE',
+      );
       // console log
-      // eslint-disable-next-line no-console
+
       console.log('[auth integration] PG connected', {
         host: process.env.POSTGRES_HOST,
         db: process.env.POSTGRES_DATABASE,
       });
 
       // build AuthService with real DataSource but mocked collaborators
-      const logger = { log: jest.fn(), error: jest.fn(), debug: jest.fn(), warn: jest.fn() } as unknown as Logger;
-      const jwtService = { signAsync: jest.fn().mockResolvedValue('jwt-token') } as unknown as JwtService;
+      const logger = {
+        log: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+        warn: jest.fn(),
+      } as unknown as Logger;
+      const jwtService = {
+        signAsync: jest.fn().mockResolvedValue('jwt-token'),
+      } as unknown as JwtService;
       const cacheMock: any = { get: jest.fn(), set: jest.fn(), del: jest.fn() };
-      const configService = { get: jest.fn().mockReturnValue('15m') } as unknown as ConfigService;
-      const whatsappMock: any = { sendOtp: jest.fn().mockResolvedValue({ messageId: 'test' }) };
+      const configService = {
+        get: jest.fn().mockReturnValue('15m'),
+      } as unknown as ConfigService;
+      const whatsappMock: any = {
+        sendOtp: jest.fn().mockResolvedValue({ messageId: 'test' }),
+      };
 
       usersServiceMock = {
         findUserByEmail: jest.fn(async (email: string) => {
-          return await dataSource.getRepository(User).findOne({ where: { email } });
+          return await dataSource
+            .getRepository(User)
+            .findOne({ where: { email } });
         }),
         findUserById: jest.fn(async (id: string) => {
-          return await dataSource.getRepository(User).findOne({ where: { id } });
+          return await dataSource
+            .getRepository(User)
+            .findOne({ where: { id } });
         }),
         findByGoogleId: jest.fn(async (googleId: string) => {
-          return await dataSource.getRepository(User).findOne({ where: { googleId } });
+          return await dataSource
+            .getRepository(User)
+            .findOne({ where: { googleId } });
         }),
         createNewUser: jest.fn(async (data: any) => {
           return await dataSource.getRepository(User).save(data);
@@ -85,7 +104,7 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
       };
 
       authService = new AuthService(
-        usersServiceMock as any,
+        usersServiceMock,
         logger,
         jwtService,
         dataSource,
@@ -96,8 +115,11 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
     } catch (e: any) {
       skip = true;
       skipReason = e?.message || String(e);
-      // eslint-disable-next-line no-console
-      console.warn('[auth integration] SKIP: Real PG not available, integration tests will be skipped gracefully. Start docker postgres. Error:', skipReason);
+
+      console.warn(
+        '[auth integration] SKIP: Real PG not available, integration tests will be skipped gracefully. Start docker postgres. Error:',
+        skipReason,
+      );
       try {
         if (dataSource?.isInitialized) await dataSource.destroy();
       } catch {}
@@ -107,7 +129,11 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
   afterAll(async () => {
     try {
       if (dataSource?.isInitialized) {
-        await dataSource.query('TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE').catch(() => {});
+        await dataSource
+          .query(
+            'TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE',
+          )
+          .catch(() => {});
         await dataSource.destroy();
       }
     } catch {}
@@ -115,12 +141,15 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
 
   afterEach(async () => {
     if (skip || !dataSource?.isInitialized) return;
-    await dataSource.query('TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE').catch(() => {});
+    await dataSource
+      .query(
+        'TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE',
+      )
+      .catch(() => {});
   });
 
   it('should note skip gracefully when PG unavailable', () => {
     if (skip) {
-      // eslint-disable-next-line no-console
       console.warn('[auth integration] SKIP noted:', skipReason);
     }
     // if PG available, ensure dataSource initialized
@@ -131,7 +160,6 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
   describe('DB constraints', () => {
     it('duplicate email 409 via UQ_user_email (23505)', async () => {
       if (skip) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP real PG: duplicate email 409');
         return;
       }
@@ -176,7 +204,6 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
 
     it('CHECK expiresAt > createdAt violation', async () => {
       if (skip) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP real PG: CHECK expiresAt>createdAt');
         return;
       }
@@ -234,7 +261,6 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
   describe('token invalidation & FOR UPDATE single-winner', () => {
     it('second forgot-password invalidates prior active token (only latest usable)', async () => {
       if (skip) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP real PG: token invalidation');
         return;
       }
@@ -262,19 +288,24 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
       const raw2 = authService.lastRawToken!;
       const hash2 = crypto.createHash('sha256').update(raw2).digest('hex');
       expect(hash2).not.toBe(hash1);
-      const tok1After = await tokenRepo.findOne({ where: { tokenHash: hash1 } });
+      const tok1After = await tokenRepo.findOne({
+        where: { tokenHash: hash1 },
+      });
       const tok2 = await tokenRepo.findOne({ where: { tokenHash: hash2 } });
       expect(tok1After!.usedAt).not.toBeNull(); // invalidated
       expect(tok2!.usedAt).toBeNull();
 
       // validate first token should now fail
-      await expect(authService.validateResetToken(email, raw1)).rejects.toThrow('Invalid or expired token');
-      await expect(authService.validateResetToken(email, raw2)).resolves.toBeDefined();
+      await expect(authService.validateResetToken(email, raw1)).rejects.toThrow(
+        'Invalid or expired token',
+      );
+      await expect(
+        authService.validateResetToken(email, raw2),
+      ).resolves.toBeDefined();
     });
 
     it('concurrent reset same token → one 200 one 400 (FOR UPDATE single-winner)', async () => {
       if (skip) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP real PG: concurrent reset single-winner');
         return;
       }
@@ -294,8 +325,16 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
       await authService.requestPasswordReset(email);
       const raw = authService.lastRawToken!;
       // two concurrent resets with same token, different new passwords to detect winner
-      const p1 = authService.resetPassword({ email, token: raw, newPassword: 'NewPass111!' });
-      const p2 = authService.resetPassword({ email, token: raw, newPassword: 'NewPass222!' });
+      const p1 = authService.resetPassword({
+        email,
+        token: raw,
+        newPassword: 'NewPass111!',
+      });
+      const p2 = authService.resetPassword({
+        email,
+        token: raw,
+        newPassword: 'NewPass222!',
+      });
 
       const results = await Promise.allSettled([p1, p2]);
       const fulfilled = results.filter((r) => r.status === 'fulfilled');
@@ -303,7 +342,7 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
 
       expect(fulfilled.length).toBe(1);
       expect(rejected.length).toBe(1);
-      const reason: any = (rejected[0] as PromiseRejectedResult).reason;
+      const reason: any = rejected[0].reason;
       expect(reason.message).toMatch(/Invalid or expired token/);
       expect(reason.status).toBe(400);
 
@@ -321,9 +360,13 @@ describe('Auth Integration T016 - PasswordResetToken constraints & FOR UPDATE si
       expect(token!.usedAt).not.toBeNull();
 
       // second use after concurrent should also be 400
-      await expect(authService.resetPassword({ email, token: raw, newPassword: 'Another123!' })).rejects.toThrow(
-        'Invalid or expired token',
-      );
+      await expect(
+        authService.resetPassword({
+          email,
+          token: raw,
+          newPassword: 'Another123!',
+        }),
+      ).rejects.toThrow('Invalid or expired token');
     });
   });
 });

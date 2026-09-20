@@ -41,6 +41,12 @@ concurrency safety over style.
 - Don't swallow expected errors into plain objects.
 - Use correct status codes (409 for stock/duplicate conflicts, 404 not found, …).
 
+### Documentation (required — reject if missing)
+- Every `Service`/`Controller`/`Resolver`/`Entity`/`Guard`/`Interceptor`/`Filter`/`Module` has class-level JSDoc `/** This service is responsible for ... */`.
+- Every public method (and non-trivial private) has method-level JSDoc with `@param`, `@returns`, `@throws`.
+- Complex conditions (≥2 predicates, negations, edge-case guards) and formulas (stock/availability `stock - reservedAmount`, pagination `skip=(page-1)*limit`, TTL/expiration, pricing) have inline `//` intent comments.
+- See `AGENTS.md` §3 Code Documentation — treat missing docs as lint failure.
+
 ### Maintainability & architecture
 - Cross-module calls via exported **services**, not foreign repositories.
 - `Logger` used instead of `console.log`.

@@ -18,7 +18,8 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
   let skip = false;
   let skipReason = '';
 
-  const uniqueEmail = () => `e2e_${Date.now()}_${Math.random().toString(36).slice(2, 6)}@example.com`;
+  const uniqueEmail = () =>
+    `e2e_${Date.now()}_${Math.random().toString(36).slice(2, 6)}@example.com`;
   const oldPass = 'OldPass123!';
   const newPass = 'NewStrong123!';
 
@@ -45,14 +46,21 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
       // verify DB connection
       await dataSource.query('SELECT 1');
       // clean
-      await dataSource.query('TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE').catch(() => {});
-      // eslint-disable-next-line no-console
+      await dataSource
+        .query(
+          'TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE',
+        )
+        .catch(() => {});
+
       console.log('[auth e2e] app initialized, DB connected');
     } catch (e: any) {
       skip = true;
       skipReason = e?.message || String(e);
-      // eslint-disable-next-line no-console
-      console.warn('[auth e2e] SKIP: E2E not available, DB/Redis/RMQ not running. Tests will be skipped gracefully. Error:', skipReason);
+
+      console.warn(
+        '[auth e2e] SKIP: E2E not available, DB/Redis/RMQ not running. Tests will be skipped gracefully. Error:',
+        skipReason,
+      );
       try {
         if (app) await app.close().catch(() => {});
       } catch {}
@@ -62,7 +70,11 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
   afterAll(async () => {
     try {
       if (dataSource?.isInitialized) {
-        await dataSource.query('TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE').catch(() => {});
+        await dataSource
+          .query(
+            'TRUNCATE "password_reset_token", "otp_verification", "user" CASCADE',
+          )
+          .catch(() => {});
       }
       if (app) await app.close().catch(() => {});
     } catch {}
@@ -70,7 +82,6 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
 
   it('should note skip gracefully when E2E unavailable', () => {
     if (skip) {
-      // eslint-disable-next-line no-console
       console.warn('[auth e2e] SKIP noted:', skipReason);
       expect(skip).toBe(true);
       return;
@@ -82,7 +93,6 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
   describe('forgot→validate→reset→login flow', () => {
     it('POST /auth/register → forgot (200 anti-enum) → validate 200 → reset 200 → login new 200, old 401, reuse 400, old JWT 401', async () => {
       if (skip) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP e2e: DB not available');
         return;
       }
@@ -94,7 +104,10 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
         .send({ firstName: 'E2E', lastName: 'Test', email, password: oldPass })
         .expect((res) => {
           // register returns 201 or 200 depending on implementation
-          if (![200, 201].includes(res.status)) throw new Error(`register status ${res.status} body ${JSON.stringify(res.body)}`);
+          if (![200, 201].includes(res.status))
+            throw new Error(
+              `register status ${res.status} body ${JSON.stringify(res.body)}`,
+            );
         });
       expect(regRes.body).toBeDefined();
 
@@ -107,12 +120,21 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
       const oldJwt = loginOldRes.body.accessToken;
 
       // old JWT should work before reset
-      await request(app.getHttpServer()).get('/cart').set('Authorization', `Bearer ${oldJwt}`).expect(200);
+      await request(app.getHttpServer())
+        .get('/cart')
+        .set('Authorization', `Bearer ${oldJwt}`)
+        .expect(200);
 
       // 3. forgot-password (existing)
-      await request(app.getHttpServer()).post('/auth/forgot-password').send({ email }).expect(200).expect((res) => {
-        expect(res.body.message).toBe('If an account exists, a reset link has been sent.');
-      });
+      await request(app.getHttpServer())
+        .post('/auth/forgot-password')
+        .send({ email })
+        .expect(200)
+        .expect((res) => {
+          expect(res.body.message).toBe(
+            'If an account exists, a reset link has been sent.',
+          );
+        });
 
       // 4. non-existing still 200 anti-enum (no leak)
       await request(app.getHttpServer())
@@ -120,17 +142,24 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
         .send({ email: `nobody_${Date.now()}@example.com` })
         .expect(200)
         .expect((res) => {
-          expect(res.body.message).toBe('If an account exists, a reset link has been sent.');
+          expect(res.body.message).toBe(
+            'If an account exists, a reset link has been sent.',
+          );
         });
 
       // capture rawToken via service.lastRawToken (test hook) or fallback to DB query decoding
       let rawToken: string | undefined = (authService as any).lastRawToken;
       if (!rawToken) {
         // fallback: query DB tokenHash and try to find raw? We can't reverse hash, so fail
-        // eslint-disable-next-line no-console
-        console.warn('[auth e2e] lastRawToken not captured, trying DB hash fallback is impossible (hash one-way). Skipping token steps.');
+
+        console.warn(
+          '[auth e2e] lastRawToken not captured, trying DB hash fallback is impossible (hash one-way). Skipping token steps.',
+        );
         // still try to get token via direct service call? Re-request
-        await request(app.getHttpServer()).post('/auth/forgot-password').send({ email }).expect(200);
+        await request(app.getHttpServer())
+          .post('/auth/forgot-password')
+          .send({ email })
+          .expect(200);
         rawToken = (authService as any).lastRawToken;
       }
       expect(rawToken).toBeDefined();
@@ -169,10 +198,16 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
       const newJwt = loginNewRes.body.accessToken;
 
       // new JWT works
-      await request(app.getHttpServer()).get('/cart').set('Authorization', `Bearer ${newJwt}`).expect(200);
+      await request(app.getHttpServer())
+        .get('/cart')
+        .set('Authorization', `Bearer ${newJwt}`)
+        .expect(200);
 
       // old password 401
-      await request(app.getHttpServer()).post('/auth/login').send({ email, password: oldPass }).expect(401);
+      await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password: oldPass })
+        .expect(401);
 
       // reuse same token 400
       await request(app.getHttpServer())
@@ -187,12 +222,14 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
         .expect(400);
 
       // old JWT 401 after reset (tokenVersion revocation)
-      await request(app.getHttpServer()).get('/cart').set('Authorization', `Bearer ${oldJwt}`).expect(401);
+      await request(app.getHttpServer())
+        .get('/cart')
+        .set('Authorization', `Bearer ${oldJwt}`)
+        .expect(401);
     });
 
     it('weak password and newPassword===email 400 via DTO validation', async () => {
       if (skip) {
-        // eslint-disable-next-line no-console
         console.warn('SKIP e2e: weak password test');
         return;
       }
@@ -201,9 +238,13 @@ describe('Auth E2E T017 - forgot→reset→login (supertest)', () => {
         .post('/auth/register')
         .send({ firstName: 'Weak', lastName: 'Test', email, password: oldPass })
         .expect((res) => {
-          if (![200, 201].includes(res.status)) throw new Error(`register ${res.status}`);
+          if (![200, 201].includes(res.status))
+            throw new Error(`register ${res.status}`);
         });
-      await request(app.getHttpServer()).post('/auth/forgot-password').send({ email }).expect(200);
+      await request(app.getHttpServer())
+        .post('/auth/forgot-password')
+        .send({ email })
+        .expect(200);
       const raw = (authService as any).lastRawToken as string;
       expect(raw).toBeDefined();
 

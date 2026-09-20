@@ -98,7 +98,9 @@ describe('AuthService', () => {
         { provide: ConfigService, useValue: configService },
         {
           provide: 'WHATSAPP_PROVIDER',
-          useValue: { sendOtp: jest.fn().mockResolvedValue({ messageId: 'test' }) },
+          useValue: {
+            sendOtp: jest.fn().mockResolvedValue({ messageId: 'test' }),
+          },
         },
       ],
     }).compile();
@@ -122,12 +124,16 @@ describe('AuthService', () => {
       await service.requestPasswordReset('alice@example.com');
       const after = Date.now();
 
-      expect(usersService.findUserByEmail).toHaveBeenCalledWith('alice@example.com');
+      expect(usersService.findUserByEmail).toHaveBeenCalledWith(
+        'alice@example.com',
+      );
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
       // invalidates priors called via createQueryBuilder
       expect(mockCreateQueryBuilder).toHaveBeenCalled();
       expect(mockQueryBuilder.update).toHaveBeenCalled();
-      expect(mockQueryBuilder.set).toHaveBeenCalledWith(expect.objectContaining({ usedAt: expect.any(Date) }));
+      expect(mockQueryBuilder.set).toHaveBeenCalledWith(
+        expect.objectContaining({ usedAt: expect.any(Date) }),
+      );
       expect(mockQueryBuilder.where).toHaveBeenCalledWith(
         expect.stringContaining('userId'),
         expect.objectContaining({ userId: user.id }),
@@ -145,14 +151,21 @@ describe('AuthService', () => {
       expect(created.expiresAt).toBeInstanceOf(Date);
       // expiresAt ~15m = 900000ms
       const ttl = 15 * 60 * 1000;
-      expect(created.expiresAt.getTime()).toBeGreaterThanOrEqual(before + ttl - 2000);
-      expect(created.expiresAt.getTime()).toBeLessThanOrEqual(after + ttl + 2000);
+      expect(created.expiresAt.getTime()).toBeGreaterThanOrEqual(
+        before + ttl - 2000,
+      );
+      expect(created.expiresAt.getTime()).toBeLessThanOrEqual(
+        after + ttl + 2000,
+      );
 
       // lastRawToken captured, hash matches
       expect(service.lastRawToken).toBeDefined();
       const raw = service.lastRawToken!;
       expect(raw).toMatch(/^[a-f0-9]{64}$/); // randomBytes 32 -> 64 hex
-      const expectedHash = crypto.createHash('sha256').update(raw).digest('hex');
+      const expectedHash = crypto
+        .createHash('sha256')
+        .update(raw)
+        .digest('hex');
       expect(created.tokenHash).toBe(expectedHash);
       expect(created.tokenHash).not.toBe(raw);
 
@@ -170,8 +183,12 @@ describe('AuthService', () => {
 
     it('non-existing email still returns 200 (no token, no leak)', async () => {
       usersService.findUserByEmail.mockResolvedValue(null);
-      await expect(service.requestPasswordReset('nobody@example.com')).resolves.toBeUndefined();
-      expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('nobody@example.com'));
+      await expect(
+        service.requestPasswordReset('nobody@example.com'),
+      ).resolves.toBeUndefined();
+      expect(logger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('nobody@example.com'),
+      );
       expect(dataSource.transaction).not.toHaveBeenCalled();
       expect(mockTokenRepo.save).not.toHaveBeenCalled();
       expect(service.lastRawToken).toBeUndefined();
@@ -181,11 +198,14 @@ describe('AuthService', () => {
       usersService.findUserByEmail.mockResolvedValue(user);
       await service.requestPasswordReset(user.email);
       const raw = service.lastRawToken!;
-      const savedHash = mockTokenRepo.create.mock.calls[0][0].tokenHash as string;
+      const savedHash = mockTokenRepo.create.mock.calls[0][0]
+        .tokenHash as string;
       expect(savedHash).not.toContain(raw);
       expect(savedHash.length).toBe(64);
       // direct hash verification
-      expect(savedHash).toBe(crypto.createHash('sha256').update(raw).digest('hex'));
+      expect(savedHash).toBe(
+        crypto.createHash('sha256').update(raw).digest('hex'),
+      );
       // also verify raw not persisted anywhere in repo.save payload
       const saveArg = mockTokenRepo.save.mock.calls[0][0];
       expect(JSON.stringify(saveArg)).not.toContain(raw);
@@ -211,7 +231,10 @@ describe('AuthService', () => {
   describe('validateResetToken (T015)', () => {
     const user = { id: 'user-1', email: 'alice@example.com' } as any;
     const rawToken = 'a'.repeat(64);
-    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(rawToken)
+      .digest('hex');
     const future = new Date(Date.now() + 10 * 60 * 1000);
     const past = new Date(Date.now() - 10 * 60 * 1000);
 
@@ -242,8 +265,12 @@ describe('AuthService', () => {
         expiresAt: past,
         usedAt: null,
       });
-      await expect(service.validateResetToken(user.email, rawToken)).rejects.toThrow(BadRequestException);
-      await expect(service.validateResetToken(user.email, rawToken)).rejects.toThrow('Invalid or expired token');
+      await expect(
+        service.validateResetToken(user.email, rawToken),
+      ).rejects.toThrow(BadRequestException);
+      await expect(
+        service.validateResetToken(user.email, rawToken),
+      ).rejects.toThrow('Invalid or expired token');
     });
 
     it('throws 400 on already used token', async () => {
@@ -254,24 +281,33 @@ describe('AuthService', () => {
         expiresAt: future,
         usedAt: new Date(),
       });
-      await expect(service.validateResetToken(user.email, rawToken)).rejects.toThrow(BadRequestException);
+      await expect(
+        service.validateResetToken(user.email, rawToken),
+      ).rejects.toThrow(BadRequestException);
     });
 
     it('throws 400 on wrong token', async () => {
       mockTokenRepo.findOne.mockResolvedValue(null);
-      await expect(service.validateResetToken(user.email, 'wrong-token')).rejects.toThrow(BadRequestException);
+      await expect(
+        service.validateResetToken(user.email, 'wrong-token'),
+      ).rejects.toThrow(BadRequestException);
     });
 
     it('throws 400 when user not found (anti-enum still 400 for validate)', async () => {
       usersService.findUserByEmail.mockResolvedValue(null);
-      await expect(service.validateResetToken('nobody@example.com', rawToken)).rejects.toThrow(BadRequestException);
+      await expect(
+        service.validateResetToken('nobody@example.com', rawToken),
+      ).rejects.toThrow(BadRequestException);
     });
   });
 
   describe('resetPassword (T015)', () => {
     const user = { id: 'user-1', email: 'alice@example.com' } as any;
     const rawToken = crypto.randomBytes(32).toString('hex');
-    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(rawToken)
+      .digest('hex');
     const future = new Date(Date.now() + 10 * 60 * 1000);
     const past = new Date(Date.now() - 60 * 1000);
 
@@ -293,22 +329,37 @@ describe('AuthService', () => {
     }
 
     it('success: bcrypt 10 + tokenVersion increment + usedAt', async () => {
-      const tokenRow = { id: 'tok-1', tokenHash, userId: user.id, expiresAt: future, usedAt: null };
+      const tokenRow = {
+        id: 'tok-1',
+        tokenHash,
+        userId: user.id,
+        expiresAt: future,
+        usedAt: null,
+      };
       mockTransactionToken(tokenRow);
 
-      await service.resetPassword({ email: user.email, token: rawToken, newPassword: 'NewStrong123!' });
+      await service.resetPassword({
+        email: user.email,
+        token: rawToken,
+        newPassword: 'NewStrong123!',
+      });
 
       // FOR UPDATE used
-      expect(mockQueryBuilder.setLock).toHaveBeenCalledWith('pessimistic_write');
+      expect(mockQueryBuilder.setLock).toHaveBeenCalledWith(
+        'pessimistic_write',
+      );
       expect(mockQueryBuilder.where).toHaveBeenCalledWith(
         expect.stringContaining('tokenHash'),
         expect.objectContaining({ tokenHash, userId: user.id }),
       );
       // bcrypt 10 rounds: real hash starts with $2b$10$ (cost 10)
-      const updateCall = mockUserRepo.update.mock.calls[0][1] as any;
+      const updateCall = mockUserRepo.update.mock.calls[0][1];
       expect(updateCall.password).toBeDefined();
       expect(updateCall.password).toMatch(/^\$2[ab]\$10\$/);
-      const matches = await bcrypt.compare('NewStrong123!', updateCall.password);
+      const matches = await bcrypt.compare(
+        'NewStrong123!',
+        updateCall.password,
+      );
       expect(matches).toBe(true);
       // user update with increment
       expect(mockUserRepo.update).toHaveBeenCalledWith(
@@ -320,47 +371,89 @@ describe('AuthService', () => {
         }),
       );
       // token usedAt set
-      expect(mockTokenRepo.update).toHaveBeenCalledWith(tokenRow.id, { usedAt: expect.any(Date) });
+      expect(mockTokenRepo.update).toHaveBeenCalledWith(tokenRow.id, {
+        usedAt: expect.any(Date),
+      });
       // invalidate other active tokens
       expect(mockQueryBuilder.execute).toHaveBeenCalled();
       // last calls to where for invalidate contain userId and id !=
-      const whereCalls = mockQueryBuilder.where.mock.calls.map((c: any) => c[0] as string);
-      expect(whereCalls.some((s: string) => s.includes('id != :id'))).toBe(true);
+      const whereCalls = mockQueryBuilder.where.mock.calls.map(
+        (c: any) => c[0] as string,
+      );
+      expect(whereCalls.some((s: string) => s.includes('id != :id'))).toBe(
+        true,
+      );
     });
 
     it('second use of same raw token returns 400', async () => {
-      const usedToken = { id: 'tok-1', tokenHash, userId: user.id, expiresAt: future, usedAt: new Date() };
+      const usedToken = {
+        id: 'tok-1',
+        tokenHash,
+        userId: user.id,
+        expiresAt: future,
+        usedAt: new Date(),
+      };
       mockTransactionToken(usedToken);
       await expect(
-        service.resetPassword({ email: user.email, token: rawToken, newPassword: 'NewStrong123!' }),
+        service.resetPassword({
+          email: user.email,
+          token: rawToken,
+          newPassword: 'NewStrong123!',
+        }),
       ).rejects.toThrow(BadRequestException);
       await expect(
-        service.resetPassword({ email: user.email, token: rawToken, newPassword: 'NewStrong123!' }),
+        service.resetPassword({
+          email: user.email,
+          token: rawToken,
+          newPassword: 'NewStrong123!',
+        }),
       ).rejects.toThrow('Invalid or expired token');
       expect(mockUserRepo.update).not.toHaveBeenCalled();
     });
 
     it('weak password / newPassword===email returns 400', async () => {
       await expect(
-        service.resetPassword({ email: user.email, token: rawToken, newPassword: user.email }),
+        service.resetPassword({
+          email: user.email,
+          token: rawToken,
+          newPassword: user.email,
+        }),
       ).rejects.toThrow(BadRequestException);
       await expect(
-        service.resetPassword({ email: user.email, token: rawToken, newPassword: user.email }),
+        service.resetPassword({
+          email: user.email,
+          token: rawToken,
+          newPassword: user.email,
+        }),
       ).rejects.toThrow('Password must not equal email');
     });
 
     it('expired token returns 400', async () => {
-      const expired = { id: 'tok-1', tokenHash, userId: user.id, expiresAt: past, usedAt: null };
+      const expired = {
+        id: 'tok-1',
+        tokenHash,
+        userId: user.id,
+        expiresAt: past,
+        usedAt: null,
+      };
       mockTransactionToken(expired);
       await expect(
-        service.resetPassword({ email: user.email, token: rawToken, newPassword: 'NewStrong123!' }),
+        service.resetPassword({
+          email: user.email,
+          token: rawToken,
+          newPassword: 'NewStrong123!',
+        }),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('wrong token returns 400', async () => {
       mockTransactionToken(null);
       await expect(
-        service.resetPassword({ email: user.email, token: 'wrong', newPassword: 'NewStrong123!' }),
+        service.resetPassword({
+          email: user.email,
+          token: 'wrong',
+          newPassword: 'NewStrong123!',
+        }),
       ).rejects.toThrow(BadRequestException);
     });
 
@@ -390,12 +483,27 @@ describe('AuthService', () => {
 
     it('expired token via validateResetToken path also 400 (integration of both)', async () => {
       // simulate second use after success: token usedAt set
-      const tokenRowValid = { id: 'tok-1', tokenHash, userId: user.id, expiresAt: future, usedAt: null };
+      const tokenRowValid = {
+        id: 'tok-1',
+        tokenHash,
+        userId: user.id,
+        expiresAt: future,
+        usedAt: null,
+      };
       mockTransactionToken(tokenRowValid);
-      await service.resetPassword({ email: user.email, token: rawToken, newPassword: 'NewStrong123!' });
+      await service.resetPassword({
+        email: user.email,
+        token: rawToken,
+        newPassword: 'NewStrong123!',
+      });
       // now if validate is called with same token, should fail because usedAt
-      mockTokenRepo.findOne.mockResolvedValue({ ...tokenRowValid, usedAt: new Date() });
-      await expect(service.validateResetToken(user.email, rawToken)).rejects.toThrow(BadRequestException);
+      mockTokenRepo.findOne.mockResolvedValue({
+        ...tokenRowValid,
+        usedAt: new Date(),
+      });
+      await expect(
+        service.validateResetToken(user.email, rawToken),
+      ).rejects.toThrow(BadRequestException);
     });
   });
 });
