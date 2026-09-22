@@ -14,7 +14,7 @@ and [`skills/`](./skills); do not duplicate that detail here.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at `specs/007-order-integration/plan.md` (Phase 6 — Order Integration — Checkout-Only Reservation Refactor).
+at `specs/008-order-completion-sale/plan.md` (Phase 7 — Order Completion / Sale).
 <!-- SPECKIT END -->
 
 ---

@@ -5,6 +5,7 @@ import { OrderItem } from './entities/order-items.entity';
 import { OrderController } from './order.controller';
 import { OrderService } from './order.service';
 import { OrderCheckoutService } from './order-checkout.service';
+import { OrderCompletionService } from './order-completion.service';
 import { ReservationModule } from '../reservation/reservation.module';
 import { CartModule } from '../cart/cart.module';
 import { ProductsModule } from '../products/products.module';
@@ -23,7 +24,7 @@ import { InventoryModule } from '../inventory/inventory.module';
     InventoryModule,
   ],
   controllers: [OrderController],
-  providers: [OrderService, OrderCheckoutService],
-  exports: [OrderService, OrderCheckoutService],
+  providers: [OrderService, OrderCheckoutService, OrderCompletionService],
+  exports: [OrderService, OrderCheckoutService, OrderCompletionService],
 })
 export class OrderModule {}
