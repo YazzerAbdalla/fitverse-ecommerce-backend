@@ -931,6 +931,202 @@ The database enforces important business invariants and common access paths are 
 
 ---
 
+# Phase 17 — Refresh Token (Future)
+
+**Status: NOT DONE — planned 2026-09-23 (future, before final testing)**
+
+**Goal:** Add stateless JWT **refresh token rotation** so clients can silently obtain new `accessToken` without re-login, while preserving `tokenVersion` revocation and without making Redis/RabbitMQ authoritative for auth.
+
+This phase is **orthogonal** to Phases 7-8 (order) and 9-13 (infra). It extends Phase 16 Auth Upgrades (which shipped `tokenVersion` stateless revocation and `JWT_EXPIRES_IN=15m` in `005-auth-upgrades`) but was deliberately deferred from Phase 16 V1 (password-only login) because `POST /auth/login` already works for manual E2E. It must be implemented **before** `Phase 14 — Testing` in the roadmap so final `npm run test:e2e` can cover `register → login → refresh → cart → checkout → complete` without 401 flakes.
+
+## 17.0 Current Auth Snapshot (what exists, 2026-09-22)
+
+```text
+auth.controller.ts : POST /auth/register, POST /auth/login (LocalAuthGuard → AuthService.login → JwtService.sign {sub,email,fullName,role,tokenVersion} 15m), POST /auth/forgot-password|validate-reset-token|reset-password, POST /auth/otp/request|verify → 501 TODO, GET /auth/google|/google/callback
+auth.service.ts    : register (bcrypt 10, duplicate 400), userValidation (bcrypt.compare), login (sign 15m), requestPasswordReset/validateResetToken/resetPassword (sha256 hash, FOR UPDATE, tokenVersion++), requestWhatsAppOtp/verifyWhatsAppOtp (Redis TTL 5m, hash, 501 guard), handleGoogleLogin (auto-link verified email)
+users.entity.ts    : id uuid, email @Unique, password nullable, phoneNumber/@Index, phoneVerified, googleId/@Index, provider enum local|google, tokenVersion int default 0, passwordChangedAt timestamptz nullable, emailVerified
+guards             : LocalAuthGuard, JwtGuard (passport-jwt validates tokenVersion === user.tokenVersion else 401), RolesGuard via @Auth, RateLimitGuard (Redis, 5-10/hour, fail-open)
+config             : JWT_SECRET, JWT_EXPIRES_IN=15m, RESET_TOKEN_TTL=15m, OTP_TTL=5m
+migration          : 1755900000000-AuthUpgradesUserAndResetToken (tokenVersion + phone/google/provider + password nullable)
+Gap                : no RefreshToken persistence, no POST /auth/refresh, no POST /auth/logout, no refresh rotation, no HttpOnly cookie vs Authorization: Bearer refresh header decision
+```
+
+Manual E2E today (`docs/manual-e2e-test-flow.md:§1.5`) expects `POST /auth/refresh` → `404` and documents re-login on `401`. This phase will make it `200`.
+
+## 17.1 User-facing flow
+
+```text
+POST /auth/login {email, password} → 200 {accessToken (15m), refreshToken (7d)}  // or refresh via HttpOnly cookie + body accessToken
+        ↓ (client stores refreshToken secure, accessToken in memory)
+GET /order (Authorization: Bearer <accessToken>) → 200  (while accessToken valid)
+        ↓ (accessToken expires 15m later)
+GET /order → 401 { message: "Unauthorized" }  (JwtGuard tokenVersion check still passes but exp fails)
+        ↓
+POST /auth/refresh { refreshToken }  (or Cookie: refresh_token=...) → 200 {accessToken, refreshToken: <rotated>}
+        ↓ (server: hash refreshToken, lookup DB, verify not expired/revoked/used, check user tokenVersion, rotate: invalidate old hash, issue new pair, set cookie)
+GET /order (new accessToken) → 200
+        ↓
+POST /auth/logout { refreshToken } → 200 (revoke this refreshToken)  // or POST /auth/logout-all → revoke all for user (tokenVersion++ alternative)
+```
+
+Anti-replay: refresh token is **single-use rotation** — each `POST /auth/refresh` invalidates the used `tokenHash` (`revokedAt`/`usedAt` set) and issues a new one. Reuse of an already-rotated token → `401 Invalid or expired refresh token` and (option) revoke all tokens for that user (detect theft).
+
+## 17.2 Data model
+
+**New entity `RefreshToken` (PostgreSQL source of truth, not Redis):**
+
+```text
+RefreshToken
+------------
+id          uuid PK @PrimaryGeneratedColumn('uuid')
+userId      uuid FK → User.id ON DELETE CASCADE @Index
+tokenHash   varchar(255)  -- sha256 hex of rawRefreshToken; @Index for lookup (unique where revokedAt IS NULL?)
+expiresAt   timestamptz   -- now + REFRESH_TOKEN_TTL (7d default)
+revokedAt   timestamptz nullable  -- set on use / logout
+createdAt   timestamptz @CreateDateColumn
+-- constraints: CHECK expiresAt > createdAt, INDEX (userId, expiresAt), INDEX (tokenHash), partial unique tokenHash WHERE revokedAt IS NULL (optional)
+```
+
+Alternative considered: JWT as refresh token (self-contained, no DB) — rejected: cannot revoke individually without `tokenVersion++` nuking all sessions; opaque random token + hash allows selective revocation and single-use rotation with low audit surface (same decision as `PasswordResetToken` in §16.1.2). JWT `refresh_token` could still be used with `jti` + DB, but opaque is simpler.
+
+**Token generation:**
+
+```text
+rawRefresh = crypto.randomBytes(32).toString('hex') // 64 chars, 256 bits, same as PasswordResetToken
+tokenHash  = crypto.createHash('sha256').update(rawRefresh).digest('hex')
+store tokenHash + expiresAt (now+7d), return rawRefresh once (never log rawRefresh)
+```
+
+Expiry: `REFRESH_TOKEN_TTL=7d` (env, default `7d`, access `15m`), single-use rotation, nightly cleanup may purge `expiresAt < NOW() - 30d`.
+
+**Alter `User`:** No schema change beyond `tokenVersion` already present; `tokenVersion` remains the global revocation nuke (e.g., `POST /auth/logout-all` or `reset-password` increments it, which implicitly invalidates all refresh tokens because `JwtStrategy` checks `tokenVersion` and `POST /auth/refresh` also checks `user.tokenVersion === payload.tokenVersion` before issuing new accessToken).
+
+## 17.3 Business API (AuthService)
+
+```text
+login(email,password): Promise<{accessToken, refreshToken}>  // extended to also create RefreshToken row (hash+7d) and return rawRefresh
+  - existing login logic + within same request (after sign):
+      rawRefresh = crypto.randomBytes(32).toString('hex')
+      tokenHash = sha256(rawRefresh)
+      expiresAt = now + REFRESH_TOKEN_TTL
+      manager.getRepository(RefreshToken).save({userId, tokenHash, expiresAt})
+      return {accessToken, refreshToken: rawRefresh}  // and optionally Set-Cookie
+
+refresh(dto:{refreshToken}): Promise<{accessToken, refreshToken}>
+  - hash rawRefresh, SELECT RefreshToken FOR UPDATE where tokenHash = hash AND userId = payload.sub (extracted via JwtService.verify with ignoreExpiration? better lookup by hash alone then verify exp)
+  - throw 401 if not found / revokedAt not null / expiresAt <= now
+  - load User by userId, verify user exists and (user.tokenVersion === refreshTokenPayload.tokenVersion? if refresh is JWT; if opaque, just check user exists)
+  - within transaction:
+      UPDATE RefreshToken SET revokedAt=NOW() WHERE id=:id  // invalidate used token
+      // rotation: create new RefreshToken row with new hash+expiresAt
+      // issue new accessToken via JwtService.sign({sub,email,fullName,role,tokenVersion:user.tokenVersion})
+      // issue new rawRefresh + hash
+  - after commit: return {accessToken, refreshToken: newRaw}
+  - rate-limit outside service (RateLimitGuard) — see 17.5
+
+logout(dto:{refreshToken}): Promise<void>
+  - hash, find, SET revokedAt=NOW() WHERE userId=:userId (owner check via refresh row userId vs current user if authenticated, or allow anonymous logout by token alone with 200 anti-enum)
+  - throw 401 if already revoked/expired (or 200 idempotent if logout called twice — decide in spec, default 200 idempotent like COMPLETED→COMPLETED)
+
+logoutAll(userId): Promise<void>
+  - increment User.tokenVersion (same as reset-password does) → all access+refresh tokens revoked atomically; also SET revokedAt=NOW() for all RefreshToken where userId and revokedAt IS NULL
+```
+
+All writes inside `dataSource.transaction` with `EntityManager`; no Redis I/O inside.
+
+## 17.4 REST API
+
+| Method | Path | Auth | Body | Success | Errors |
+|--------|------|------|------|---------|--------|
+| POST | `/auth/login` | public | `{email,password}` | `200 {accessToken, refreshToken}` + optional `Set-Cookie: refresh_token=<refreshToken>; HttpOnly; Secure; SameSite=Strict; Path=/auth; Max-Age=604800` | `401` bad creds, `429` rate limit |
+| POST | `/auth/refresh` | public (refreshToken in body or cookie) | `{refreshToken}` or `{}` with cookie | `200 {accessToken, refreshToken}` (rotated) + new cookie | `401` invalid/expired/revoked, `429` rate limit |
+| POST | `/auth/logout` | public (or `JwtGuard` if using accessToken + refreshToken body) | `{refreshToken}` | `200 {message:"Logged out"}` (idempotent 200 if already revoked) | `401` if refresh not found and we choose strict, else `200` anti-enum |
+| POST | `/auth/logout-all` | `JwtGuard` | `{}` | `200 {message:"All sessions revoked"}` | `401` unauth |
+
+DTOs: `RefreshTokenDto` (`@IsString` `@Length(64,64)` hex, or `@IsJWT` if JWT refresh), `LoginDto` extended. Reuse global `ValidationPipe`.
+
+Cookie vs body decision (clarify in spec): **body + HttpOnly cookie dual** — return refresh in `Set-Cookie` and also in JSON for non-browser clients (Postman). Refresh endpoint accepts either `Body.refreshToken` or `Cookie.refresh_token`. Document in Swagger as `Refresh via Cookie or Body`.
+
+## 17.5 Security / constraints
+
+* [ ] `tokenHash` is `sha256`, never store rawRefresh, never log rawRefresh (hashed prefix only via Logger)
+* [ ] Expiry enforced in DB (`CHECK expiresAt > createdAt`) and service (`expiresAt > now`)
+* [ ] Single-use rotation (`revokedAt` set on `refresh`); second use of same `refreshToken` → `401` and optionally revoke all for user (theft detection)
+* [ ] `tokenVersion` revocation preserved: `reset-password` increments `tokenVersion` → all outstanding `accessToken` + `refreshToken` fail `tokenVersion` check → force re-login (no separate refresh revocation table scan needed)
+* [ ] Rate limit `POST /auth/refresh` per IP `10/hour` + per `refreshToken` hash `5/hour` via Redis `INCR+EXPIRE` fail-open (reuse `RateLimitGuard`)
+* [ ] Refresh token theft detection: if rotation reuse detected, revoke all `RefreshToken` for that `userId` (`SET revokedAt=NOW() WHERE userId=:id AND revokedAt IS NULL`) and log `Logger.warn` with hashed prefix
+* [ ] `REFRESH_TOKEN_TTL=7d` (env), `JWT_EXPIRES_IN=15m` stays; nightly cleanup job may purge `expiresAt < NOW() - 30d`
+* [ ] Transport: `HttpOnly` cookie `Secure` in prod, `SameSite=Strict`, `Path=/auth/refresh`; body fallback for non-browser
+
+## 17.6 Configuration (`.env` additions, `ConfigService`)
+
+```text
+# Refresh token (new, Phase 17)
+REFRESH_TOKEN_TTL=7d
+REFRESH_TOKEN_COOKIE_NAME=refresh_token
+REFRESH_TOKEN_COOKIE_SECURE=true  # false in DEV
+# Existing (unchanged)
+JWT_SECRET=...
+JWT_EXPIRES_IN=15m
+RESET_TOKEN_TTL=15m
+```
+
+All read via `ConfigService`; never hardcode.
+
+## 17.7 Implementation Plan (Spec Kit tasks, before Testing)
+
+```text
+1. Spec: /speckit.specify refresh-token (login + refresh + logout + rotation) → clarify Q&A (body vs cookie, theft detection, logoutAll scope, TTLs)
+2. Design: data-model.md (RefreshToken entity, User.tokenVersion reuse), research.md (opaque vs JWT jti, rotation vs reuse, cookie vs header)
+3. Contract: OpenAPI for POST /auth/refresh, POST /auth/logout(-all) + updated POST /auth/login response
+4. Migration: RefreshToken entity + repo + indexes (userId, tokenHash, expiresAt) + partial unique (synchronize:false)
+5. Service: AuthService.login extension (create RefreshToken), refresh, logout, logoutAll with FOR UPDATE + revocation
+6. Controller: POST /auth/refresh (public, RateLimitGuard), POST /auth/logout(-all) (JwtGuard), Set-Cookie handling, Swagger
+7. Unit tests: login creates hashed refresh +7d, refresh rotation single-use → new pair + old revoked, second use 401, expired 401, revoked 401, logout idempotent 200, logoutAll increments tokenVersion + revokes all
+8. Integration tests: real PG transaction, concurrent refresh with same token → one 200 one 401 theft→revoke all, DB constraints partial unique
+9. E2E: register→login→GET /order → wait 15m or mock exp → POST /auth/refresh → GET /order with new accessToken 200 → POST /auth/logout → refresh again 401 → GET /order still 200 until access exp
+10. Docs: docs/architecture/modules.md, docs/decisions/ADR-refresh-token.md, Swagger, Postman, docs/manual-e2e-test-flow.md §1.5 updated (200 not 404)
+```
+
+## 17.8 Testing (must cover)
+
+**Unit (mock repos, mock Redis):**
+* [ ] login: creates hashed refresh `expiresAt=now+7d`, returns rawRefresh 64 hex, stores hash
+* [ ] refresh: valid → new pair + old revoked, expired → 401, revoked → 401, reused rotated → 401 + revoke all
+* [ ] logout: valid → revoked, second logout same token → 200 idempotent
+* [ ] logoutAll: increments tokenVersion, revokes all RefreshToken for user
+
+**Integration (real PostgreSQL, real Redis when available):**
+* [ ] DB constraints: duplicate tokenHash partial unique not violated on rotation (new row, old revoked), expired check
+* [ ] Transaction: concurrent `POST /auth/refresh` with same token → one 200 + rotation, one 401 + theft revoke, no double-issue
+* [ ] Rate limit: exceed → 429, Redis down → still succeeds with log
+
+**E2E (supertest):**
+* [ ] `POST /auth/register` → `POST /auth/login` → `GET /order` with accessToken 200 → `POST /auth/refresh` with refreshToken → `GET /order` with new access 200 → `POST /auth/logout` → `POST /auth/refresh` with old refresh 401
+* [ ] `POST /auth/reset-password` → `POST /auth/refresh` with old refresh 401 (tokenVersion mismatch)
+
+## 17.9 Exit Criteria
+
+Auth refresh is complete when:
+
+```text
+[x] POST /auth/login returns 200 {accessToken (15m), refreshToken (64 hex, 7d hash stored)}
+[x] POST /auth/refresh accepts refreshToken (body or HttpOnly cookie), validates hash+exp+not revoked, rotates (old revoked, new issued) inside EntityManager transaction, returns new pair; second use of old token → 401 (+ optionally revoke all for theft)
+[x] POST /auth/logout (and /logout-all via tokenVersion++) revokes refresh (idempotent 200), logoutAll increments tokenVersion and revokes all
+[x] RefreshToken migration applied (tokenHash, expiresAt, revokedAt, indexes, partial unique), tokenHash hashed never raw
+[x] Rate limiting on /auth/refresh|/logout via Redis fail-open, Swagger updated, ADR recorded, no secrets, AllExceptionsFilter handles 401/429
+[x] Unit 10+ and integration 5+ and E2E 2 flows PASS, including concurrent refresh reuse → single winner + theft revoke
+```
+
+## 17.10 Out of Scope (this phase)
+
+* Refresh via sliding window extension without rotation (keep single-use rotation).
+* Device fingerprint binding beyond `User-Agent` logging (future).
+* Remember-me 30d vs 7d toggle per client (use same TTL, prioritize spec).
+* Refresh for Google OAuth `refreshToken` itself (Google provider refresh is opaque, stored in `UserOAuthAccount` future table, not here).
+
+---
+
 # Phase 14 — Testing
 
 **Status: NOT DONE**
@@ -1741,6 +1937,8 @@ Deferred to Phase 16.x / Phase 17:
 [ ]   User alterations (googleId, phoneNumber, provider, password nullable, partial uniques, tokenVersion)
 [ ]   Rate limiting on auth endpoints (Redis, fail-open, full headers) — OTP limits TODO until WhatsApp re-enable
 
+[ ] Refresh token (Future, Phase 17 before Testing) — POST /auth/refresh rotation + POST /auth/logout(-all), opaque sha256 hashed RefreshToken (userId FK, tokenHash @Index, expiresAt 7d, revokedAt), tokenVersion revocation, theft detection revoke-all, HttpOnly cookie + body, RateLimitGuard — see Phase 17 spec
+
 [ ] Async events
 [ ] Notification workers
 [ ] RabbitMQ/BullMQ responsibilities
@@ -1825,9 +2023,12 @@ Phase 13
 Database Optimization
 ```
 
-Finally:
+Refresh token (future, before final testing — see Phase 17):
 
 ```text
+Phase 17
+Refresh Token (Future) — POST /auth/refresh rotation, logout, tokenVersion revocation
+        ↓
 Phase 14
 Complete Testing
 
