@@ -14,7 +14,7 @@ and [`skills/`](./skills); do not duplicate that detail here.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at `specs/008-order-completion-sale/plan.md` (Phase 7 — Order Completion / Sale).
+at `specs/009-redis-caching/plan.md` (Phase 9 — Redis / Product Caching).
 <!-- SPECKIT END -->
 
 ---
