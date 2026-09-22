@@ -1,0 +1,256 @@
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, EntityManager, In } from 'typeorm';
+import { Order } from './entities/order.entity';
+import { OrderStatus } from './order-status.enum';
+import { Reservation } from '../reservation/entities/reservation.entity';
+import { ReservationStatus } from '../reservation/entities/reservation-status.enum';
+import { Inventory } from '../inventory/entities/inventory.entity';
+import { ReservationService } from '../reservation/reservation.service';
+import { UserRoles } from '../users/enum/roles';
+
+/**
+ * Allowed Order status transitions for sale.
+ * COMPLETED→COMPLETED is idempotent and short-circuited before validation.
+ */
+const ALLOWED_ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  [OrderStatus.PENDING]: [
+    OrderStatus.COMPLETED,
+    OrderStatus.CANCELLED,
+    OrderStatus.FAILED,
+  ],
+  [OrderStatus.COMPLETED]: [OrderStatus.COMPLETED],
+  [OrderStatus.CANCELLED]: [],
+  [OrderStatus.FAILED]: [],
+};
+
+/**
+ * This service is responsible for order sale domain.
+ * It handles atomic Order PENDING→COMPLETED sale with Reservation and Inventory.
+ */
+@Injectable()
+export class OrderCompletionService {
+  private readonly logger = new Logger(OrderCompletionService.name);
+
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly reservationService: ReservationService,
+  ) {}
+
+  /**
+   * Validates an Order status transition.
+   * @param from - Current Order status.
+   * @param to - Target Order status.
+   * @throws ConflictException if transition is not allowed.
+   */
+  validateOrderTransition(from: OrderStatus, to: OrderStatus): void {
+    if (from === OrderStatus.COMPLETED && to === OrderStatus.COMPLETED) {
+      return;
+    }
+    const allowed = ALLOWED_ORDER_TRANSITIONS[from] ?? [];
+    if (!allowed.includes(to)) {
+      throw new ConflictException(`Invalid order transition: ${from} -> ${to}`);
+    }
+  }
+
+  /**
+   * Asserts that requesting user owns the order or is Admin.
+   * @param order - Order to check.
+   * @param requestingUserId - Current user id from JWT sub.
+   * @param role - Current user role.
+   * @throws ForbiddenException if not owner and not Admin.
+   */
+  assertOwner(order: Order, requestingUserId: string, role?: UserRoles): void {
+    // Owner-scoped (User) vs Admin bypass per spec FR-008
+    if (order.userId !== requestingUserId && role !== UserRoles.Admin) {
+      throw new ForbiddenException('You are not allowed to access this order');
+    }
+  }
+
+  /**
+   * Completes an order sale atomically.
+   * Locks Order FOR UPDATE → assertOwner → validateOrderTransition → locks Reservation FOR UPDATE → validates → locks sorted Inventories → stock-=qty reserved-=qty → saves Order+Reservation.
+   * @param manager - EntityManager of the enclosing transaction (caller owns commit/rollback).
+   * @param requestingUserId - Current user id.
+   * @param orderId - Order id to complete.
+   * @param role - Current user role for admin bypass.
+   * @returns Completed Order enriched with reservationId and items.
+   * @throws NotFoundException if order/reservation/inventory missing.
+   * @throws ForbiddenException if not owner.
+   * @throws ConflictException if invalid transition or DB CHECK violation (mapped to 409).
+   */
+  async complete(
+    manager: EntityManager,
+    requestingUserId: string,
+    orderId: string,
+    role?: UserRoles,
+  ): Promise<any> {
+    const orderRepo = manager.getRepository(Order);
+
+    // 1. Lock Order FOR UPDATE
+    const order = await orderRepo.findOne({
+      where: { id: orderId },
+      lock: { mode: 'pessimistic_write' },
+    } as any);
+    if (!order) {
+      throw new NotFoundException(`Order ${orderId} not found`);
+    }
+
+    // Load with relations for response (lock already held)
+    const orderWithItems = await orderRepo.findOne({
+      where: { id: orderId },
+      relations: { orderItems: { product: true } },
+    });
+    const currentOrder = orderWithItems ?? order;
+
+    this.assertOwner(currentOrder, requestingUserId, role);
+
+    // 2. Idempotent COMPLETED→COMPLETED — no inventory re-mutation (spec D1)
+    if (currentOrder.status === OrderStatus.COMPLETED) {
+      this.logger.log(
+        `Idempotent order complete for ${orderId} already COMPLETED — no inventory change`,
+      );
+      const reservationRepoIdem = manager.getRepository(Reservation);
+      const resIdem = await reservationRepoIdem.findOne({
+        where: { orderId },
+        relations: { items: true },
+      });
+      return {
+        ...currentOrder,
+        status: OrderStatus.COMPLETED,
+        reservationId: resIdem?.id ?? null,
+        expiresAt: resIdem?.expiresAt ?? null,
+        reservation: resIdem,
+      };
+    }
+
+    // 3. Validate PENDING→COMPLETED
+    this.validateOrderTransition(currentOrder.status, OrderStatus.COMPLETED);
+
+    // 4. Lock Reservation FOR UPDATE by orderId (no outer join)
+    const reservationRepo = manager.getRepository(Reservation);
+    const lockedReservation = await reservationRepo.findOne({
+      where: { orderId },
+      lock: { mode: 'pessimistic_write' },
+    } as any);
+    if (!lockedReservation) {
+      throw new NotFoundException(`Reservation for order ${orderId} not found`);
+    }
+    const reservation = await reservationRepo.findOne({
+      where: { orderId },
+      relations: { items: true },
+    });
+    if (!reservation) {
+      throw new NotFoundException(`Reservation for order ${orderId} not found`);
+    }
+
+    // Idempotent at reservation level too (already COMPLETED)
+    if (reservation.status === ReservationStatus.COMPLETED) {
+      // Order was PENDING but Reservation already COMPLETED is data inconsistency
+      // Still allow idempotent completion (no inventory) after Order saved
+      this.logger.warn(
+        `Order ${orderId} PENDING but Reservation ${reservation.id} already COMPLETED — idempotent`,
+      );
+    } else {
+      this.reservationService.validateTransition(
+        reservation.status,
+        ReservationStatus.COMPLETED,
+      );
+    }
+
+    // 5. No items? Still allow COMPLETED without inventory mutation (edge)
+    if (!reservation.items || reservation.items.length === 0) {
+      currentOrder.status = OrderStatus.COMPLETED;
+      reservation.status = ReservationStatus.COMPLETED;
+      const savedOrder = await orderRepo.save(currentOrder);
+      const savedRes = await reservationRepo.save(reservation);
+      this.logger.log(
+        `Order ${orderId} PENDING → COMPLETED (no items) via reservation ${reservation.id}`,
+      );
+      return {
+        ...savedOrder,
+        reservationId: savedRes.id,
+        expiresAt: savedRes.expiresAt,
+        reservation: savedRes,
+        orderItems: (savedOrder as any).orderItems ?? currentOrder.orderItems,
+      };
+    }
+
+    // 6. Deterministic lock ordering
+    const sortedIds = [
+      ...new Set(reservation.items.map((i) => i.inventoryId)),
+    ].sort();
+
+    // 7. Lock Inventories FOR UPDATE
+    let lockedInventories: Inventory[] = [];
+    if (sortedIds.length > 0) {
+      lockedInventories = await manager.find(Inventory, {
+        where: { id: In(sortedIds) },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (lockedInventories.length !== sortedIds.length) {
+        const foundIds = new Set(lockedInventories.map((r) => r.id));
+        const missing = sortedIds.find((mid) => !foundIds.has(mid))!;
+        throw new NotFoundException(`Inventory ${missing} not found`);
+      }
+    }
+    const inventoryMap = new Map(lockedInventories.map((inv) => [inv.id, inv]));
+
+    // 8. Mutate per item: stock-=qty reserved-=qty
+    const inventoryRepo = manager.getRepository(Inventory);
+    try {
+      for (const item of reservation.items) {
+        const inv = inventoryMap.get(item.inventoryId)!;
+        // DB CHECK backstop (spec D3) → 409, no explicit available check
+        inv.stock -= item.quantity;
+        inv.reservedAmount -= item.quantity;
+        await inventoryRepo.save(inv);
+      }
+    } catch (e: any) {
+      const msg = e?.message ?? '';
+      // DB CHECK backstop (spec D3) → 409
+      if (
+        msg.includes('CHK_') ||
+        msg.includes('check constraint') ||
+        msg.includes('violates check') ||
+        e?.code === '23514'
+      ) {
+        throw new ConflictException(
+          `Inventory invariant violation on order complete ${orderId}: ${msg}`,
+        );
+      }
+      throw e;
+    }
+
+    // 9. Save Order COMPLETED + Reservation COMPLETED
+    currentOrder.status = OrderStatus.COMPLETED;
+    if (reservation.status !== ReservationStatus.COMPLETED) {
+      reservation.status = ReservationStatus.COMPLETED;
+    }
+    const savedOrder = await orderRepo.save(currentOrder);
+    const savedRes = await reservationRepo.save(reservation);
+
+    this.logger.log(
+      `Order ${orderId} PENDING → COMPLETED via reservation ${reservation.id} (stock bulk −${reservation.items.reduce((s, i) => s + i.quantity, 0)})`,
+    );
+
+    // Reload enriched for response
+    const fullOrder = await orderRepo.findOne({
+      where: { id: savedOrder.id },
+      relations: { orderItems: { product: true } },
+    });
+
+    return {
+      ...(fullOrder ?? savedOrder),
+      reservationId: savedRes.id,
+      expiresAt: savedRes.expiresAt,
+      reservation: savedRes,
+    };
+  }
+}

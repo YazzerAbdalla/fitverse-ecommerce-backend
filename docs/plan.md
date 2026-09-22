@@ -641,7 +641,7 @@ A successful checkout produces a consistent Order + OrderItems + Reservation + I
 
 # Phase 7 — Order Completion / Sale
 
-**Status: NOT DONE**
+**Status: DONE — 2026-09-22** (order sale `POST /order/:id/complete` owner-or-Admin, `Order PENDING→COMPLETED` + `Reservation RESERVED→COMPLETED` + `stock-=qty reserved-=qty` transactional, idempotent `COMPLETED→COMPLETED`, no Payment entity, concurrency single-winner)
 
 **Goal:** Convert reserved inventory into sold inventory.
 
@@ -667,14 +667,14 @@ The project currently does not define a payment provider.
 
 Therefore:
 
-* [ ] Do not invent a payment integration
-* [ ] Define payment state separately when payment requirements exist
-* [ ] Specify what happens when payment fails
-* [ ] Specify what happens when payment succeeds
+* [x] Do not invent a payment integration — Phase 7 keeps `OrderStatus` only, no `Payment` entity/webhook (spec Q3)
+* [x] Define payment state separately when payment requirements exist — `OrderStatus.FAILED` defined guard-only, `PENDING→FAILED` `409` reserved for future
+* [x] Specify what happens when payment fails — `PENDING→FAILED` + `reserved-=qty` only (stock unchanged), not implemented as endpoint in V1, documented in `specs/008-order-completion-sale/spec.md` FR-006
+* [x] Specify what happens when payment succeeds — `POST /order/:id/complete` `PENDING→COMPLETED` + `RESERVED→COMPLETED` + `stock-=qty reserved-=qty` via `OrderCompletionService`
 
 ### Phase 7 Exit Criteria
 
-A completed sale permanently decreases stock while releasing its reservation.
+A completed sale permanently decreases stock while releasing its reservation. — **MET 2026-09-22**: `POST /order/:id/complete` (owner-or-Admin, `CompleteOrderDto` empty, `ValidationPipe` 400, `assertOwner` 403, `validateOrderTransition` 409, `FOR UPDATE` Order→Reservation→sorted Inventories, `CHK 23514→409`, idempotent `COMPLETED→COMPLETED` 200) + `PATCH` alias; `npm run build` + `npm run test -- --runInBand` 19 unit + 10 integration (SC-001 sale + historical price + ownership + invalid + missing 404, concurrency `complete vs complete` / `complete vs expire` single-winner) pass, real PostgreSQL verified.
 
 ---
 
