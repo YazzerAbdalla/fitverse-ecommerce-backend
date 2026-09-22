@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   Patch,
@@ -15,16 +16,28 @@ import { CreateReservationDto } from './dto/create-reservation.dto';
 import { UpdateReservationStatusDto } from './dto/update-reservation-status.dto';
 import { Reservation } from './entities/reservation.entity';
 
+/**
+ * This controller exposes reservation endpoints.
+ * Checkout is the only user-facing reservation producer; manual POST is Admin-only.
+ */
 @Controller('reservations')
 @Auth(UserRoles.User, UserRoles.Admin)
 export class ReservationController {
   constructor(private readonly reservationService: ReservationService) {}
 
   @Post()
+  @Auth(UserRoles.Admin, UserRoles.User)
   async create(
     @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: UserRoles,
     @Body() dto: CreateReservationDto,
   ): Promise<Reservation> {
+    // checkout-only: block User role
+    if (role !== UserRoles.Admin) {
+      throw new ForbiddenException(
+        'Reservation can only be created via POST /order/checkout',
+      );
+    }
     return this.reservationService.dataSource.transaction((manager) =>
       this.reservationService.create(manager, userId, dto),
     );
@@ -62,6 +75,11 @@ export class ReservationController {
     @Param('id') id: string,
     @Body() dto: UpdateReservationStatusDto,
   ): Promise<Reservation> {
+    if (role !== UserRoles.Admin) {
+      throw new ForbiddenException(
+        'Reservation transitions via Order lifecycle only',
+      );
+    }
     return this.reservationService.dataSource.transaction((manager) =>
       this.reservationService.complete(manager, userId, id, dto, role),
     );
@@ -73,6 +91,11 @@ export class ReservationController {
     @CurrentUser('role') role: UserRoles,
     @Param('id') id: string,
   ): Promise<Reservation> {
+    if (role !== UserRoles.Admin) {
+      throw new ForbiddenException(
+        'Reservation transitions via Order lifecycle only',
+      );
+    }
     return this.reservationService.dataSource.transaction((manager) =>
       this.reservationService.cancel(manager, userId, id, role),
     );

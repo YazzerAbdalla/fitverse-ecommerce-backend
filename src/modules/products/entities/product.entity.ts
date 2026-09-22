@@ -42,7 +42,7 @@ export class Product {
   @CreateDateColumn()
   created_at!: Date;
 
-  @OneToMany(() => OrderItem, (orderItem) => orderItem.product_id)
+  @OneToMany(() => OrderItem, (orderItem) => orderItem.product)
   order_items!: OrderItem[];
 
   @OneToMany(() => CartItem, (cartItem) => cartItem.product)

@@ -1,26 +1,139 @@
-import { Injectable } from '@nestjs/common';
-import { CreateOrderDto } from './dto/create-order.dto';
-import { UpdateOrderDto } from './dto/update-order.dto';
+import {
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { Order } from './entities/order.entity';
+import { Reservation } from '../reservation/entities/reservation.entity';
+import { UserRoles } from '../users/enum/roles';
 
+/**
+ * This service is responsible for order retrieval domain.
+ * It handles pagination and ownership checks for orders.
+ */
 @Injectable()
 export class OrderService {
-  create(createOrderDto: CreateOrderDto) {
-    return 'This action adds a new order';
+  private readonly logger = new Logger(OrderService.name);
+
+  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+
+  /**
+   * Lists orders paginated and owner-scoped.
+   * @param requestingUserId - Current user id.
+   * @param pagination - Page and limit.
+   * @param role - User role for admin bypass.
+   * @param filter - Optional userId filter for Admin.
+   * @returns Paginated data and meta.
+   */
+  async findAll(
+    requestingUserId: string,
+    pagination: { page?: number; limit?: number; status?: string },
+    role?: UserRoles,
+    filter?: { userId?: string },
+  ): Promise<{ data: any[]; meta: any }> {
+    const page = pagination.page ?? 1;
+    const limit = Math.min(pagination.limit ?? 20, 100);
+    const repo = this.dataSource.getRepository(Order);
+
+    const where: any = {};
+    // Owner-scoped unless Admin filters by userId
+    if (role === UserRoles.Admin && filter?.userId) {
+      where.userId = filter.userId;
+    } else {
+      where.userId = requestingUserId;
+    }
+    if (pagination.status) {
+      where.status = pagination.status;
+    }
+
+    const [data, total] = await repo.findAndCount({
+      where,
+      relations: { orderItems: { product: true } },
+      skip: (page - 1) * limit,
+      take: limit,
+      order: { created_at: 'DESC' },
+    });
+
+    // Enrich with reservationId via Reservation orderId FK (without eager join)
+    const reservationRepo = this.dataSource.getRepository(Reservation);
+    const enriched = await Promise.all(
+      data.map(async (order) => {
+        const res = await reservationRepo.findOne({
+          where: { orderId: order.id },
+        });
+        return {
+          ...order,
+          reservationId: res?.id ?? null,
+          expiresAt: res?.expiresAt ?? null,
+        };
+      }),
+    );
+
+    return {
+      data: enriched,
+      meta: {
+        totalItems: total,
+        itemCount: data.length,
+        itemsPerPage: limit,
+        totalPages: Math.ceil(total / limit) || 1,
+        currentPage: page,
+      },
+    };
   }
 
-  findAll() {
-    return `This action returns all order`;
+  /**
+   * Finds one order with ownership check.
+   * @param requestingUserId - Current user id.
+   * @param id - Order id.
+   * @param role - User role.
+   * @returns Order with items and reservationId.
+   * @throws NotFoundException if missing.
+   * @throws ForbiddenException if not owner and not admin.
+   */
+  async findOne(
+    requestingUserId: string,
+    id: string,
+    role?: UserRoles,
+  ): Promise<any> {
+    const repo = this.dataSource.getRepository(Order);
+    const order = await repo.findOne({
+      where: { id },
+      relations: { orderItems: { product: true } },
+    });
+    if (!order) throw new NotFoundException(`Order ${id} not found`);
+    this.assertOwner(order, requestingUserId, role);
+
+    const reservationRepo = this.dataSource.getRepository(Reservation);
+    const res = await reservationRepo.findOne({ where: { orderId: order.id } });
+
+    return {
+      ...order,
+      reservationId: res?.id ?? null,
+      expiresAt: res?.expiresAt ?? null,
+    };
   }
 
-  findOne(id: number) {
-    return `This action returns a #${id} order`;
+  private assertOwner(
+    order: Order,
+    requestingUserId: string,
+    role?: UserRoles,
+  ): void {
+    if (order.userId !== requestingUserId && role !== UserRoles.Admin) {
+      throw new ForbiddenException('You are not allowed to access this order');
+    }
   }
 
-  update(id: number, updateOrderDto: UpdateOrderDto) {
-    return `This action updates a #${id} order`;
+  // Deprecated stubs kept for compatibility
+  create(_dto: any) {
+    throw new NotFoundException('Use POST /order/checkout');
   }
-
-  remove(id: number) {
-    return `This action removes a #${id} order`;
+  update(_id: number, _dto: any) {
+    throw new NotFoundException('Not implemented');
+  }
+  remove(_id: number) {
+    throw new NotFoundException('Not implemented');
   }
 }

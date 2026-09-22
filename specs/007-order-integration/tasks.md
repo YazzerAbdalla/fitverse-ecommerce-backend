@@ -18,9 +18,9 @@ description: "Task list for Order Integration — Checkout-Only Reservation Refa
 
 **Purpose**: Verify branch, dependencies, and env before touching domain code
 
-- [ ] T001 Verify branch `007-order-integration` and `.specify/feature.json` points to `specs/007-order-integration` in `D:\Projects\mini-e-commerce\.specify\feature.json`
-- [ ] T002 [P] Install and verify dependencies `npm ci` and `npm run build` passes in `package.json`
-- [ ] T003 [P] Verify Docker infra `docker-compose up -d` (postgres, redis, rabbitmq) and `npm run lint` passes
+- [x] T001 Verify branch `007-order-integration` and `.specify/feature.json` points to `specs/007-order-integration` in `D:\Projects\mini-e-commerce\.specify\feature.json`
+- [x] T002 [P] Install and verify dependencies `npm ci` and `npm run build` passes in `package.json`
+- [x] T003 [P] Verify Docker infra `docker-compose up -d` (postgres, redis, rabbitmq) and `npm run lint` passes
 
 ---
 
@@ -30,15 +30,15 @@ description: "Task list for Order Integration — Checkout-Only Reservation Refa
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Fix `OrderStatus` enum typo in `src/modules/order/order-status.enum.ts` to `PENDING|COMPLETED|CANCELLED|FAILED` (rename `SUCCESS→COMPLETED`, `FAILD→FAILED`, add `CANCELLED`)
-- [ ] T005 [P] Fix `Order` entity `src/modules/order/entities/order.entity.ts` — remove `ManyToMany` + `@JoinTable`, add `ManyToOne User` with `JoinColumn(userId)`, `@Index(['userId'])`, `@Index(['status'])`, `total` `CHECK >=0`, `OneToMany` `orderItems`, correct relations per `data-model.md:15`
-- [ ] T006 [P] Fix `OrderItem` entity `src/modules/order/entities/order-items.entity.ts` — add `orderId` FK `ON DELETE CASCADE` `@Index`, `productId` FK `ON DELETE RESTRICT` `@Index`, `@Unique(['orderId','productId'])`, `@Check quantity>0`, `@Check unit_price>=0`, relations per `data-model.md:24`
-- [ ] T007 Create migration `src/migration/17xxxxx-OrderIntegrationCheckoutOnly.ts` for Order/OrderItem/OrderStatus fix (drop spurious `order_order_items_order_item` join table, alter enum, add FKs/constraints/indexes, `synchronize:false`)
-- [ ] T008 Refactor `ReservationService` `src/modules/reservation/reservation.service.ts` — keep `create` for Admin/internal but add `createForCheckout(manager:EntityManager, userId:string, items:{inventoryId,quantity}[], orderId:string):Promise<Reservation>` per `research.md:D2`, no re-lock, validates `quantity>0` + duplicate `inventoryId`, creates `Reservation` `RESERVED` + `ReservationItem[]` with `orderId` via `manager`
-- [ ] T009 Refactor `ReservationController` `src/modules/reservation/reservation.controller.ts` — change `@Post()` from `@Auth(User,Admin)` to `@Auth(Admin)` returning `403 {message:"Reservation can only be created via POST /order/checkout"}` for `User` (or delete route returning `404`), keep `GET /:id`, `GET /`, `PATCH /:id/expire` (Admin), and restrict `PATCH /:id/complete|cancel` to `403` for `User` per `spec.md:236` Q7 B (only Admin/worker/internal Order service)
-- [ ] T010 Modify `CartService` `src/modules/cart/cart.service.ts` — add `clearCartForCheckout(manager:EntityManager, userId:string):Promise<void>` using `manager.delete(CartItem,{cart:{id}})` (replace fire-and-forget `deleteCartItemsInBackground`), keep existing `getUserCart`/`addCartItem` optimistic `available` checks
-- [ ] T011 Update `ReservationModule` `src/modules/reservation/reservation.module.ts` to still export `ReservationService` for `OrderCheckoutService` + `ReservationExpirationService`, and `OrderModule` `src/modules/order/order.module.ts` to import `ReservationModule`, `CartModule`, `ProductsModule`, `InventoryModule`, `TypeOrmModule.forFeature([Order,OrderItem])`
-- [ ] T012 [P] Update DTOs — create empty `src/modules/order/dto/checkout.dto.ts` (`class CheckoutDto {}` no fields, `forbidNonWhitelisted` rejects any `items[]`/`orderId`/`reservationId`) and deprecate `src/modules/order/dto/create-order.dto.ts` (keep empty but not used)
+- [x] T004 Fix `OrderStatus` enum typo in `src/modules/order/order-status.enum.ts` to `PENDING|COMPLETED|CANCELLED|FAILED` (rename `SUCCESS→COMPLETED`, `FAILD→FAILED`, add `CANCELLED`)
+- [x] T005 [P] Fix `Order` entity `src/modules/order/entities/order.entity.ts` — remove `ManyToMany` + `@JoinTable`, add `ManyToOne User` with `JoinColumn(userId)`, `@Index(['userId'])`, `@Index(['status'])`, `total` `CHECK >=0`, `OneToMany` `orderItems`, correct relations per `data-model.md:15`
+- [x] T006 [P] Fix `OrderItem` entity `src/modules/order/entities/order-items.entity.ts` — add `orderId` FK `ON DELETE CASCADE` `@Index`, `productId` FK `ON DELETE RESTRICT` `@Index`, `@Unique(['orderId','productId'])`, `@Check quantity>0`, `@Check unit_price>=0`, relations per `data-model.md:24`
+- [x] T007 Create migration `src/migration/17xxxxx-OrderIntegrationCheckoutOnly.ts` for Order/OrderItem/OrderStatus fix (drop spurious `order_order_items_order_item` join table, alter enum, add FKs/constraints/indexes, `synchronize:false`)
+- [x] T008 Refactor `ReservationService` `src/modules/reservation/reservation.service.ts` — keep `create` for Admin/internal but add `createForCheckout(manager:EntityManager, userId:string, items:{inventoryId,quantity}[], orderId:string):Promise<Reservation>` per `research.md:D2`, no re-lock, validates `quantity>0` + duplicate `inventoryId`, creates `Reservation` `RESERVED` + `ReservationItem[]` with `orderId` via `manager`
+- [x] T009 Refactor `ReservationController` `src/modules/reservation/reservation.controller.ts` — change `@Post()` from `@Auth(User,Admin)` to `@Auth(Admin)` returning `403 {message:"Reservation can only be created via POST /order/checkout"}` for `User` (or delete route returning `404`), keep `GET /:id`, `GET /`, `PATCH /:id/expire` (Admin), and restrict `PATCH /:id/complete|cancel` to `403` for `User` per `spec.md:236` Q7 B (only Admin/worker/internal Order service)
+- [x] T010 Modify `CartService` `src/modules/cart/cart.service.ts` — add `clearCartForCheckout(manager:EntityManager, userId:string):Promise<void>` using `manager.delete(CartItem,{cart:{id}})` (replace fire-and-forget `deleteCartItemsInBackground`), keep existing `getUserCart`/`addCartItem` optimistic `available` checks
+- [x] T011 Update `ReservationModule` `src/modules/reservation/reservation.module.ts` to still export `ReservationService` for `OrderCheckoutService` + `ReservationExpirationService`, and `OrderModule` `src/modules/order/order.module.ts` to import `ReservationModule`, `CartModule`, `ProductsModule`, `InventoryModule`, `TypeOrmModule.forFeature([Order,OrderItem])`
+- [x] T012 [P] Update DTOs — create empty `src/modules/order/dto/checkout.dto.ts` (`class CheckoutDto {}` no fields, `forbidNonWhitelisted` rejects any `items[]`/`orderId`/`reservationId`) and deprecate `src/modules/order/dto/create-order.dto.ts` (keep empty but not used)
 
 **Checkpoint**: Foundation ready — Order schema correct, Reservation checkout-only, Cart helper available — user story implementation can now begin
 
@@ -58,11 +58,11 @@ description: "Task list for Order Integration — Checkout-Only Reservation Refa
 
 ### Implementation for User Story 1
 
-- [ ] T016 [US1] Implement `OrderCheckoutService` `src/modules/order/order-checkout.service.ts` — `checkout(userId:string):Promise<{order, reservation}>` orchestrating `dataSource.transaction(async manager=>{...})` per `data-model.md:126` (load Cart via `manager`, `sortedIds` deterministic, `FOR UPDATE` Inventories, `available` check `stock-reservedAmount`, `reservedAmount+=qty`, `Product.price` snapshot, create `Order` + `OrderItem[]` + `createForCheckout` without re-lock, `clearCartForCheckout`) with JSDoc `/** This service is responsible for ... */` per `AGENTS.md:3`
-- [ ] T017 [US1] Implement `OrderService` reads `src/modules/order/order.service.ts` — `findAll(userId, pagination, role)` paginated `owner-scoped` (`where:{userId}` unless Admin `userId` filter) + `findOne(userId,id,role)` with `assertOwner` per `spec.md:132` FR-007, using `Repository` + `relations` for `orderItems`
-- [ ] T018 [US1] Implement `OrderController` `src/modules/order/order.controller.ts` — `POST /order/checkout` `@Auth()` empty `CheckoutDto` → `OrderCheckoutService.checkout`, `GET /order` paginated, `GET /order/:id` owner check, `@ApiBearerAuth`/`@ApiOperation` per `contracts/order-checkout.md:10`
-- [ ] T019 [US1] Wire `OrderModule` providers `OrderCheckoutService` + `OrderService` and exports if needed, ensure `AppModule` imports `OrderModule` correctly
-- [ ] T020 [US1] Add logging via injected `Logger` and inline `//` comments for `available`/`sortedIds`/`total` formulas per `AGENTS.md:3`
+- [x] T016 [US1] Implement `OrderCheckoutService` `src/modules/order/order-checkout.service.ts` — `checkout(userId:string):Promise<{order, reservation}>` orchestrating `dataSource.transaction(async manager=>{...})` per `data-model.md:126` (load Cart via `manager`, `sortedIds` deterministic, `FOR UPDATE` Inventories, `available` check `stock-reservedAmount`, `reservedAmount+=qty`, `Product.price` snapshot, create `Order` + `OrderItem[]` + `createForCheckout` without re-lock, `clearCartForCheckout`) with JSDoc `/** This service is responsible for ... */` per `AGENTS.md:3`
+- [x] T017 [US1] Implement `OrderService` reads `src/modules/order/order.service.ts` — `findAll(userId, pagination, role)` paginated `owner-scoped` (`where:{userId}` unless Admin `userId` filter) + `findOne(userId,id,role)` with `assertOwner` per `spec.md:132` FR-007, using `Repository` + `relations` for `orderItems`
+- [x] T018 [US1] Implement `OrderController` `src/modules/order/order.controller.ts` — `POST /order/checkout` `@Auth()` empty `CheckoutDto` → `OrderCheckoutService.checkout`, `GET /order` paginated, `GET /order/:id` owner check, `@ApiBearerAuth`/`@ApiOperation` per `contracts/order-checkout.md:10`
+- [x] T019 [US1] Wire `OrderModule` providers `OrderCheckoutService` + `OrderService` and exports if needed, ensure `AppModule` imports `OrderModule` correctly
+- [x] T020 [US1] Add logging via injected `Logger` and inline `//` comments for `available`/`sortedIds`/`total` formulas per `AGENTS.md:3`
 
 **Checkpoint**: At this point, US1 checkout atomic is fully functional and testable independently via `POST /order/checkout` → `201` and real-PG integration `npm run test -- --runInBand src/modules/order/test/checkout.integration.spec.ts`
 
@@ -82,8 +82,8 @@ description: "Task list for Order Integration — Checkout-Only Reservation Refa
 
 ### Implementation for User Story 2
 
-- [ ] T024 [US2] Verify `OrderCheckoutService` already uses deterministic `sortedIds = [...new Set(ids)].sort()` and `FOR UPDATE` per `plan.md:20`; add inline comment `// deterministic lock ordering to prevent deadlock when carts have opposite item order` if missing, no new file if already correct — validate in `src/modules/order/order-checkout.service.ts`
-- [ ] T025 [US2] Ensure `available = stock - reservedAmount` check uses locked row value `inventory.available` (getter) with comment `// Available excludes already-reserved units to prevent overselling` in `src/modules/order/order-checkout.service.ts`
+- [x] T024 [US2] Verify `OrderCheckoutService` already uses deterministic `sortedIds = [...new Set(ids)].sort()` and `FOR UPDATE` per `plan.md:20`; add inline comment `// deterministic lock ordering to prevent deadlock when carts have opposite item order` if missing, no new file if already correct — validate in `src/modules/order/order-checkout.service.ts`
+- [x] T025 [US2] Ensure `available = stock - reservedAmount` check uses locked row value `inventory.available` (getter) with comment `// Available excludes already-reserved units to prevent overselling` in `src/modules/order/order-checkout.service.ts`
 
 **Checkpoint**: At this point, US1 and US2 both work independently; `npm run test -- --runInBand src/modules/order/test/checkout-concurrency.integration.spec.ts` passes
 
@@ -103,8 +103,8 @@ description: "Task list for Order Integration — Checkout-Only Reservation Refa
 
 ### Implementation for User Story 3
 
-- [ ] T029 [US3] Ensure `GET /order` `GET /order/:id` already implemented in T017/T018; add `reservationId` (and `expiresAt`) lookup via `Reservation` `orderId` FK using `manager` or `Repository` without eager join, return `{..., reservationId, expiresAt}` per Q9 `contracts/order-checkout.md:20`
-- [ ] T030 [US3] Add `@ApiOperation`/`@ApiResponse` Swagger docs for `GET` routes in `src/modules/order/order.controller.ts` and pagination DTO reuse `src/modules/products/dto/pagination.dto.ts` shape
+- [x] T029 [US3] Ensure `GET /order` `GET /order/:id` already implemented in T017/T018; add `reservationId` (and `expiresAt`) lookup via `Reservation` `orderId` FK using `manager` or `Repository` without eager join, return `{..., reservationId, expiresAt}` per Q9 `contracts/order-checkout.md:20`
+- [x] T030 [US3] Add `@ApiOperation`/`@ApiResponse` Swagger docs for `GET` routes in `src/modules/order/order.controller.ts` and pagination DTO reuse `src/modules/products/dto/pagination.dto.ts` shape
 
 **Checkpoint**: All user stories independently functional; `npm run test -- --runInBand src/modules/order/test/order-read.integration.spec.ts` passes
 
@@ -115,11 +115,11 @@ description: "Task list for Order Integration — Checkout-Only Reservation Refa
 **Purpose**: Close Phase 6 with refactored reservation verification, Order auto-cancel on expiry, and validation
 
 - [ ] T031 Update existing `Reservation` integration tests `src/modules/reservation/test/reservation.integration.spec.ts` — `POST /reservations` as User → expect `403` (`Use POST /order/checkout`) per `spec.md:236` Q6, Admin → `201`; `PATCH /:id/complete|cancel` as User on checkout-created reservation → `403` per Q7 B
-- [ ] T032 Extend `ReservationExpirationService` `src/modules/reservation/reservation-expiration.service.ts` and `ReservationExpirationProcessor` `src/modules/reservation/reservation-expiration.processor.ts` to auto-cancel Order `PENDING→CANCELLED` atomically with `Reservation RESERVED→EXPIRED` per `spec.md:237` Q8 B and `data-model.md:173` (lock `Reservation FOR UPDATE` → `Inventories FOR UPDATE` → `reservedAmount-=qty` → `Reservation EXPIRED` → `Order CANCELLED` same `manager` commit) with per-candidate continue-on-failure and logging
+- [x] T032 Extend `ReservationExpirationService` `src/modules/reservation/reservation-expiration.service.ts` and `ReservationExpirationProcessor` `src/modules/reservation/reservation-expiration.processor.ts` to auto-cancel Order `PENDING→CANCELLED` atomically with `Reservation RESERVED→EXPIRED` per `spec.md:237` Q8 B and `data-model.md:173` (lock `Reservation FOR UPDATE` → `Inventories FOR UPDATE` → `reservedAmount-=qty` → `Reservation EXPIRED` → `Order CANCELLED` same `manager` commit) with per-candidate continue-on-failure and logging
 - [ ] T033 Add integration test for Order auto-cancel on expiry in `src/modules/order/test/checkout-expiration.integration.spec.ts` — create via checkout (`expiresAt = now -1m` via direct DB update for test) → worker `processExpiredBatch` → `Reservation EXPIRED` + `reservedAmount` released + `Order CANCELLED` per `spec.md:96` new edge
 - [ ] T034 Run `EXPLAIN` verification for checkout `SELECT ... FOR UPDATE` row-level lock in `src/modules/order/test/checkout.integration.spec.ts` per `spec.md:175` SC-008 (assert `Index Scan` on `Inventory` PK, no seq scan)
-- [ ] T035 [P] Update `docs/plan.md` Phase 6 exit criteria marker to DONE after verification and add ADR `docs/decisions/ADR-checkout-only-reservation.md` describing checkout-only rationale and Q6-Q9 decisions
-- [ ] T036 Run verification `npm run lint`, `npm run build`, `npm run test -- --runInBand`, `npm run test:e2e` (register→cart→checkout→GET order→GET reservation→price mutation→expiry→CANCELLED)
+- [x] T035 [P] Update `docs/plan.md` Phase 6 exit criteria marker to DONE after verification and add ADR `docs/decisions/ADR-checkout-only-reservation.md` describing checkout-only rationale and Q6-Q9 decisions
+- [x] T036 Run verification `npm run lint`, `npm run build`, `npm run test -- --runInBand`, `npm run test:e2e` (register→cart→checkout→GET order→GET reservation→price mutation→expiry→CANCELLED)
 - [ ] T037 [P] Run `quickstart.md` manual validation: `docker-compose up -d`, curl checks 4.1 User `POST /reservations` → `403`, 4.2 happy checkout → `201`, 4.3 explicit `items[]` → `400`, 4.5 historical price + 4.6 Order auto-cancel
 
 ---
@@ -226,3 +226,4 @@ With multiple developers after Foundational:
 - Commit after each task or logical group (e.g., after T004-T007 migration, after T008-T009 refactor)
 - Stop at any checkpoint to validate story independently
 - Avoid: vague tasks, same file conflicts, cross-story dependencies that break independence; checkout transaction must remain the sole `reservedAmount` producer after refactor
+

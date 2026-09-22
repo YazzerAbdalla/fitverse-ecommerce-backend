@@ -15,6 +15,7 @@ import { CreateReservationDto } from './dto/create-reservation.dto';
 import { UserRoles } from '../users/enum/roles';
 import { Inventory } from '../inventory/entities/inventory.entity';
 import { Order } from '../order/entities/order.entity';
+import { OrderStatus } from '../order/order-status.enum';
 import { ReservationTransitionBuilder } from './reservation-transition.builder';
 
 const ALLOWED_TRANSITIONS: Record<ReservationStatus, ReservationStatus[]> = {
@@ -42,6 +43,69 @@ export class ReservationService {
         `Invalid reservation transition: ${from} -> ${to}`,
       );
     }
+  }
+
+  /**
+   * Creates a reservation for checkout inside the caller's transaction.
+   * Assumes caller already holds FOR UPDATE on inventories; does not re-lock.
+   * @param manager - EntityManager of the enclosing transaction (caller owns commit/rollback).
+   * @param requestingUserId - User creating the reservation.
+   * @param items - Inventory items with quantity (must be >0, no duplicates).
+   * @param orderId - Linked Order id.
+   * @returns The created Reservation with items.
+   * @throws BadRequestException if quantity invalid or duplicate.
+   */
+  async createForCheckout(
+    manager: EntityManager,
+    requestingUserId: string,
+    items: { inventoryId: string; quantity: number }[],
+    orderId: string,
+  ): Promise<Reservation> {
+    if (!items || items.length === 0) {
+      throw new BadRequestException('Reservation items must not be empty');
+    }
+    const seen = new Set<string>();
+    for (const item of items) {
+      if (!Number.isInteger(item.quantity) || item.quantity <= 0) {
+        throw new BadRequestException(
+          `Quantity must be a positive integer for ${item.inventoryId}`,
+        );
+      }
+      if (seen.has(item.inventoryId)) {
+        throw new BadRequestException(
+          `Duplicate inventoryId in request: ${item.inventoryId}`,
+        );
+      }
+      seen.add(item.inventoryId);
+    }
+
+    // No re-lock: caller already holds FOR UPDATE on inventories
+    const reservationRepo = manager.getRepository(Reservation);
+    const itemRepo = manager.getRepository(ReservationItem);
+
+    const expiresAt = new Date(Date.now() + DEFAULT_TTL_MS);
+
+    const reservation = reservationRepo.create({
+      userId: requestingUserId,
+      orderId,
+      status: ReservationStatus.RESERVED,
+      expiresAt,
+    });
+    const saved = await reservationRepo.save(reservation);
+
+    const reservationItems = items.map((i) =>
+      itemRepo.create({
+        reservationId: saved.id,
+        inventoryId: i.inventoryId,
+        quantity: i.quantity,
+      }),
+    );
+    await itemRepo.save(reservationItems);
+
+    this.logger.log(
+      `Created checkout reservation ${saved.id} for user ${requestingUserId} order ${orderId}`,
+    );
+    return this.findByIdInternal(manager, saved.id);
   }
 
   async create(
@@ -359,7 +423,26 @@ export class ReservationService {
     // No items? Still allow status change but no inventory mutation (edge)
     if (!reservation.items || reservation.items.length === 0) {
       reservation.status = to;
-      return reservationRepo.save(reservation);
+      const savedNoItems = await reservationRepo.save(reservation);
+      if (
+        to === ReservationStatus.EXPIRED &&
+        reservation.orderId &&
+        fromStatus === ReservationStatus.RESERVED
+      ) {
+        const orderRepo = manager.getRepository(Order);
+        const lockedOrder = await orderRepo.findOne({
+          where: { id: reservation.orderId },
+          lock: { mode: 'pessimistic_write' },
+        } as any);
+        if (lockedOrder && lockedOrder.status === OrderStatus.PENDING) {
+          lockedOrder.status = OrderStatus.CANCELLED;
+          await orderRepo.save(lockedOrder);
+          this.logger.log(
+            `Order ${lockedOrder.id} PENDING -> CANCELLED due to reservation ${id} expiry (no items)`,
+          );
+        }
+      }
+      return savedNoItems;
     }
 
     // Deterministic lock ordering (D2)
@@ -415,6 +498,38 @@ export class ReservationService {
 
     reservation.status = to;
     const saved = await reservationRepo.save(reservation);
+
+    // Auto-cancel Order PENDING -> CANCELLED atomically when Reservation expires (Q8 B)
+    if (
+      to === ReservationStatus.EXPIRED &&
+      reservation.orderId &&
+      fromStatus === ReservationStatus.RESERVED
+    ) {
+      try {
+        const orderRepo = manager.getRepository(Order);
+        const lockedOrder = await orderRepo.findOne({
+          where: { id: reservation.orderId },
+          lock: { mode: 'pessimistic_write' },
+        } as any);
+        if (lockedOrder && lockedOrder.status === OrderStatus.PENDING) {
+          lockedOrder.status = OrderStatus.CANCELLED;
+          await orderRepo.save(lockedOrder);
+          this.logger.log(
+            `Order ${lockedOrder.id} PENDING -> CANCELLED due to reservation ${id} expiry`,
+          );
+        }
+      } catch (e: any) {
+        // Log but don't fail reservation expiry; order cancel is best-effort within same tx - rollback if error is severe
+        // If lock fails, let transaction rollback to retry
+        if (e?.code === '23514' || e?.message?.includes('CHK_')) {
+          throw e;
+        }
+        this.logger.warn(
+          `Failed to auto-cancel order ${reservation.orderId} on reservation expiry ${id}: ${e?.message}`,
+        );
+      }
+    }
+
     this.logger.log(
       `Reservation ${id} ${fromStatus} -> ${to} (inventory updated)`,
     );
