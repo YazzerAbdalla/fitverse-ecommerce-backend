@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import { Logger, Module, forwardRef } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { ProductsResolver } from './products.resolver';

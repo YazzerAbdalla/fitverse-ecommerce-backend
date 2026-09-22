@@ -21,16 +21,13 @@ service another module needs.
 - `users.service.ts` — `findUserByEmail`, `findUserById`, `findByGoogleId`, `updatePassword`/`incrementTokenVersion`, `createNewUser` (now `any` for OAuth null password).
 - `user.entity.ts` — UUID PK, `role` enum, `password` **nullable** (pure OAuth), plus `phoneNumber` (partial unique `WHERE phoneNumber IS NOT NULL`, E.164), `phoneVerified`, `googleId` (partial unique `WHERE googleId IS NOT NULL`), `provider enum local|google` (`CHECK`), `tokenVersion int default 0` (F2 C revocation), `passwordChangedAt` nullable (compat), `emailVerified`, `UNIQUE(email)` (was only Index), relations to `Order`/`Cart` unchanged. Migration `1755900000000-AuthUpgradesUserAndResetToken` owns these per F3.
 
-## products (GraphQL, Apollo code-first)
+## products (GraphQL, Apollo code-first) — Phase 9 Redis / Product Caching DONE
 
-- `products.module.ts` — `forFeature([Product])`, exports `ProductsService`.
-- `products.resolver.ts` — queries/mutations mapped 1:1 to service methods.
-- `products.service.ts` — `create` (slugify + unique name/slug), `createMany`,
-  `findAll` (offset pagination + **Redis cache** keyed
-  `products:list:{page}:{limit}`), `findOne`, `update`, `updateMany`
-  (**transaction + `pessimistic_write` lock**), `remove`, `resetAll`.
+- `products.module.ts` — `forFeature([Product])` + `forwardRef(InventoryModule)`, global `CACHE_MANAGER` (`@keyv/redis` ioredis, `REDIS_URL`) via `src/app.module.ts` `CacheModule` `ttl 60*1000`; exports `ProductsService`. `ConfigService` provides `PRODUCT_LIST_CACHE_TTL_MS=60000` (min 5000) / `PRODUCT_SINGLE_CACHE_TTL_MS=300000` (min 30000) with clamp + `Logger.log` on init.
+- `products.resolver.ts` — thin GraphQL (no cache logic), mapped 1:1 to service methods (`createProduct`, `createManyProducts`, `products`→`findAll`, `product`→`findOne`, `updateProduct`, `updateMany`, `removeProduct`, `removeAllProducts`).
+- `products.service.ts` — **This service is responsible for product catalog and product-cache (cache-aside).** `create`/`createMany` (slugify + unique name/slug, `InventoryService.createForProduct` 0-stock) → post-commit `invalidateAllLists()`; `findAll` cache-aside `products:list:{page}:{limit}` TTL 60s (fail-open `try/catch get` → `Cache HIT/MISS` `Logger.debug`, `set` TTL, fallback to `findAndCount` on `ECONNREFUSED`); `findOne` cache-aside `product:{id}` TTL 300s (no negative cache, fail-open); `update` → `del product:{id}` + `del products:list:*` via `store.keys('products:list:*')→del` selective + `clear()` fallback (warn if `clear()` would evict `expiration:tick:lock`); `updateMany` (`pessimistic_write` lock transactional after `manager.save` → `invalidateProductCaches(ids)` outside tx); `remove`/`resetAll` → `del product:{id}` + lists (resetAll clears `product:*` plus lists). Never caches `stock`/`available`, never inside `dataSource.transaction` (post-commit). Strictly products-only per FR-007.
 - Entity carries `@ObjectType()`/`@Field()` (GraphQL) **and** TypeORM decorators.
-  Has `@Check('"stock" >= 0')` and `@Unique(['name'])`, `@Index(['name'])`.
+  Has `@Check('"price" >= 0')` and `@Unique(['name'])`, `@Index(['name'])`. No `stock` field (owned by `Inventory`).
 
 ## cart (REST)
 

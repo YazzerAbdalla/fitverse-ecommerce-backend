@@ -29,9 +29,9 @@ description: "Task list template for feature implementation"
 
 **Purpose**: Project initialization, env and tooling for caching
 
-- [ ] T001 Verify Redis infra and env defaults in `.env` and `.env.example` per plan (REDIS_URL, PRODUCT_LIST_CACHE_TTL_MS=60000, PRODUCT_SINGLE_CACHE_TTL_MS=300000, docs clamps)
-- [ ] T002 [P] Ensure docker-compose Redis 8 healthy and `CacheModule` global config in `src/app.module.ts` uses `createKeyv(REDIS_URL)` with `ttl: 60*1000` fallback
-- [ ] T003 [P] Confirm `src/cache-test.service.ts` onModuleInit logs `Redis connection successfully verified` without crashing on failure
+- [X] T001 Verify Redis infra and env defaults in `.env` and `.env.example` per plan (REDIS_URL, PRODUCT_LIST_CACHE_TTL_MS=60000, PRODUCT_SINGLE_CACHE_TTL_MS=300000, docs clamps)
+- [X] T002 [P] Ensure docker-compose Redis 8 healthy and `CacheModule` global config in `src/app.module.ts` uses `createKeyv(REDIS_URL)` with `ttl: 60*1000` fallback
+- [X] T003 [P] Confirm `src/cache-test.service.ts` onModuleInit logs `Redis connection successfully verified` without crashing on failure
 
 ---
 
@@ -41,11 +41,11 @@ description: "Task list template for feature implementation"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 [P] Add ConfigService-based TTL helper in `src/modules/products/products.service.ts` (`parseTtlMs` with `PRODUCT_LIST_CACHE_TTL_MS` / `PRODUCT_SINGLE_CACHE_TTL_MS`, clamp `list>=5000 single>=30000`, `Logger.warn` + `Logger.log Product cache TTLs: list=* single=*`)
-- [ ] T005 [P] Add private cache key helpers in `src/modules/products/products.service.ts` (`buildKeyList(page,limit) → products:list:{page}:{limit}`, `buildKeySingle(id) → product:{id}`)
-- [ ] T006 Create private invalidation helpers in `src/modules/products/products.service.ts` (`invalidateSingle(id)` via `cacheManager.del`, `invalidateAllLists()` via `store.keys('products:list:*')→del` selective + `clear()` fallback with `Logger.warn`, `invalidateProductCaches(ids[])`)
-- [ ] T007 Configure `CACHE_MANAGER` and `ConfigService` injection in `src/modules/products/products.module.ts` (keep `TypeOrmModule.forFeature([Product])` + `forwardRef(InventoryModule)`, ensure `CACHE_MANAGER` token and `ConfigService` available for TTLs)
-- [ ] T008 Add class-level JSDoc and method-level JSDoc stubs in `src/modules/products/products.service.ts` per AGENTS.md §3 (service responsible for product catalog and product-cache cache-aside)
+- [X] T004 [P] Add ConfigService-based TTL helper in `src/modules/products/products.service.ts` (`parseTtlMs` with `PRODUCT_LIST_CACHE_TTL_MS` / `PRODUCT_SINGLE_CACHE_TTL_MS`, clamp `list>=5000 single>=30000`, `Logger.warn` + `Logger.log Product cache TTLs: list=* single=*`)
+- [X] T005 [P] Add private cache key helpers in `src/modules/products/products.service.ts` (`buildKeyList(page,limit) → products:list:{page}:{limit}`, `buildKeySingle(id) → product:{id}`)
+- [X] T006 Create private invalidation helpers in `src/modules/products/products.service.ts` (`invalidateSingle(id)` via `cacheManager.del`, `invalidateAllLists()` via `store.keys('products:list:*')→del` selective + `clear()` fallback with `Logger.warn`, `invalidateProductCaches(ids[])`)
+- [X] T007 Configure `CACHE_MANAGER` and `ConfigService` injection in `src/modules/products/products.module.ts` (keep `TypeOrmModule.forFeature([Product])` + `forwardRef(InventoryModule)`, ensure `CACHE_MANAGER` token and `ConfigService` available for TTLs)
+- [X] T008 Add class-level JSDoc and method-level JSDoc stubs in `src/modules/products/products.service.ts` per AGENTS.md §3 (service responsible for product catalog and product-cache cache-aside)
 
 **Checkpoint**: Foundation ready - user story implementation can now begin in parallel
 
@@ -59,14 +59,14 @@ description: "Task list template for feature implementation"
 
 ### Tests for User Story 1 (write FIRST, ensure FAIL before implementation)
 
-- [ ] T009 [P] [US1] Unit test `findAll` miss→hit in `src/modules/products/products.service.spec.ts` (mock `CACHE_MANAGER` get returns undefined then cached, verify `findAndCount` spy calledOnce, `Logger.debug` HIT/MISS, TTL arg 60000)
-- [ ] T010 [P] [US1] Unit test `findAll` pagination isolation in `src/modules/products/products.service.spec.ts` (`products:list:1:10` hit does not serve `products:list:2:10`)
-- [ ] T011 [P] [US1] Unit test `findAll` TTL expiry re-miss in `src/modules/products/products.service.spec.ts` (mock expired = undefined → second miss → findAndCount again)
+- [X] T009 [P] [US1] Unit test `findAll` miss→hit in `src/modules/products/products.service.spec.ts` (mock `CACHE_MANAGER` get returns undefined then cached, verify `findAndCount` spy calledOnce, `Logger.debug` HIT/MISS, TTL arg 60000)
+- [X] T010 [P] [US1] Unit test `findAll` pagination isolation in `src/modules/products/products.service.spec.ts` (`products:list:1:10` hit does not serve `products:list:2:10`)
+- [X] T011 [P] [US1] Unit test `findAll` TTL expiry re-miss in `src/modules/products/products.service.spec.ts` (mock expired = undefined → second miss → findAndCount again)
 
 ### Implementation for User Story 1
 
-- [ ] T012 [US1] Implement cache-aside in `src/modules/products/products.service.ts` `findAll` (compute `key=buildKeyList(page,limit)`, `try/catch get` → HIT return, MISS → `findAndCount({take:limit, skip:(page-1)*limit})` → build `{data,meta}`, `try/catch set(key, result, listTtl)`, `Logger.debug` HIT/MISS, fail-open on throw, no Redis I/O inside transaction)
-- [ ] T013 [US1] Verify GraphQL `products` query thin passthrough in `src/modules/products/products.resolver.ts` (no cache logic moved to resolver, `findAll` delegates to service)
+- [X] T012 [US1] Implement cache-aside in `src/modules/products/products.service.ts` `findAll` (compute `key=buildKeyList(page,limit)`, `try/catch get` → HIT return, MISS → `findAndCount({take:limit, skip:(page-1)*limit})` → build `{data,meta}`, `try/catch set(key, result, listTtl)`, `Logger.debug` HIT/MISS, fail-open on throw, no Redis I/O inside transaction)
+- [X] T013 [US1] Verify GraphQL `products` query thin passthrough in `src/modules/products/products.resolver.ts` (no cache logic moved to resolver, `findAll` delegates to service)
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently (SC-001, SC-002 list side)
 
@@ -80,19 +80,19 @@ description: "Task list template for feature implementation"
 
 ### Tests for User Story 2 (write FIRST, ensure FAIL)
 
-- [ ] T014 [P] [US2] Unit test `create` invalidates all `products:list:*` in `src/modules/products/products.service.spec.ts` (mock `store.keys` returns `[products:list:1:10,products:list:2:10]` → `del` called per key, verify `del` called before next `findAll` miss)
-- [ ] T015 [P] [US2] Unit test `update` invalidates `product:{id}` + lists in `src/modules/products/products.service.spec.ts` (single del + lists)
-- [ ] T016 [P] [US2] Unit test `updateMany` invalidates each `product:{id}` + lists in `src/modules/products/products.service.spec.ts` (5 del singles + lists, mock `DataSource.transaction` resolving → helpers called after)
-- [ ] T017 [P] [US2] Unit test `remove`/`resetAll` invalidates `product:{id}` + lists in `src/modules/products/products.service.spec.ts`
-- [ ] T018 [P] [US2] Unit test no invalidation on failure in `src/modules/products/products.service.spec.ts` (duplicate name `ConflictException` → `del` never called, `clear` never called, next `findAll` still HIT)
+- [X] T014 [P] [US2] Unit test `create` invalidates all `products:list:*` in `src/modules/products/products.service.spec.ts` (mock `store.keys` returns `[products:list:1:10,products:list:2:10]` → `del` called per key, verify `del` called before next `findAll` miss)
+- [X] T015 [P] [US2] Unit test `update` invalidates `product:{id}` + lists in `src/modules/products/products.service.spec.ts` (single del + lists)
+- [X] T016 [P] [US2] Unit test `updateMany` invalidates each `product:{id}` + lists in `src/modules/products/products.service.spec.ts` (5 del singles + lists, mock `DataSource.transaction` resolving → helpers called after)
+- [X] T017 [P] [US2] Unit test `remove`/`resetAll` invalidates `product:{id}` + lists in `src/modules/products/products.service.spec.ts`
+- [X] T018 [P] [US2] Unit test no invalidation on failure in `src/modules/products/products.service.spec.ts` (duplicate name `ConflictException` → `del` never called, `clear` never called, next `findAll` still HIT)
 
 ### Implementation for User Story 2
 
-- [ ] T019 [US2] Add post-commit `invalidateAllLists` + `invalidateSingle` calls after `save` in `src/modules/products/products.service.ts` `create` (after `productsRepo.save` success)
-- [ ] T020 [US2] Add invalidation after `save` in `src/modules/products/products.service.ts` `createMany` (after batch save, lists only)
-- [ ] T021 [US2] Add `del product:{id}` + lists after `save` in `src/modules/products/products.service.ts` `update` (after `productsRepo.save` success)
-- [ ] T022 [US2] Add invalidation after transaction commit in `src/modules/products/products.service.ts` `updateMany` (outside `dataSource.transaction` promise, after `manager.save` resolves, for each id + lists)
-- [ ] T023 [US2] Add `del product:{id}` + lists after `delete` in `src/modules/products/products.service.ts` `remove`, and namespace clear for `src/modules/products/products.service.ts` `resetAll`/`deleteAll` (all `product:*` + lists via `invalidateProductCaches` or `clear()` fallback)
+- [X] T019 [US2] Add post-commit `invalidateAllLists` + `invalidateSingle` calls after `save` in `src/modules/products/products.service.ts` `create` (after `productsRepo.save` success)
+- [X] T020 [US2] Add invalidation after `save` in `src/modules/products/products.service.ts` `createMany` (after batch save, lists only)
+- [X] T021 [US2] Add `del product:{id}` + lists after `save` in `src/modules/products/products.service.ts` `update` (after `productsRepo.save` success)
+- [X] T022 [US2] Add invalidation after transaction commit in `src/modules/products/products.service.ts` `updateMany` (outside `dataSource.transaction` promise, after `manager.save` resolves, for each id + lists)
+- [X] T023 [US2] Add `del product:{id}` + lists after `delete` in `src/modules/products/products.service.ts` `remove`, and namespace clear for `src/modules/products/products.service.ts` `resetAll`/`deleteAll` (all `product:*` + lists via `invalidateProductCaches` or `clear()` fallback)
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should both work independently (SC-003, SC-005 bulk part, SC-006)
 
@@ -106,13 +106,13 @@ description: "Task list template for feature implementation"
 
 ### Tests for User Story 3 (write FIRST)
 
-- [ ] T024 [P] [US3] Unit test `findOne` miss→hit + no negative cache in `src/modules/products/products.service.spec.ts` (first `get` undefined → `findOne` DB + `set` 300000, second `get` hit → no DB, null from repo not cached)
-- [ ] T025 [P] [US3] Unit test `findOne` invalidated by `update`/`remove` in `src/modules/products/products.service.spec.ts` (cached single → after `update` single del + lists cleared → next `findOne` miss)
+- [X] T024 [P] [US3] Unit test `findOne` miss→hit + no negative cache in `src/modules/products/products.service.spec.ts` (first `get` undefined → `findOne` DB + `set` 300000, second `get` hit → no DB, null from repo not cached)
+- [X] T025 [P] [US3] Unit test `findOne` invalidated by `update`/`remove` in `src/modules/products/products.service.spec.ts` (cached single → after `update` single del + lists cleared → next `findOne` miss)
 
 ### Implementation for User Story 3
 
-- [ ] T026 [US3] Implement cache-aside in `src/modules/products/products.service.ts` `findOne` (`key=product:{id}`, `try/catch get` → HIT return, MISS → `findOne({where:{id}})`, if null return null without set, else `try/catch set(key, product, singleTtl)`, `Logger.debug` HIT/MISS, fail-open)
-- [ ] T027 [US3] Wire `findOne` invalidation already covered by US2 helpers (verify `update`/`remove` already call `invalidateSingle` + `invalidateAllLists` → no extra code, just ensure `findOne` cache respects it)
+- [X] T026 [US3] Implement cache-aside in `src/modules/products/products.service.ts` `findOne` (`key=product:{id}`, `try/catch get` → HIT return, MISS → `findOne({where:{id}})`, if null return null without set, else `try/catch set(key, product, singleTtl)`, `Logger.debug` HIT/MISS, fail-open)
+- [X] T027 [US3] Wire `findOne` invalidation already covered by US2 helpers (verify `update`/`remove` already call `invalidateSingle` + `invalidateAllLists` → no extra code, just ensure `findOne` cache respects it)
 
 **Checkpoint**: All user stories so far (US1+US2+US3) independently functional (SC-004, SC-005 single part)
 
@@ -126,16 +126,16 @@ description: "Task list template for feature implementation"
 
 ### Tests for User Story 4 (write FIRST)
 
-- [ ] T028 [P] [US4] Unit test fail-open `findAll` get throws in `src/modules/products/products.service.spec.ts` (mock `get` rejects `ECONNREFUSED` → still returns DB `data/meta` + `Logger.warn` called, no throw)
-- [ ] T029 [P] [US4] Unit test fail-open `findAll` set throws + mutation del throws in `src/modules/products/products.service.spec.ts` (mock `set` reject during populate → still 200, mock `del` reject during `create` → still 201 + `warn`)
-- [ ] T030 [P] [US4] Unit test fail-open `findOne` get/set throws in `src/modules/products/products.service.spec.ts`
-- [ ] T031 [P] [US4] Unit test inventory never cached audit in `src/modules/products/products.service.spec.ts` (spy `CACHE_MANAGER.get` never called inside inventory path, `productsService` never stores `stock/reservedAmount` in cached value, grep audit `CACHE_MANAGER` only in `ProductsModule`/`CacheTestService`)
+- [X] T028 [P] [US4] Unit test fail-open `findAll` get throws in `src/modules/products/products.service.spec.ts` (mock `get` rejects `ECONNREFUSED` → still returns DB `data/meta` + `Logger.warn` called, no throw)
+- [X] T029 [P] [US4] Unit test fail-open `findAll` set throws + mutation del throws in `src/modules/products/products.service.spec.ts` (mock `set` reject during populate → still 200, mock `del` reject during `create` → still 201 + `warn`)
+- [X] T030 [P] [US4] Unit test fail-open `findOne` get/set throws in `src/modules/products/products.service.spec.ts`
+- [X] T031 [P] [US4] Unit test inventory never cached audit in `src/modules/products/products.service.spec.ts` (spy `CACHE_MANAGER.get` never called inside inventory path, `productsService` never stores `stock/reservedAmount` in cached value, grep audit `CACHE_MANAGER` only in `ProductsModule`/`CacheTestService`)
 
 ### Implementation for User Story 4
 
-- [ ] T032 [US4] Wrap every `cacheManager.get/set/del` with fail-open `try/catch` + `Logger.warn` in `src/modules/products/products.service.ts` (`findAll` get, `findAll` set, `findOne` get, `findOne` set)
-- [ ] T033 [US4] Wrap `invalidateSingle` and `invalidateAllLists` (`store.keys` + `del` per key + `clear()` fallback) with `try/catch` + `Logger.warn` in `src/modules/products/products.service.ts`
-- [ ] T034 [US4] Audit and enforce `CACHE_MANAGER` only in `src/modules/products/products.module.ts` + `src/cache-test.service.ts` (grep `CACHE_MANAGER` must return 0 in `src/modules/cart`, `src/modules/inventory`, `src/modules/reservation`, `src/modules/order`), document in `docs/architecture/modules.md`
+- [X] T032 [US4] Wrap every `cacheManager.get/set/del` with fail-open `try/catch` + `Logger.warn` in `src/modules/products/products.service.ts` (`findAll` get, `findAll` set, `findOne` get, `findOne` set)
+- [X] T033 [US4] Wrap `invalidateSingle` and `invalidateAllLists` (`store.keys` + `del` per key + `clear()` fallback) with `try/catch` + `Logger.warn` in `src/modules/products/products.service.ts`
+- [X] T034 [US4] Audit and enforce `CACHE_MANAGER` only in `src/modules/products/products.module.ts` + `src/cache-test.service.ts` (grep `CACHE_MANAGER` must return 0 in `src/modules/cart`, `src/modules/inventory`, `src/modules/reservation`, `src/modules/order`), document in `docs/architecture/modules.md`
 
 **Checkpoint**: User Story 4 complete; reliability invariant SC-007, SC-008 verified
 
@@ -145,10 +145,10 @@ description: "Task list template for feature implementation"
 
 **Purpose**: Config, docs, validation, build
 
-- [ ] T035 [P] Add `PRODUCT_LIST_CACHE_TTL_MS` and `PRODUCT_SINGLE_CACHE_TTL_MS` to `.env.example` with defaults `60000`/`300000` and clamp docs in `src/modules/products/products.service.ts` (`parseTtlMs` minima `5000`/`30000`)
-- [ ] T036 [P] Update architecture docs in `docs/architecture/modules.md` or `docs/architecture/products-caching.md` (keys `product:{id}`/`products:list:{page}:{limit}`, TTLs, cache-aside flow, after-commit selective `keys→del` vs `clear()` fallback, fail-open, inventory never cached per FR-007)
-- [ ] T037 [P] Run `quickstart.md` validation: `docker-compose up -d`, `FLUSHDB`, `products` miss→hit, `FLUSHDB` re-miss, `createProduct`/`updateProduct` invalidation, `findOne` hit, Redis `stop` fail-open still 200, `grep -rn CACHE_MANAGER src/modules/cart|inventory|reservation|order` 0 hits
-- [ ] T038 Verify `npm run build` + `npm run lint` + `npm run test -- --runInBand` pass (8+ new cache tests + existing 19 suites) and `specs/009-redis-caching/checklists/requirements.md` green
+- [X] T035 [P] Add `PRODUCT_LIST_CACHE_TTL_MS` and `PRODUCT_SINGLE_CACHE_TTL_MS` to `.env.example` with defaults `60000`/`300000` and clamp docs in `src/modules/products/products.service.ts` (`parseTtlMs` minima `5000`/`30000`)
+- [X] T036 [P] Update architecture docs in `docs/architecture/modules.md` or `docs/architecture/products-caching.md` (keys `product:{id}`/`products:list:{page}:{limit}`, TTLs, cache-aside flow, after-commit selective `keys→del` vs `clear()` fallback, fail-open, inventory never cached per FR-007)
+- [X] T037 [P] Run `quickstart.md` validation: `docker-compose up -d`, `FLUSHDB`, `products` miss→hit, `FLUSHDB` re-miss, `createProduct`/`updateProduct` invalidation, `findOne` hit, Redis `stop` fail-open still 200, `grep -rn CACHE_MANAGER src/modules/cart|inventory|reservation|order` 0 hits
+- [X] T038 Verify `npm run build` + `npm run lint` + `npm run test -- --runInBand` pass (8+ new cache tests + existing 19 suites) and `specs/009-redis-caching/checklists/requirements.md` green
 
 ---
 

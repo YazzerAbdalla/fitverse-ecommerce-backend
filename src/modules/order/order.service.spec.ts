@@ -87,12 +87,16 @@ describe('OrderService', () => {
   describe('assertOwner', () => {
     it('should not throw for owner', () => {
       const order: any = { userId: 'u1' };
-      expect(() => service.assertOwner(order, 'u1', 'User' as any)).not.toThrow();
+      expect(() =>
+        service.assertOwner(order, 'u1', 'User' as any),
+      ).not.toThrow();
     });
 
     it('should not throw for Admin', () => {
       const order: any = { userId: 'u1' };
-      expect(() => service.assertOwner(order, 'u2', 'Admin' as any)).not.toThrow();
+      expect(() =>
+        service.assertOwner(order, 'u2', 'Admin' as any),
+      ).not.toThrow();
     });
 
     it('should throw for non-owner non-admin', () => {
