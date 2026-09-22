@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 
 import { ProductsService } from '../products/products.service';
 import { InventoryService } from '../inventory/inventory.service';
@@ -395,6 +395,39 @@ export class CartService {
           error instanceof Error ? error.stack : String(error),
         );
       });
+  }
+
+  /**
+   * Clears cart items atomically inside caller's transaction.
+   * @param manager - EntityManager of enclosing transaction.
+   * @param userId - Owner of cart.
+   * @returns void
+   * @throws NotFoundException if cart missing.
+   */
+  async clearCartForCheckout(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<void> {
+    // Load cart via manager to stay in transaction
+    const cart = await manager.findOne(Cart, {
+      where: { user: { id: userId } },
+      relations: { cart_items: true },
+    });
+    if (!cart) {
+      this.logger.warn(
+        `Cart not found for user ${userId} during checkout clear`,
+      );
+      throw new NotFoundException('Cart not found.');
+    }
+    if (cart.cart_items.length === 0) {
+      this.logger.debug(`Cart ${cart.id} already empty for checkout clear`);
+      return;
+    }
+    // Delete via manager to keep atomic with checkout transaction
+    await manager.delete(CartItem, { cart: { id: cart.id } } as any);
+    this.logger.log(
+      `Cart ${cart.id} cleared for checkout user ${userId} (${cart.cart_items.length} items)`,
+    );
   }
 
   /**

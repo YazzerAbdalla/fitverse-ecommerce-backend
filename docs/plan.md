@@ -548,7 +548,7 @@ Do not introduce infrastructure without a reason.
 
 # Phase 6 — Order Integration
 
-**Status: NOT DONE**
+**Status: DONE — 2026-09-21** (checkout-only reservation refactor, `POST /order/checkout` atomic, Order/OrderItem fix, migration, expiration auto-cancel)
 
 **Goal:** Connect reservations to Orders.
 
@@ -561,7 +561,7 @@ Order
 -----
 id
 user_id
-status
+status (PENDING|COMPLETED|CANCELLED|FAILED)
 total
 created_at
 updated_at
@@ -576,7 +576,9 @@ id
 order_id
 product_id
 quantity
-unit_price
+unit_price (historical snapshot)
+productNameSnapshot
+subtotal (generated)
 ```
 
 ## 6.2 Historical Price
@@ -593,29 +595,33 @@ Historical orders must not depend on the current Product price.
 
 ## 6.3 Checkout Flow
 
-The exact checkout behavior must first be specified.
-
-Current architectural direction:
+Implemented as single `DataSource.transaction`:
 
 ```text
 Client
   ↓
-Cart
+Cart (load via manager, validate non-empty)
   ↓
-Checkout
+Checkout (sortedIds deterministic)
   ↓
-Validate cart
+Lock Inventories FOR UPDATE
   ↓
-Reserve inventory
+Check available = stock - reservedAmount
   ↓
-Create order
+Reserve inventory (reservedAmount+=qty)
   ↓
-Create order items
+Create order (PENDING, total=Σ qty*price)
+  ↓
+Create order items (snapshot price)
+  ↓
+Create reservation (RESERVED, expiresAt now+15m, orderId) via createForCheckout (no re-lock)
+  ↓
+Clear cart (manager.delete)
   ↓
 Commit
 ```
 
-The exact transaction boundary must be decided in the feature specification.
+Cart-only: `POST /order/checkout` `{}` empty body, explicit `items[]` rejected `400` via `forbidNonWhitelisted`.
 
 ## 6.4 Important Unresolved Requirement
 
@@ -625,20 +631,11 @@ Before implementation, decide:
 When does inventory become reserved?
 ```
 
-Possible choices:
-
-```text
-A. When item is added to cart
-B. When checkout starts
-C. When order is created
-D. Another explicit business stage
-```
-
-Do not implement this assumption silently.
+**Decision: C. When order is created** inside the single checkout transaction (Session 2026-09-21 Q1-Q5 + checkout-only directive). Adding to cart only does optimistic `available` check, never mutates `reservedAmount`.
 
 ### Phase 6 Exit Criteria
 
-A successful checkout produces a consistent Order + OrderItems + Reservation + Inventory state.
+A successful checkout produces a consistent Order + OrderItems + Reservation + Inventory state. — **MET 2026-09-21**: `Order` fixed (`ManyToMany`→`OneToMany`, `SUCCESS/FAILD`→`PENDING|COMPLETED|CANCELLED|FAILED`, `total` `CHECK>=0`, indexes `userId/status`) + `OrderItem` fixed (`Unique(orderId,productId)`, `CHECK quantity>0`, `CHECK unit_price>=0`, `productId` FK RESTRICT) via migration `1755900000002-OrderIntegrationCheckoutOnly`; `POST /order/checkout` (`OrderCheckoutService` `DataSource.transaction`, sorted `FOR UPDATE`, `available` check, `createForCheckout` without re-lock, `clearCartForCheckout` via `EntityManager`) + `GET /order` paginated owner-scoped + `GET /order/:id` owner check via `OrderService`; `Reservation` refactor (`POST /reservations` `User→403 Use POST /order/checkout`, `PATCH :id/complete|cancel` `User→403`, `createForCheckout` internal) + `CartService.clearCartForCheckout`; expiration worker extended to auto-cancel `Order PENDING→CANCELLED` atomically with `Reservation EXPIRED`; `npm run build` + `npm run test -- --runInBand` pass, `docs/decisions/ADR-checkout-only-reservation.md` recorded.
 
 ---
 
@@ -1896,11 +1893,17 @@ Lifecycle
     ↓
 DONE — 2026-09-14 (RESERVED→COMPLETED/CANCELLED/EXPIRED transactional, inventory sync, spec 004)
     ↓
+Expiration Cleanup
+    ↓
+DONE — 2026-09-21 (BullMQ worker 30s, poison, reservation.expired, 169 tests)
+    ↓
+Order Integration
+    ↓
+DONE — 2026-09-21 (checkout-only, atomic Order+Reservation+Inventory, historical price, concurrency single-winner)
+    ↓
 >>> CURRENT TARGET <<<
     ↓
-Expiration Cleanup (Phase 5 — automated worker)
-    ↓
-Orders
+Order Completion (Phase 7)
     ↓
 Async infrastructure
     ↓
