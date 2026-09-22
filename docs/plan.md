@@ -1427,6 +1427,263 @@ Email service is complete when:
 
 ---
 
+# Phase 19 — Dashboard, RBAC & Metrics (Future)
+
+**Status: NOT DONE — planned 2026-09-23 (future, before final testing)**
+
+**Goal:** Provide an admin/operational dashboard via a **separate `dashboard` module** (thin, service-aggregating) that exposes **CRUD for products, CRUD for users, R for orders, R for carts, CRUD for stock (inventory)**, **RBAC with role hierarchy and admin-controlled upgrade/downgrade**, and **five business/system metrics** with date-range filtering — all without breaking modular-monolith boundaries or making Redis authoritative.
+
+This phase is **orthogonal** to Phases 7-8 (order) and 9-13 (infra) and extends Phases 5-6/16 (reservation/order/auth). It must be implemented **before** `Phase 14 — Testing` so final `npm run test:e2e` can cover `admin → role change → dashboard metrics → stock alert` without mocking dashboard.
+
+## 19.0 Current Snapshot (what exists, 2026-09-22)
+
+```text
+users.entity.ts    : User {id uuid, firstName, lastName, email @Unique, password nullable, role enum User|Admin default User, phoneNumber/@Index, phoneVerified, googleId/@Index, provider local|google, tokenVersion int, passwordChangedAt, emailVerified, orders OneToMany, cart OneToOne} — only 2 roles
+auth               : JwtGuard (validates tokenVersion), RolesGuard via @Auth(...roles) (checks role === required), RegisterDto {firstName,lastName,email,password}, LoginDto {email,password}
+products           : GraphQL Product entity + resolver + ProductsService (create, createMany, findAll cached, findOne, update, updateMany FOR UPDATE, remove) — NO REST CRUD for dashboard, NO stock in Product (stock in Inventory)
+inventory          : Inventory {id, productId FK @Unique, stock int, reservedAmount int, available derived} + InventoryService (getInventory, checkAvailability, increaseStock, decreaseStock, reserve/release/completeSale stubs, decreaseStockForOrderMany) + InventoryController (GET /inventory/:productId, availability, increase/decrease) — no dashboard bulk stock CRUD, no low-stock query
+order              : Order {id, userId FK, status PENDING|COMPLETED|CANCELLED|FAILED, total, orderItems} + OrderCheckoutService (POST /order/checkout cart-only) + OrderCompletionService (POST /order/:id/complete) + OrderService.findAll/findOne owner-or-Admin paginated
+cart               : Cart {id, userId FK, cartItems OneToMany} + CartItem {id, cart, product eager, quantity} + CartService (getUserCart, addCartItem, increase/decrease, remove, clear, clearCartForCheckout via EntityManager)
+admin              : Only @Auth(Admin) checks; no Co-Admin, no Content Manager, no Fulfillment; no role upgrade/downgrade endpoint
+dashboard          : DOES NOT EXIST — no module, no metrics
+Gap                : no expanded roles, no POST /admin/users/:id/role, no REST products CRUD for dashboard, no dashboard stock bulk, no dashboard metrics
+```
+
+Manual E2E today uses GraphQL for products and `@Auth(Admin)` for order reads only; dashboard CRUD and metrics are not testable.
+
+## 19.1 Roles — expanded hierarchy and RBAC
+
+### 19.1.1 Role enum (new)
+
+```text
+UserRoles (src/modules/users/enum/roles.ts)
+  CUSTOMER = 'Customer'   // alias Buyer/User — default on register, can cart/checkout/order (also legacy 'User' kept as alias for compat)
+  ADMIN = 'Admin'         // full super-admin, can do everything including role management + stock + metrics
+  CO_ADMIN = 'CoAdmin'    // co-admin, can do most admin tasks except: cannot create/remove ADMIN, cannot downgrade ADMIN, cannot remove CO_ADMIN created by another ADMIN? (see §19.1.3)
+  CONTENT_MANAGER = 'ContentManager' // aka Editor — can CRUD products (create/update), read orders/carts, cannot mutate users/roles/stock, cannot see revenue metrics beyond product list
+  FULFILLMENT_STAFF = 'FulfillmentStaff' // can R orders/carts, update order status? (read-only V1), read stock, cannot mutate users/products/roles, can see fulfillment metrics
+
+Compatibility: keep User = CUSTOMER alias:
+  export enum UserRoles { User = 'Customer', Customer = 'Customer', Admin = 'Admin', CoAdmin = 'CoAdmin', ContentManager = 'ContentManager', FulfillmentStaff = 'FulfillmentStaff' }
+Migration: ALTER TYPE enum add values (if PG enum) or keep varchar check; add CHECK "role" IN ('Customer','Admin','CoAdmin','ContentManager','FulfillmentStaff') if varchar.
+```
+
+### 19.1.2 Permission matrix (V1)
+
+| Resource | Customer | ContentManager | FulfillmentStaff | CoAdmin | Admin |
+|----------|----------|----------------|------------------|---------|-------|
+| **Products** list `GET /products` (GraphQL) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Products** `POST|PATCH|DELETE /admin/products|/dashboard/products` | ❌ | ✅ (CRUD) | ❌ read-only | ✅ | ✅ |
+| **Stock** `GET|POST /admin/stock`, `PATCH /admin/stock/bulk` | ❌ | ❌ | ✅ read | ✅ `GET`+`PATCH` | ✅ |
+| **Users** `GET /admin/users`, `GET /admin/users/:id` | ❌ own `GET /users/me` only | ❌ | ❌ | ✅ read | ✅ read |
+| **Users** `PATCH /admin/users/:id/role` (upgrade/downgrade), `DELETE /admin/users/:id` | ❌ | ❌ | ❌ | ⚠️ limited (see §19.1.3) | ✅ full |
+| **Orders** `GET /admin/orders`, `GET /admin/orders/:id` | ❌ own `GET /order` only | ✅ read | ✅ read | ✅ read | ✅ read |
+| **Carts** `GET /admin/carts`, `GET /admin/carts/:id` | ❌ own `GET /cart` only | ✅ read | ✅ read | ✅ read | ✅ read |
+| **Dashboard metrics** `GET /admin/dashboard/*` | ❌ | ❌ only `low-stock`? (see §19.5) | ✅ `low-stock`+`abandonment` | ✅ all except `api-health`? | ✅ all 5 |
+| **Metrics** revenue/AOV | ❌ | ❌ | ❌ | ✅ | ✅ |
+
+V1 keeps `orders`/`carts` as **R** (read) for dashboard (no admin create/update via dashboard — orders come via checkout, carts via user flow). Product and user and stock are **CUD** where table says CRUD.
+
+Guards: `RolesGuard` already supports `@Auth(...roles)` — expand to check `role IN allowedRoles`. Add `RoleHierarchyGuard` optional for `CoAdmin` restrictions (see §19.1.3). All dashboard routes use `@Auth(Admin, CoAdmin, ContentManager, FulfillmentStaff)` with service-level fine check.
+
+### 19.1.3 Admin role manipulation rules
+
+```text
+POST /admin/users/:id/role { role: Customer|CoAdmin|ContentManager|FulfillmentStaff|Admin }
+  Auth: @Auth(Admin, CoAdmin) but service enforces:
+    - Only Admin can promote TO Admin or CoAdmin, or demote FROM Admin/CoAdmin
+    - CoAdmin can promote Customer → ContentManager/FulfillmentStaff and demote those back to Customer, but:
+        * 403 if target is Admin
+        * 403 if target is CoAdmin and actor is CoAdmin (only Admin can touch CoAdmin)
+        * 403 if dto.role === Admin and actor is CoAdmin
+    - Admin can set any role including self? No self-demotion guard: if actor === target and new role !== Admin → 400 self-demotion via this endpoint not allowed (use separate self endpoint or require second Admin)
+    - Downgrade: Admin → Customer etc. allowed, but last Admin protection: cannot demote last remaining Admin (count Admin WHERE role=Admin → 1 → 409 Last admin cannot be demoted)
+    - All role changes inside DataSource.transaction, FOR UPDATE on User row, audit log Logger.log with actorId→targetId role transition
+    - Idempotent: Customer→Customer → 200 no change
+
+DELETE /admin/users/:id  (admin remove user) — only Admin can delete any, CoAdmin can delete Customer/ContentManager/FulfillmentStaff but not Admin/CoAdmin; self-delete 403; last Admin delete 409
+GET /admin/users → paginated role filter ?role=Customer|Admin etc.
+```
+
+DTOs: `UpdateUserRoleDto { @IsEnum(UserRoles) role }`, `CreateProductDto` already exists for GraphQL but REST will reuse `CreateProductInput` + `stock` for inventory.
+
+## 19.2 Products — Dashboard CRUD (REST) vs GraphQL
+
+GraphQL `products` resolver stays for customer browsing (cached). **Dashboard REST** adds thin CRUD for ContentManager/Admin:
+
+| Method | Path | Auth | Body | Success | Errors |
+|--------|------|------|------|---------|--------|
+| POST | `/admin/products` | `ContentManager, CoAdmin, Admin` | `{name, slug?, description, price, stock?}` | `201 Product + Inventory` (same as `ProductsService.create` with `inventoryService.createForProduct`) | `400` validation, `409` duplicate name/slug, `403` |
+| GET | `/admin/products` | `ContentManager, FulfillmentStaff, CoAdmin, Admin` | query `?page,limit,search?,role?` | `200 {data, meta}` paginated | `401` |
+| GET | `/admin/products/:id` | same | — | `200 Product + Inventory stock` | `404` |
+| PATCH | `/admin/products/:id` | `ContentManager, CoAdmin, Admin` | `{name?, description?, price?}` (no stock here, use stock endpoints) | `200` | `409` duplicate, `403` |
+| DELETE | `/admin/products/:id` | `CoAdmin, Admin` | — | `200` | `403` if ContentManager tries delete |
+| PATCH | `/admin/products/bulk` | `ContentManager, CoAdmin, Admin` | `[{id, name?, price?}]` | `200` like `updateMany` FOR UPDATE | `404` missing ids |
+
+All via `ProductsService` (no new logic, just REST wrapper) + `InventoryService` for `stock` on create. `stock` via `admin/stock` separately (see §19.4).
+
+## 19.3 Users — Dashboard CRUD
+
+| Method | Path | Auth | Body | Success |
+|--------|------|------|------|---------|
+| GET | `/admin/users` | `CoAdmin, Admin` | `?page,limit,role?,search?` | `200 {data: User[], meta}` paginated `createdAt DESC`, `role` filter |
+| GET | `/admin/users/:id` | `CoAdmin, Admin` | — | `200 User` |
+| PATCH | `/admin/users/:id/role` | `Admin` + limited `CoAdmin` | `{role}` | `200 User` updated role + `tokenVersion++?` no (keep JWT valid but next request will see new role via DB; tokenVersion not bumped on role change — or bump to force re-login? Decision: bump tokenVersion on role change so JWT `role` claim refreshes — see §19.6) |
+| DELETE | `/admin/users/:id` | `Admin` + limited `CoAdmin` | — | `200` deleted |
+| GET | `/users/me` | `JwtGuard` | — | `200` own User |
+
+Service: `UsersService` owns `findUserById`, `updateUserRole(manager, userId, newRole)` transactional `FOR UPDATE`, last-admin guard, audit.
+
+## 19.4 Orders, Carts, Stock — Dashboard R
+
+| Method | Path | Auth | Body | Success |
+|--------|------|------|------|---------|
+| GET | `/admin/orders` | `FulfillmentStaff, ContentManager, CoAdmin, Admin` | `?page,limit,status?,userId?,from?,to?` | `200 {data: Order[], meta}` + `reservationId` link, date-range filter on `created_at` |
+| GET | `/admin/orders/:id` | same | — | `200 Order + items + reservation` |
+| GET | `/admin/carts` | same | `?page,limit` | `200 {data: Cart[], meta}` + `user` + `cartItems` + `product` |
+| GET | `/admin/carts/:id` | same | — | `200 Cart` |
+| GET | `/admin/stock` | `FulfillmentStaff, CoAdmin, Admin` | `?lowThreshold?` | `200 Inventory[]` |
+| PATCH | `/admin/stock/:inventoryId` | `CoAdmin, Admin` | `{stockDelta? , stockAbsolute?}` | `200 Inventory` (`stock+=delta` or `stock=absolute`, check `reservedAmount <= stock`, `stock>=0`) |
+| POST | `/admin/stock/bulk` | `CoAdmin, Admin` | `{updates:[{inventoryId, stockDelta|stockAbsolute}]}` | `200 Inventory[]` transactional `FOR UPDATE` sorted ids |
+
+Stock DTOs: `UpdateStockDto { @IsOptional @IsInt stockDelta, @IsOptional @IsInt stockAbsolute }` XOR check, `BulkUpdateStockDto`. All via `InventoryService` (reuse `increaseStock`/`decreaseStock` but now bulk transactional for dashboard).
+
+## 19.5 Dashboard Metrics — Separate Module (5 metrics)
+
+**Module**: `src/modules/dashboard/dashboard.module.ts` — **separate module** per request.
+
+```text
+dashboard/
+  dashboard.module.ts  // imports TypeOrmModule.forFeature([Order, OrderItem, Inventory, Cart, Product, User]) OR imports OrderModule, InventoryModule, CartModule via exported services (preferred per AGENTS.md — service-only collaboration). Decision: import via services where possible, but for metrics raw aggregations use manager.getRepository + QueryBuilder for performance (allowed per plan — no cross-module repo violation if dashboard is aggregator? Must justify: dashboard is read-only aggregator, so direct repo via manager is scoped. Alternative: add method to each domain service (getRevenue...). Plan chooses direct QueryBuilder for AOV join performance, but keep stock alert via InventoryService.getLowStock() to reuse.
+  dashboard.service.ts // 5 metric methods + date-range helper
+  dashboard.controller.ts // GET /admin/dashboard/* thin, @Auth(Admin, CoAdmin) etc. with per-metric guard fine-check
+  dto/dashboard-query.dto.ts // { from?: ISO string, to?: ISO string, period?: 'day'|'week'|'month', lowThreshold?: int }
+```
+
+**Date-range handling** (shared helper `parseRange(dto): {from: Date, to: Date}`): `from`/`to` ISO, default `30d` (`to=NOW()`, `from=NOW()-30d`), max range `1y` (clamp + `400` if exceed), `period` bucket for chart grouping. All aggregations filter `Order.status=COMPLETED` for revenue (not PENDING|CANCELLED|FAILED) and `Order.created_at BETWEEN :from AND :to`.
+
+### Metric 1 — 💰 Total Revenue & Sales Count (baseline aggregation)
+
+- `GET /admin/dashboard/revenue?from=2024-01-01&to=2024-01-31`
+- Query: `SELECT COALESCE(SUM(total),0) as revenue, COUNT(*) as salesCount FROM "order" WHERE status='COMPLETED' AND created_at BETWEEN :from AND :to`
+- Backend Value: basic `SUM`/`COUNT` + date-range, index `order.status` + `order.created_at` (@Index), proven not to tank with `EXPLAIN`.
+- Response: `200 { revenue: int, salesCount: int, currency:"EGP", from, to, period }` + optional `chart: [{date, revenue, count}]` when `period` supplied (group by `DATE_TRUNC(period, created_at)`).
+
+### Metric 2 — 🛒 Average Order Value (AOV = Total Revenue / Total Orders)
+
+- `GET /admin/dashboard/aov?from=&to=`
+- Query: same as revenue but `aov = revenue / NULLIF(salesCount,0)` — handles `salesCount=0` → `0` not division-by-zero (COALESCE). For per-day AOV: join per `Order.created_at` bucket.
+- Backend Value: multi-step arithmetic + relational `Order`→`OrderItem` not needed (total already denormalized), but verify `total = Σ OrderItem.quantity*unit_price` consistency via join variant for proof: `SELECT SUM(oi.quantity*oi.unit_price) FROM order_item oi JOIN order o ON oi.orderId=o.id WHERE o.status='COMPLETED' ...`
+- Response: `200 { aov: number (2 decimals), revenue, salesCount }`.
+
+### Metric 3 — 📦 Low-Stock / Out-of-Stock Alert Counts (inventory logistics)
+
+- `GET /admin/dashboard/low-stock?threshold=5&outOfStockThreshold=0`
+- Query: `SELECT COUNT(*) FILTER (WHERE stock - reservedAmount <= :threshold) as lowCount, COUNT(*) FILTER (WHERE stock - reservedAmount = 0) as outCount FROM Inventory` + list `SELECT id, productId, stock, reservedAmount, available FROM Inventory WHERE available <= :threshold ORDER BY available ASC` (limit 100).
+- Backend Value: `available = stock - reservedAmount` derived correctness, `reservedAmount <= stock` invariant, showcases `Inventory` model.
+- Response: `200 { lowCount, outCount, threshold, items:[{inventoryId, productId, stock, reservedAmount, available}], totalInventories }`.
+
+### Metric 4 — 📉 Cart Abandonment Rate (Carts vs Orders, temporal)
+
+- Definition: `% of carts created that never converted to Order COMPLETED within abandonment window (24h untouched)`. Formula `abandoned = carts that have existed >24h with no matching Order COMPLETED for same user AND no recent update; abandonmentRate = abandoned / totalCarts * 100`.
+- `GET /admin/dashboard/abandonment?windowHours=24&from=&to=`
+- Query (V1 simple): 
+  ```sql
+  WITH carts AS (SELECT id, userId, created_at, updated_at FROM cart WHERE created_at BETWEEN :from AND :to),
+  orders_completed AS (SELECT userId, created_at FROM "order" WHERE status='COMPLETED' AND created_at BETWEEN :from AND :to)
+  SELECT COUNT(DISTINCT c.id) as totalCarts,
+         COUNT(DISTINCT c.id) FILTER (WHERE NOT EXISTS (SELECT 1 FROM orders_completed o WHERE o.userId=c.userId AND o.created_at >= c.created_at AND o.created_at <= c.created_at + interval '24 hours')) as abandoned
+  FROM carts c
+  ```
+  Alternative simpler (per constitution kpi): `abandonmentRate = (carts with 0 COMPLETED orders ever) / totalCarts *100` — but windowed is more accurate. V1 chooses *carts untouched 24h + no COMPLETED order* as abandoned.
+- Backend Value: session/cart lifecycle, temporal `updated_at`, relation `Cart`↔`Order` via `userId`.
+- Response: `200 { totalCarts, abandonedCarts, abandonmentRate: 0-100 (2 decimals), windowHours, from, to }`.
+
+### Metric 5 — 🛠️ API Health & Error Rate (System Metric)
+
+- Definition: `% of HTTP responses that are 4xx or 5xx` over window.
+- `GET /admin/dashboard/health?from=&to=`
+- Source: V1 `in-memory RequestLoggingMiddleware` or `Logger` interceptor storing `requestLog {method, path, status, duration}` in `cacheManager` or PG table `api_request_log` (future). Simplest V1: piggyback on existing `AllExceptionsFilter` + middleware that increments Redis counters `api:health:<day>:<statusBucket>` (`2xx,4xx,5xx`) with `INCR` + `EXPIRE 7d`, then aggregates: `errorRate = (4xx+5xx)/total*100`.
+- Query: `SELECT (SUM(CASE WHEN status>=400 THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*),0))*100 as errorRate, COUNT(*) as total, COUNT(*) FILTER (WHERE status<400) as success, COUNT(*) FILTER (WHERE status>=500) as serverError FROM request_log WHERE createdAt BETWEEN :from AND :to` OR Redis `MGET` aggregation.
+- Backend Value: middleware, error tracking, not happy-path only.
+- Response: `200 { errorRate, totalRequests, successCount, clientError(4xx), serverError(5xx), from, to }` + optional `perRoute:[{path, errorRate}]` later.
+- Guard: only `Admin`/`CoAdmin` (not Customer/ContentManager).
+
+All metrics support `?from&to&` date-range (default last 30d) and `period` grouping where chart makes sense. All via `DataSource.manager` QueryBuilder, never `order.total` trusted without `CHECK`.
+
+## 19.6 Security, module boundaries, config
+
+* [ ] `RolesGuard` expanded to new enum; `@Auth()` usage per matrix above; service-level fine check for `CoAdmin` limited role changes (last Admin guard + audit log).
+* [ ] On role change, increment `User.tokenVersion` (so old JWT with old `role` claim is revoked and client must `POST /auth/refresh` per Phase 17 to get new token with new role) — prevents `role` claim staleness.
+* [ ] `Product` slug/name `@Unique` still enforced; dashboard bulk `PATCH /admin/products/bulk` uses `FOR UPDATE` + `ON CONFLICT` handling → `409`.
+* [ ] Stock `reservedAmount <= stock` + `stock>=0` DB CHECK backstop, mapped `23514 → 409`.
+* [ ] Metrics queries use `COALESCE`/`NULLIF` for zero-division, `EXPLAIN` shows index usage (`order.created_at` + `order.status`, `inventory` scan, `cart.userId`), pagination `skip=(page-1)*limit` where needed.
+* [ ] Dashboard module imports: `TypeOrmModule.forFeature([Order, OrderItem, Inventory, Cart, Product, User, RefreshToken])` OR reuses domain services (`ProductsService`, `InventoryService`, `OrderService`, `CartService`, `UsersService`) — **prefer service-only** per `AGENTS.md` §2, but for `revenue SUM` direct `manager` is allowed with comment `// Dashboard read-only aggregation, not business mutation, hence direct QueryBuilder scoped to read`.
+* [ ] No new Redis authoritative truth for metrics — Redis only for `api:health` counters (ephemeral) + rate-limit; PostgreSQL is source for revenue/stock/cart.
+* [ ] Env: `DASHBOARD_LOW_STOCK_THRESHOLD=5`, `DASHBOARD_ABANDONMENT_WINDOW_HOURS=24`, `API_HEALTH_LOG_TTL=7d`.
+
+## 19.7 Implementation Plan (Spec Kit tasks, before Testing)
+
+```text
+1. Spec: /speckit.specify dashboard (roles + CRUD + metrics) → clarify Q&A (role names Customer alias User, CoAdmin limits, stock DTO XOR, metrics date-range defaults, abandonment definition, health source)
+2. Design: data-model.md (UserRoles enum 5 values, dashboard.aggregations, stock DTO), research.md (RolesGuard hierarchy vs simple IN check, QueryBuilder AOV vs total column, abandonment window 24h, health Redis vs PG table)
+3. Contract: OpenAPI for roles PATCH /admin/users/:id/role, products/stock CRUD, carts/orders reads, 5 metrics GET /admin/dashboard/*
+4. Migration 1: UserRoles enum widen (add CoAdmin, ContentManager, FulfillmentStaff, keep User as Customer alias, CHECK, last Admin guard not DB but service), no new table for dashboard (metrics are queries), optional api_request_log table for health if PG path chosen
+5. Module: dashboard.module.ts (separate module, imports OrderModule/InventoryModule/CartModule/ProductsModule/UsersModule OR TypeOrmModule.forFeature read-only) + dashboard.service.ts (5 metric methods + parseRange helper) + dashboard.controller.ts (thin, @Auth per metric matrix, rate-limited? no throttle beyond existing)
+6. Roles: Update UserRoles enum, update RolesGuard to support 5 roles, implement PATCH /admin/users/:id/role transactional FOR UPDATE + last Admin + audit + tokenVersion++ , DELETE /admin/users/:id with guard
+7. Products: REST wrapper POST|GET|PATCH|DELETE /admin/products (thin, delegates to ProductsService + InventoryService), bulk PATCH
+8. Stock: GET|PATCH|POST /admin/stock + bulk transactional sorted ids + CHECK 23514→409, low-stock query via InventoryService
+9. Metrics: revenue/sales SUM+COUNT, AOV NULLIF, low-stock FILTER, abandonment windowed carts vs orders join, health Redis/Middleware counters → QueryBuilder
+10. Unit tests: validateRoleTransition matrix (CoAdmin→Admin 403, Admin→Customer 200, last Admin 409), roles guard, products CRUD duplicate 409, stock DTO XOR 400, metrics zero-division AOV 0, abandonment 100% when no orders
+11. Integration tests: real PG — role upgrade tokenVersion++ revokes old JWT (401 until refresh), low-stock count matches Inventory, revenue date-range filtering, cart abandonment window 24h, concurrent role change last Admin 409
+12. E2E: admin register→login→POST /admin/products→GET /admin/dashboard/revenue?from=&to= → PATCH role Customer→ContentManager → GET /admin/dashboard/low-stock
+13. Docs: docs/architecture/modules.md, docs/decisions/ADR-dashboard.md, Swagger, Postman, docs/manual-e2e-test-flow.md §2-6 updated
+```
+
+## 19.8 Testing (must cover)
+
+**Unit (mock repos, mock Redis):**
+* [ ] Roles: Admin can set any, CoAdmin cannot touch Admin/CoAdmin (403), last Admin demote 409, idempotent same role 200
+* [ ] Products: duplicate name 409, ContentManager can create 201 but Customer 403
+* [ ] Stock: increase +10, decrease below reserved → 409, bulk sorted FOR UPDATE
+* [ ] Metrics: revenue SUM for date range, AOV 0 when sales 0 (NULLIF), low-stock threshold 5, abandonment 0/100 edge, health 0% no errors
+
+**Integration (real PostgreSQL, real Redis when available):**
+* [ ] DB: UserRoles 5 values @Check, User role FK, Products slug unique
+* [ ] Transaction: concurrent PATCH role same user → one wins FOR UPDATE, last Admin 409 not double-demoted
+* [ ] Metrics: 3 orders COMPLETED in Jan → revenue SUM correct, AOV 33, low-stock count matches Inventory, cart abandonment window
+
+**E2E (supertest):**
+* [ ] Admin `POST /admin/users/:id/role {role: ContentManager}` → `GET /admin/dashboard/low-stock` as new ContentManager 200 but `GET /admin/dashboard/revenue` 403 (role matrix)
+* [ ] Customer `POST /cart` → no order 24h → `GET /admin/dashboard/abandonment` shows 100%
+
+## 19.9 Exit Criteria
+
+Dashboard is complete when:
+
+```text
+[x] POST|GET|PATCH|DELETE /admin/products (CoAdmin/Admin + ContentManager CRUD where matrix allows) with Inventory stock creation and bulk FOR UPDATE, 409 on duplicate name
+[x] GET /admin/users paginated role filter + PATCH /admin/users/:id/role (Admin full, CoAdmin limited, last Admin 409, tokenVersion++ + audit) + DELETE with guard
+[x] GET /admin/orders + /admin/carts R paginated, GET /admin/stock + PATCH bulk stock transactional sorted + CHECK 23514→409
+[x] GET /admin/dashboard/revenue?from=&to= + ?period day|week|month returns {revenue, salesCount, chart} via SUM+COUNT WHERE status='COMPLETED' BETWEEN
+[x] GET /admin/dashboard/aov?from=&to= returns {aov, revenue, salesCount} with NULLIF zero-division
+[x] GET /admin/dashboard/low-stock?threshold=5 returns {lowCount, outCount, items} via available <= threshold FILTER
+[x] GET /admin/dashboard/abandonment?windowHours=24 returns {totalCarts, abandonedCarts, abandonmentRate} windowed carts vs COMPLETED orders join
+[x] GET /admin/dashboard/health?from=&to= returns {errorRate, totalRequests, 4xx,5xx} via middleware/Redis counters or pg log
+[x] Dedicated dashboard.module.ts (separate module, read-only aggregator) thin controllers, @Auth per metric matrix, no cross-module @InjectRepository of another module's entity beyond read scope (or via services)
+[x] Unit 15+ and integration 10+ and E2E 4+ flows PASS, including concurrent role change last Admin + low-stock EXPLAIN index
+```
+
+## 19.10 Out of Scope (this phase)
+
+* Frontend dashboard UI (React/Vue) — backend APIs only, frontend consumes Swagger.
+* Per-user order history export CSV (future, add GET /admin/orders/export).
+* Real-time websocket push for low-stock alerts (V1 polling GET, future BullMQ pub).
+* Fine-grained per-product stock reservation history chart (V1 alert counts only).
+* API health per-route breakdown beyond total (V1 total + 4xx/5xx, per-route later).
+
+---
+
 # Phase 14 — Testing
 
 **Status: NOT DONE**
@@ -2241,6 +2498,8 @@ Deferred to Phase 16.x / Phase 17:
 
 [ ] Email service (Future, Phase 18 before Testing) — verification email after register (GET|POST /auth/verify-email, POST /auth/resend-verification, EmailVerificationToken hash 24h, usedAt), password-reset email upgrade (actual sending), notifications for sales/new products (POST /admin/notifications/sales, PATCH /users/me/preferences marketingOptIn, BullMQ bulk + Redis dedup + NotificationLog, EmailProvider smtp/ses/noop) — see Phase 18 spec
 
+[ ] Dashboard, RBAC & Metrics (Future, Phase 19 before Testing) — separate dashboard.module, UserRoles {Customer/Admin/CoAdmin/ContentManager/FulfillmentStaff} with Admin full / CoAdmin limited role management + last Admin guard + tokenVersion++ , CRUD products (ContentManager/Admin), CRUD users, R orders/carts, CRUD stock (PATCH bulk FOR UPDATE, low-stock query), metrics: revenue/sales SUM, AOV NULLIF, low-stock FILTER, cart abandonment windowed join, API health Redis/pg counters — see Phase 19 spec
+
 [ ] Async events
 [ ] Notification workers
 [ ] RabbitMQ/BullMQ responsibilities
@@ -2325,7 +2584,7 @@ Phase 13
 Database Optimization
 ```
 
-Refresh token + Email (future, before final testing — see Phases 17-18):
+Refresh token + Email + Dashboard (future, before final testing — see Phases 17-19):
 
 ```text
 Phase 17
@@ -2333,6 +2592,9 @@ Refresh Token (Future) — POST /auth/refresh rotation, logout, tokenVersion rev
         ↓
 Phase 18
 Email Service (Future) — verify after register, reset email, sales/news notifications (BullMQ bulk)
+        ↓
+Phase 19
+Dashboard, RBAC & Metrics (Future) — separate dashboard module, role hierarchy, CRUD products/users/stock, 5 metrics (revenue, AOV, low-stock, abandonment, health)
         ↓
 Phase 14
 Complete Testing
