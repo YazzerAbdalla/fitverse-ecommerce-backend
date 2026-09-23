@@ -14,7 +14,7 @@ and [`skills/`](./skills); do not duplicate that detail here.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at `specs/011-async-events-notifications/plan.md` (Phase 11 — Transactional Outbox / Asynchronous Events).
+at `specs/012-reliability-idempotency/plan.md` (Phase 12 — Reliability / Idempotency).
 <!-- SPECKIT END -->
 
 ---
