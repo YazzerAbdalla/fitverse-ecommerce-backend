@@ -54,3 +54,7 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Multi-agent factory worktrees (isolated per-agent working directories)
+# Agents work in worktrees/feature-alpha and worktrees/feature-beta — do not commit their combined state
+/worktrees/
