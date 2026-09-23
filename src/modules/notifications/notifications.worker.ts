@@ -2,8 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { EventPattern, Payload } from '@nestjs/microservices';
 
 /**
- * This worker is responsible for notification consumption.
+ * This worker is responsible for verification consumption (Phase 11 stub).
  * It handles at-least-once domain events without mutating business state.
+ * Duplicate event delivery is possible (at-least-once); this verification consumer tolerates duplicates
+ * (in-memory Set) and performs no business mutation, so persistent idempotency is not required.
+ * SENT in outbox_event means published to RabbitMQ exchange, not that this consumer processed it.
+ * @deprecated Use EventVerificationConsumer in event-verification.consumer.ts — kept for backward compat.
  */
 @Injectable()
 export class NotificationWorker {

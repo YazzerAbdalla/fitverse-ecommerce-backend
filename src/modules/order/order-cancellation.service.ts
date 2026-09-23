@@ -163,17 +163,15 @@ export class OrderCancellationService {
       );
     }
 
-    // 4. OutboxEvent INSERT inside same transaction — no client.emit
+    // 4. OutboxEvent INSERT inside same transaction — OutboxService owns envelope
     if (this.outboxService) {
       try {
         await this.outboxService.createEvent(manager, {
           eventType: 'order.cancelled',
           aggregateType: 'Order',
           aggregateId: orderId,
-          payload: {
-            version: 1,
-            eventType: 'order.cancelled',
-            correlationId: corrId,
+          correlationId: corrId,
+          data: {
             orderId,
             userId: order.userId,
             previousStatus: 'PENDING',
@@ -181,7 +179,6 @@ export class OrderCancellationService {
             reason,
             reservationId: reservation?.id ?? null,
           },
-          correlationId: corrId,
         });
       } catch (e: any) {
         this.logger.warn(

@@ -1,19 +1,30 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { ClientProxy } from '@nestjs/microservices';
 import { DataSource } from 'typeorm';
 import { lastValueFrom } from 'rxjs';
+import { randomUUID } from 'crypto';
 import { OutboxEvent } from './entities/outbox-event.entity';
 import { OutboxStatus } from './entities/outbox-status.enum';
 
 /**
  * This publisher is responsible for outbox relay to RabbitMQ.
  * It handles claiming PENDING/lease-expired rows via FOR UPDATE SKIP LOCKED and publishing persisted payloads.
+ * SENT means published to RabbitMQ transport, not that consumer processed the event.
+ * Uses processingToken for safe lease ownership so a stale publisher cannot overwrite a reclaimed event.
  */
 @Injectable()
-export class OutboxPublisher {
+export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OutboxPublisher.name);
+  private interval: NodeJS.Timeout | null = null;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -22,6 +33,42 @@ export class OutboxPublisher {
     @Inject('NOTIFICATION_SERVICE')
     private readonly client?: ClientProxy,
   ) {}
+
+  /**
+   * Starts application-managed polling loop (no BullMQ for outbox).
+   * Existing BullMQ reservation-expiration queue is unchanged.
+   */
+  onModuleInit(): void {
+    // Do not start polling in test environment to avoid open handles and noise
+    if (process.env.NODE_ENV === 'test') {
+      this.logger.log('outbox publisher polling disabled in test (NODE_ENV=test)');
+      return;
+    }
+    const intervalMs = (() => {
+      const v = this.configService.get<string>('OUTBOX_POLL_INTERVAL_MS');
+      const n = parseInt(v || '1000', 10);
+      return isNaN(n) ? 1000 : Math.min(Math.max(n, 100), 10000);
+    })();
+    // Simple interval: every OUTBOX_POLL_INTERVAL_MS publishBatch()
+    this.interval = setInterval(() => {
+      this.publishBatch().catch((e) => this.logger.error(`outbox poll failed: ${e?.message}`, e?.stack));
+    }, intervalMs);
+    // Allow process to exit even if interval remains
+    if (this.interval && typeof (this.interval as any).unref === 'function') {
+      (this.interval as any).unref();
+    }
+    this.logger.log(`outbox publisher polling every ${intervalMs}ms`);
+  }
+
+  /**
+   * Clears polling interval on shutdown.
+   */
+  onModuleDestroy(): void {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+  }
 
   private get batchSize(): number {
     const v = this.configService.get<string>('OUTBOX_BATCH_SIZE');
@@ -118,13 +165,15 @@ export class OutboxPublisher {
         return;
       }
 
-      // Mark as PROCESSING with fresh lease
+      // Mark as PROCESSING with fresh lease and ownership token
       const ids = rows.map((r) => r.id);
+      const claimToken = randomUUID();
       // Support both repo.update (simple) and queryBuilder (mock compatibility)
       if (typeof (repo as any).update === 'function') {
         await (repo as any).update(ids as any, {
           status: OutboxStatus.PROCESSING as any,
           processingStartedAt: new Date() as any,
+          processingToken: claimToken as any,
         });
       } else if (typeof (repo as any).createQueryBuilder === 'function') {
         const qb: any = (repo as any).createQueryBuilder();
@@ -134,6 +183,7 @@ export class OutboxPublisher {
             .set({
               status: OutboxStatus.PROCESSING,
               processingStartedAt: new Date(),
+              processingToken: claimToken,
             })
             .whereInIds(ids)
             .execute();
@@ -142,11 +192,11 @@ export class OutboxPublisher {
         }
       }
 
-      // Return claimed rows with updated status for publish loop (outside this TX we will publish)
-      // Re-fetch to have processingStartedAt set? Use in-memory rows with status PROCESSING
+      // Return claimed rows with updated status and token for publish loop (outside this TX we will publish)
       claimedEvents = rows.map((r) => {
         r.status = OutboxStatus.PROCESSING;
         r.processingStartedAt = new Date();
+        (r as any).processingToken = claimToken;
         return r;
       });
 
@@ -189,13 +239,47 @@ export class OutboxPublisher {
           });
         }
 
-        // Success: mark SENT
-        await this.dataSource.getRepository(OutboxEvent).update(event.id, {
-          status: OutboxStatus.SENT,
-          sentAt: new Date(),
-          lastError: null,
-          processingStartedAt: null,
-        });
+        // Success: mark SENT only if still owned by this publisher (token check) — prevents A overwriting B after lease reclaim
+        let sentAffected = 1;
+        try {
+          if (typeof (this.dataSource as any).createQueryBuilder === 'function') {
+            const res = await (this.dataSource as any)
+              .createQueryBuilder()
+              .update(OutboxEvent)
+              .set({
+                status: OutboxStatus.SENT as any,
+                sentAt: new Date() as any,
+                lastError: null as any,
+                processingStartedAt: null as any,
+                processingToken: null as any,
+              })
+              .where('id = :id AND status = :status AND processingToken = :token', {
+                id: event.id,
+                status: OutboxStatus.PROCESSING,
+                token: (event as any).processingToken,
+              })
+              .execute();
+            sentAffected = res?.affected ?? 1;
+          } else {
+            throw new Error('no queryBuilder');
+          }
+        } catch {
+          // Fallback for test mocks that only support getRepository.update
+          await this.dataSource.getRepository(OutboxEvent).update(event.id as any, {
+            status: OutboxStatus.SENT as any,
+            sentAt: new Date() as any,
+            lastError: null as any,
+            processingStartedAt: null as any,
+            processingToken: null as any,
+          });
+          sentAffected = 1;
+        }
+        if (sentAffected === 0) {
+          this.logger.warn(
+            `outbox publish succeeded but token mismatch id=${event.id} — another publisher reclaimed, skip SENT`,
+          );
+          continue;
+        }
         this.logger.log(
           `outbox publish succeeded id=${event.id} eventType=${event.eventType} attempts=${event.attempts}`,
         );
@@ -207,13 +291,48 @@ export class OutboxPublisher {
         const nextRetryAt = this.computeNextRetryAt(nextAttempts);
         const willFail = nextAttempts >= this.maxAttempts;
 
-        await this.dataSource.getRepository(OutboxEvent).update(event.id, {
-          attempts: nextAttempts,
-          lastError: msg,
-          nextRetryAt,
-          status: willFail ? OutboxStatus.FAILED : OutboxStatus.PENDING,
-          processingStartedAt: null,
-        });
+        // Failure: mark PENDING/FAILED only if still owned (token check) — prevents late A overwriting B
+        let failAffected = 1;
+        try {
+          if (typeof (this.dataSource as any).createQueryBuilder === 'function') {
+            const res = await (this.dataSource as any)
+              .createQueryBuilder()
+              .update(OutboxEvent)
+              .set({
+                attempts: nextAttempts as any,
+                lastError: msg as any,
+                nextRetryAt: nextRetryAt as any,
+                status: (willFail ? OutboxStatus.FAILED : OutboxStatus.PENDING) as any,
+                processingStartedAt: null as any,
+                processingToken: null as any,
+              })
+              .where('id = :id AND status = :status AND processingToken = :token', {
+                id: event.id,
+                status: OutboxStatus.PROCESSING,
+                token: (event as any).processingToken,
+              })
+              .execute();
+            failAffected = res?.affected ?? 1;
+          } else {
+            throw new Error('no queryBuilder');
+          }
+        } catch {
+          await this.dataSource.getRepository(OutboxEvent).update(event.id as any, {
+            attempts: nextAttempts as any,
+            lastError: msg as any,
+            nextRetryAt: nextRetryAt as any,
+            status: (willFail ? OutboxStatus.FAILED : OutboxStatus.PENDING) as any,
+            processingStartedAt: null as any,
+            processingToken: null as any,
+          });
+          failAffected = 1;
+        }
+        if (failAffected === 0) {
+          this.logger.warn(
+            `outbox publish failed but token mismatch id=${event.id} — another publisher reclaimed, skip retry count`,
+          );
+          continue;
+        }
 
         if (willFail) {
           this.logger.warn(

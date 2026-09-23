@@ -174,7 +174,7 @@ export class OrderCompletionService {
 
     // 5. No items? Still allow COMPLETED without inventory mutation (edge)
     if (!reservation.items || reservation.items.length === 0) {
-      // OutboxEvent INSERT inside same transaction — no client.emit
+      // OutboxEvent INSERT inside same transaction — OutboxService owns envelope (version, eventId, occurredAt, correlationId)
       const corrIdNoItems = correlationId || randomUUID();
       if (this.outboxService) {
         try {
@@ -182,10 +182,8 @@ export class OrderCompletionService {
             eventType: 'order.completed',
             aggregateType: 'Order',
             aggregateId: orderId,
-            payload: {
-              version: 1,
-              eventType: 'order.completed',
-              correlationId: corrIdNoItems,
+            correlationId: corrIdNoItems,
+            data: {
               orderId,
               userId: currentOrder.userId,
               previousStatus: 'PENDING',
@@ -194,7 +192,6 @@ export class OrderCompletionService {
               items: [],
               completedAt: new Date().toISOString(),
             },
-            correlationId: corrIdNoItems,
           });
         } catch (e: any) {
           this.logger.warn(
@@ -264,7 +261,7 @@ export class OrderCompletionService {
       throw e;
     }
 
-    // 9. OutboxEvent INSERT inside same transaction — no client.emit
+    // 9. OutboxEvent INSERT inside same transaction — OutboxService owns envelope
     const corrId = correlationId || randomUUID();
     if (this.outboxService) {
       try {
@@ -272,10 +269,8 @@ export class OrderCompletionService {
           eventType: 'order.completed',
           aggregateType: 'Order',
           aggregateId: orderId,
-          payload: {
-            version: 1,
-            eventType: 'order.completed',
-            correlationId: corrId,
+          correlationId: corrId,
+          data: {
             orderId,
             userId: currentOrder.userId,
             previousStatus: 'PENDING',
@@ -287,7 +282,6 @@ export class OrderCompletionService {
             })),
             completedAt: new Date().toISOString(),
           },
-          correlationId: corrId,
         });
       } catch (e: any) {
         this.logger.warn(

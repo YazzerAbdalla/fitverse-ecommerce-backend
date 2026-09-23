@@ -9,18 +9,19 @@
 ```text
 OutboxEvent
 -----------
-id                  uuid PK @PrimaryGeneratedColumn('uuid') // eventId, stable dedup key
+id                  uuid PK @PrimaryGeneratedColumn('uuid') // eventId, stable dedup key, payload.eventId === id
 eventType           varchar(64)  @Index  // 'order.created' | 'order.completed' | 'order.cancelled' | 'reservation.expired'
 aggregateType       varchar(32)  @Index  // 'Order' | 'Reservation'
 aggregateId         uuid         @Index  // Order.id or Reservation.id (no FK, see D6)
-payload             jsonb  NOT NULL     // {version:1, eventId:id, eventType, occurredAt:ISO, correlationId, ...business} PII-free
+payload             jsonb  NOT NULL     // {version:1, eventId:id, eventType, occurredAt:ISO, correlationId, data:{...business}} PII-free, OutboxService owns envelope
 status              enum OutboxStatus {PENDING, PROCESSING, SENT, FAILED} default PENDING @Index (composite)
 attempts            int default 0  CHECK (attempts >= 0)
 nextRetryAt         timestamptz NOT NULL default NOW() @Index (composite)
 lastError           varchar(1000) nullable
 processingStartedAt timestamptz nullable // set when claimed PROCESSING, for lease reclaim
+processingToken     varchar(36) nullable // UUID ownership token for safe lease reclaim (Correction 2)
 createdAt           timestamptz @CreateDateColumn @Index
-sentAt              timestamptz nullable // set when SENT
+sentAt              timestamptz nullable // set when SENT (means published to RabbitMQ exchange, not consumed)
 ```
 
 **TypeORM** (`src/modules/outbox/entities/outbox-event.entity.ts`):
@@ -34,24 +35,25 @@ export class OutboxEvent {
   @Column({type: 'varchar', length: 64}) @Index() eventType: string;
   @Column({type: 'varchar', length: 32}) aggregateType: string;
   @Column({type: 'uuid'}) @Index() aggregateId: string;
-  @Column({type: 'jsonb'}) payload: Record<string, unknown>; // {version, eventId, eventType, occurredAt, correlationId, orderId, userId, ...}
+  @Column({type: 'jsonb'}) payload: Record<string, unknown>; // {version:1, eventId:id, eventType, occurredAt, correlationId, data:{orderId,userId,...}} OutboxService owns envelope
   @Column({type: 'enum', enum: OutboxStatus, default: OutboxStatus.PENDING}) status: OutboxStatus;
   @Column({type: 'int', default: 0}) attempts: number;
   @Column({type: 'timestamptz', default: () => 'NOW()'}) nextRetryAt: Date;
   @Column({type: 'varchar', length: 1000, nullable: true}) lastError: string | null;
   @Column({type: 'timestamptz', nullable: true}) processingStartedAt: Date | null;
+  @Column({type: 'varchar', length: 36, nullable: true}) processingToken: string | null; // ownership token for lease reclaim
   @CreateDateColumn({type: 'timestamptz'}) createdAt: Date;
-  @Column({type: 'timestamptz', nullable: true}) sentAt: Date | null;
+  @Column({type: 'timestamptz', nullable: true}) sentAt: Date | null; // SENT = published to RabbitMQ exchange, not consumed
 }
 export enum OutboxStatus { PENDING='PENDING', PROCESSING='PROCESSING', SENT='SENT', FAILED='FAILED' }
 ```
 
 ### Constraints & Invariants
 
-- `payload` MUST contain `payload.version==1`, `payload.eventId==id`, `payload.eventType==eventType`, `payload.occurredAt` ISO, `payload.correlationId` (from `X-Request-Id`/`X-Correlation-Id` or `randomUUID()` at controller). PII-free: only `orderId, userId, total, currency, items[{productId,inventoryId,quantity,unit_price}], reservationId, expiresAt, ...` — no `email`/`Authorization`.
-- `status` lifecycle: `PENDING → PROCESSING → SENT` (success) or `PROCESSING → PENDING` (retry, `attempts++`, `nextRetryAt=NOW()+base*2^(attempts-1)` cap `60s`) until `attempts>=5` → `FAILED` (terminal, retained `30d` not deleted). Manual requeue: `UPDATE outbox_event SET status='PENDING', attempts=0, nextRetryAt=NOW(), lastError=NULL WHERE id=:id AND status='FAILED'`.
+- `payload` MUST be envelope `{version:1, eventId==id, eventType, occurredAt, correlationId, data:{...}}` built by `OutboxService` (business services provide `data` only, not envelope). `payload.version==1`, `payload.eventId==id` ensures `eventId` stable dedup key. `correlationId` from request boundary `X-Request-Id`/`X-Correlation-Id` or `randomUUID()` (non-HTTP expiration generates per operation). PII-free: `data` contains only `orderId, userId, total, currency, items[{productId,inventoryId,quantity,unit_price}], reservationId, expiresAt, ...` — no `email`/`Authorization`; future consumers resolve `email` via `userId`.
+- `status` lifecycle: `PENDING → PROCESSING (processingToken UUID, processingStartedAt=NOW()) → SENT` (success, `processingToken` cleared, `sentAt=NOW()` means published to RabbitMQ exchange, not consumed) or `PROCESSING → PENDING` (retry, `attempts++`, `nextRetryAt=NOW()+base*2^(attempts-1)` cap `60s`) until `attempts>=5` → `FAILED` (terminal, retained `30d` not deleted, `processingToken` cleared). Manual requeue: `UPDATE outbox_event SET status='PENDING', attempts=0, nextRetryAt=NOW(), lastError=NULL, processingToken=NULL WHERE id=:id AND status='FAILED'`. Ownership: `UPDATE ... WHERE id=:id AND status='PROCESSING' AND processingToken=:token` prevents late A overwriting reclaimed B.
 - `aggregateId` intentionally **no FOREIGN KEY** to `Order`/`Reservation` (research D6) to keep `outbox_event` retained when business row `DELETE CASCADE`; audit via `aggregateId` + `aggregateType`.
-- `payload` is `jsonb` (not `json`) to allow `->>` index check.
+- `payload` is `jsonb` (not `json`) to allow `->>` index check. `processingToken` not indexed (point lookup via `id`).
 
 ### Indexes
 
@@ -73,13 +75,14 @@ CREATE INDEX idx_outbox_created_at ON outbox_event (createdAt DESC);
 ### State Diagram
 
 ```text
-PENDING --claim FOR UPDATE SKIP LOCKED--> PROCESSING --client.emit success--> SENT
+PENDING --claim FOR UPDATE SKIP LOCKED (set processingToken UUID)--> PROCESSING --client.emit success (WHERE token matches)--> SENT (means published to RabbitMQ exchange, not consumed)
    ^                                        |
-   |   failure (ECONNREFUSED)               | failure → attempts++ nextRetryAt exponential
+   |   failure (ECONNREFUSED, WHERE token)  | failure → attempts++ nextRetryAt approx 1+2+4+8+16 ≈31s sum before final, WHERE token
    +----------------------------------------+
-                                            +-- attempts>=5 --> FAILED (retained)
+                                            +-- attempts>=5 --> FAILED (retained, processingToken cleared)
 FAILED --manual PATCH /admin/outbox/:id/requeue--> PENDING
-PROCESSING (lease expired processingStartedAt < NOW()-30s) --reclaim next poll--> PROCESSING (fresh lease)
+PROCESSING (lease expired processingStartedAt < NOW()-30s) --reclaim next poll (new token)--> PROCESSING (fresh lease, old token stale)
+A claims (tokenA) → B reclaims after lease (tokenB) → A late finishes WHERE tokenA → 0 rows, no overwrite (ownership race safe)
 ```
 
 ### Relationships (none FK)

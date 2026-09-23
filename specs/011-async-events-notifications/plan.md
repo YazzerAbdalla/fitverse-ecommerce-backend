@@ -1,6 +1,6 @@
 # Implementation Plan: Asynchronous Events — Transactional Outbox (Phase 11)
 
-**Branch**: `011-async-events-notifications` | **Date**: 2026-09-23 | **Spec**: [spec.md](./spec.md)
+**Branch**: `011-outbox-transaction` | **Date**: 2026-09-23 | **Spec**: [spec.md](./spec.md)
 **Input**: Feature specification from `/specs/011-async-events-notifications/spec.md` (Phase 11 Transactional Outbox refactor — `OutboxEvent` inside business `DataSource.transaction`, `OutboxPublisher` `FOR UPDATE SKIP LOCKED` batch 100 lease 30s exponential backoff, `FAILED` retained, at-least-once `version:1+correlationId` envelope, 11 clarifications Session 2026-09-23 including outbox supersede)
 
 ## Summary

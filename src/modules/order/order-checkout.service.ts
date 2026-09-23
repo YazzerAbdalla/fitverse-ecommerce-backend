@@ -219,6 +219,7 @@ export class OrderCheckoutService {
       await this.cartService.clearCartForCheckout(manager, userId);
 
       // 13. OutboxEvent INSERT inside same transaction — no client.emit
+      // Correlation ID resolved at request boundary (controller) and passed in
       const corrId = correlationId || randomUUID();
       if (this.outboxService) {
         try {
@@ -226,10 +227,8 @@ export class OrderCheckoutService {
             eventType: 'order.created',
             aggregateType: 'Order',
             aggregateId: savedOrder.id,
-            payload: {
-              version: 1,
-              eventType: 'order.created',
-              correlationId: corrId,
+            correlationId: corrId,
+            data: {
               orderId: savedOrder.id,
               userId,
               total,
@@ -243,10 +242,9 @@ export class OrderCheckoutService {
               reservationId: reservation.id,
               expiresAt: reservation.expiresAt?.toISOString() ?? null,
               createdAt: savedOrder.created_at
-                ? savedOrder.created_at.toISOString()
+                ? (savedOrder.created_at as Date).toISOString()
                 : new Date().toISOString(),
             },
-            correlationId: corrId,
           });
         } catch (e: any) {
           // Best-effort outbox — if table missing (integration without migration) log and continue so business still commits

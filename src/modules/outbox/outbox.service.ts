@@ -14,9 +14,11 @@ export class OutboxService {
 
   /**
    * Creates an outbox event inside the caller's transaction.
+   * OutboxService owns the common envelope; business services provide domain data only.
+   * Persisted payload is exact payload later published (no reconstruction).
    * @param manager - EntityManager of the enclosing DataSource.transaction (caller owns commit/rollback).
-   * @param params - Event metadata; payload must contain version and correlationId (added if missing).
-   * @returns Persisted OutboxEvent (PENDING, attempts 0, nextRetryAt NOW()).
+   * @param params - Event metadata; data contains domain fields (orderId, userId, etc.), envelope is built here.
+   * @returns Persisted OutboxEvent (PENDING, attempts 0, nextRetryAt NOW()). SENT means published to RabbitMQ, not consumed.
    */
   async createEvent(
     manager: EntityManager,
@@ -24,27 +26,28 @@ export class OutboxService {
       eventType: string;
       aggregateType: string;
       aggregateId: string;
-      payload: Record<string, unknown>;
+      data: Record<string, unknown>;
       correlationId?: string;
+      payload?: Record<string, unknown>; // deprecated: for backward compat, if provided will be used as data
     },
   ): Promise<OutboxEvent> {
     const id = randomUUID();
     const occurredAt = new Date().toISOString();
-    // Ensure payload contains required envelope fields; do not overwrite if already set
-    const payload: Record<string, unknown> = {
-      ...params.payload,
+    const correlationId = params.correlationId || randomUUID();
+    // Business services provide data; envelope is built here to avoid manual envelope duplication
+    const data = (params as any).payload && !(params as any).data
+      ? (params as any).payload as Record<string, unknown>
+      : params.data || {};
+    // Support legacy flat payload with envelope fields already inside data (e.g., version, eventId); extract data if needed
+    // If legacy payload already contains envelope fields, treat entire payload as data fallback
+    const envelope: Record<string, unknown> = {
+      version: 1,
+      eventId: id,
+      eventType: params.eventType,
+      occurredAt,
+      correlationId,
+      data,
     };
-    // eventId == outbox.id for stable dedup
-    if (!payload['eventId']) payload['eventId'] = id;
-    if (!payload['eventType']) payload['eventType'] = params.eventType;
-    if (!payload['version']) payload['version'] = 1;
-    if (!payload['occurredAt']) payload['occurredAt'] = occurredAt;
-    // correlationId from caller or from payload or generate
-    const correlationId =
-      params.correlationId ||
-      (payload['correlationId'] as string) ||
-      randomUUID();
-    if (!payload['correlationId']) payload['correlationId'] = correlationId;
 
     const repo = manager.getRepository(OutboxEvent);
     const event = repo.create({
@@ -52,17 +55,19 @@ export class OutboxService {
       eventType: params.eventType,
       aggregateType: params.aggregateType,
       aggregateId: params.aggregateId,
-      payload,
+      payload: envelope,
       status: OutboxStatus.PENDING,
       attempts: 0,
       nextRetryAt: new Date(),
       lastError: null,
       processingStartedAt: null,
+      processingToken: null as any,
       sentAt: null,
     });
 
     const saved = await repo.save(event);
     // OutboxEvent INSERT inside same transaction — no client.emit
+    // SENT will mean OutboxPublisher published to RabbitMQ, not that consumer processed
     this.logger.debug(
       `outbox created id=${saved.id} eventType=${saved.eventType} aggregateId=${saved.aggregateId} correlationId=${correlationId}`,
     );

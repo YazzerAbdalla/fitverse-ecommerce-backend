@@ -228,10 +228,8 @@ export class ReservationExpirationService {
                 eventType: 'reservation.expired',
                 aggregateType: 'Reservation',
                 aggregateId: result.id,
-                payload: {
-                  version: 1,
-                  eventType: 'reservation.expired',
-                  correlationId: corrId,
+                correlationId: corrId,
+                data: {
                   reservationId: result.id,
                   userId: result.userId,
                   orderId: result.orderId ?? null,
@@ -242,7 +240,6 @@ export class ReservationExpirationService {
                   expiresAt: result.expiresAt?.toISOString() ?? null,
                   expiredAt: new Date().toISOString(),
                 },
-                correlationId: corrId,
               });
 
               if (result.orderId) {
@@ -261,10 +258,8 @@ export class ReservationExpirationService {
                       eventType: 'order.cancelled',
                       aggregateType: 'Order',
                       aggregateId: result.orderId,
-                      payload: {
-                        version: 1,
-                        eventType: 'order.cancelled',
-                        correlationId: corrId2,
+                      correlationId: corrId2,
+                      data: {
                         orderId: result.orderId,
                         userId: result.userId,
                         previousStatus: 'PENDING',
@@ -272,7 +267,6 @@ export class ReservationExpirationService {
                         reason: 'expired',
                         reservationId: result.id,
                       },
-                      correlationId: corrId2,
                     });
                   } catch (e2: any) {
                     this.logger.warn(

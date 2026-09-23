@@ -1,6 +1,6 @@
 # Feature Specification: Asynchronous Events / Notifications — Transactional Outbox
 
-**Feature Branch**: `011-async-events-notifications`  
+**Feature Branch**: `011-outbox-transaction`  
 **Created**: 2026-09-23  
 **Status**: Draft (Refactored to Outbox 2026-09-23)  
 **Input**: User description: "phase 11 in the plan" + refactor to **Transactional Outbox Pattern** (PostgreSQL `OutboxEvent` inside business transaction, async publisher to RabbitMQ)  

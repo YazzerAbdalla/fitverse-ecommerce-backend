@@ -13,6 +13,10 @@ import { OutboxStatus } from './outbox-status.enum';
  * It handles durable buffering so business commit never depends on RabbitMQ availability.
  * Events are inserted inside the same DataSource.transaction as business state (FR-002)
  * and published asynchronously by OutboxPublisher via FOR UPDATE SKIP LOCKED.
+ *
+ * SENT means the OutboxPublisher successfully published/submitted the persisted
+ * event to RabbitMQ (exchange/transport), NOT that a consumer processed it.
+ * Consumer processing (email, webhook, etc.) is future and out of scope for Phase 11.
  */
 @Entity('outbox_event')
 @Index(['status', 'nextRetryAt', 'createdAt'])
@@ -55,6 +59,9 @@ export class OutboxEvent {
 
   @Column({ type: 'timestamptz', nullable: true })
   processingStartedAt!: Date | null;
+
+  @Column({ type: 'varchar', length: 36, nullable: true })
+  processingToken!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
