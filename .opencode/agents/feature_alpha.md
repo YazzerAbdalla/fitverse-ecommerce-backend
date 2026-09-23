@@ -1,7 +1,7 @@
 ---
 description: Feature Alpha implementation worker — isolated worktree feature/alpha, implements assigned Alpha tasks post-planning
 mode: subagent
-model: opencode/gpt-5.1-codex
+model: opencode/muse-spark-1.2-contributor-free
 temperature: 0.2
 color: "#059669"
 permission:

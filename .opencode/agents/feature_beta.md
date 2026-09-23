@@ -1,7 +1,7 @@
 ---
 description: Feature Beta implementation worker — isolated worktree feature/beta, implements assigned Beta tasks post-planning
 mode: subagent
-model: opencode/gpt-5.1-codex
+model: opencode/muse-spark-1.2-contributor-free
 temperature: 0.2
 color: "#DC2626"
 permission:

@@ -1,7 +1,7 @@
 ---
 description: Primary orchestrator — repository manager, SpecKit planner, worktree coordinator, QA and integration owner
 mode: primary
-model: opencode/gpt-5.1-codex
+model: opencode/muse-spark-1.2-contributor-free
 temperature: 0.2
 color: "#4F46E5"
 permission:

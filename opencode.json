@@ -1,8 +1,9 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/gpt-5.1-codex",
-  "small_model": "opencode/gpt-5.1-codex",
+  "model": "opencode/muse-spark-1.2-contributor-free",
+  "small_model": "opencode/muse-spark-1.2-contributor-free",
   "provider": {
+    "opencode": {},
     "opencode-zen": {}
   },
   "autoupdate": false,
@@ -13,19 +14,19 @@
     "orchestrator": {
       "description": "Primary orchestrator — repository manager, SpecKit planner, worktree coordinator, QA and integration owner",
       "mode": "primary",
-      "model": "opencode/gpt-5.1-codex",
+      "model": "opencode/muse-spark-1.2-contributor-free",
       "color": "#4F46E5"
     },
     "feature_alpha": {
       "description": "Feature Alpha implementation worker — isolated worktree feature/alpha, reads spec/plan/tasks and implements assigned Alpha tasks",
       "mode": "subagent",
-      "model": "opencode/gpt-5.1-codex",
+      "model": "opencode/muse-spark-1.2-contributor-free",
       "color": "#059669"
     },
     "feature_beta": {
       "description": "Feature Beta implementation worker — isolated worktree feature/beta, reads spec/plan/tasks and implements assigned Beta tasks",
       "mode": "subagent",
-      "model": "opencode/gpt-5.1-codex",
+      "model": "opencode/muse-spark-1.2-contributor-free",
       "color": "#DC2626"
     }
   },
