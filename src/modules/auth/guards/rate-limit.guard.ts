@@ -25,6 +25,10 @@ const DEFAULT_LIMITS: Record<string, { max: number; windowMs: number }> = {
   'GET /auth/google/callback': { max: 20, windowMs: 3600_000 },
   'POST /auth/login': { max: 10, windowMs: 3600_000 },
   'POST /auth/register': { max: 10, windowMs: 3600_000 },
+  'POST /auth/refresh': { max: 10, windowMs: 3600_000 },
+  'POST /auth/refresh:hash': { max: 5, windowMs: 3600_000 },
+  'POST /auth/logout': { max: 20, windowMs: 3600_000 },
+  'POST /auth/logout-all': { max: 10, windowMs: 3600_000 },
   // Phase 10 — Order / Cart / Product mutations
   'POST /order/checkout': { max: 10, windowMs: 3600_000 },
   'POST /order': { max: 10, windowMs: 3600_000 },
@@ -74,8 +78,16 @@ export class RateLimitGuard implements CanActivate {
       'PRODUCT_MUTATION_RL_MAX',
       DEFAULT_LIMITS['products:mutation'].max,
     );
+    const refreshMax = this.getConfigMax(
+      'REFRESH_RL_MAX',
+      DEFAULT_LIMITS['POST /auth/refresh'].max,
+    );
+    const refreshHashMax = this.getConfigMax(
+      'REFRESH_HASH_RL_MAX',
+      DEFAULT_LIMITS['POST /auth/refresh:hash'].max,
+    );
     this.logger.log(
-      `RateLimit guards: auth 5-20/h, checkout ${checkoutMax}/h/user (win ${checkoutWin}ms), cart ${cartMax}/h/user, product ${prodMax}/h/admin (REDIS_URL ${redisUrl ? 'set, distributed' : 'unset, in-memory'})`,
+      `RateLimit guards: auth 5-20/h (refresh ${refreshMax}/h + hash ${refreshHashMax}/h, logout 20/h, logout-all 10/h), checkout ${checkoutMax}/h/user (win ${checkoutWin}ms), cart ${cartMax}/h/user, product ${prodMax}/h/admin (REDIS_URL ${redisUrl ? 'set, distributed' : 'unset, in-memory'})`,
     );
   }
 
@@ -206,6 +218,64 @@ export class RateLimitGuard implements CanActivate {
     ) => ({ routeKey: rk, dim, value, max, windowMs });
 
     // Auth dual buckets handled separately
+    if (routeKey === 'POST /auth/refresh') {
+      const buckets: any[] = [];
+      const ip = this.extractIp(req);
+      const ipMax = this.getEffectiveMax(
+        routeKey,
+        DEFAULT_LIMITS[routeKey].max,
+      );
+      const ipWin = this.getEffectiveWindow(
+        routeKey,
+        DEFAULT_LIMITS[routeKey].windowMs,
+      );
+      buckets.push(makeBucket(routeKey, 'ip', ip, ipMax, ipWin));
+      // per-hash bucket 5/h — extract refreshToken from body or cookie
+      const raw =
+        req.body?.refreshToken ||
+        req.cookies?.refresh_token ||
+        req.cookies?.refreshToken;
+      let hashPrefix: string | null = null;
+      if (typeof raw === 'string' && /^[0-9a-f]{64}$/.test(raw)) {
+        try {
+          const crypto = require('crypto');
+          const h = crypto
+            .createHash('sha256')
+            .update(raw)
+            .digest('hex')
+            .slice(0, 6);
+          hashPrefix = h;
+        } catch {
+          hashPrefix = raw.slice(0, 6);
+        }
+      } else if (typeof raw === 'string' && raw.length >= 6) {
+        hashPrefix = raw.slice(0, 6);
+      }
+      if (hashPrefix) {
+        const hashKey = 'POST /auth/refresh:hash';
+        const hashMax = this.getEffectiveMax(
+          hashKey,
+          DEFAULT_LIMITS[hashKey].max,
+        );
+        const hashWin = this.getEffectiveWindow(
+          hashKey,
+          DEFAULT_LIMITS[hashKey].windowMs,
+        );
+        buckets.push(makeBucket(hashKey, 'hash', hashPrefix, hashMax, hashWin));
+      }
+      return buckets;
+    }
+    if (routeKey === 'POST /auth/logout-all') {
+      const userSub: string | undefined = req.user?.sub;
+      const dim = userSub ? 'user' : 'ip';
+      const value = userSub ? String(userSub) : this.extractIp(req);
+      const max = this.getEffectiveMax(routeKey, DEFAULT_LIMITS[routeKey].max);
+      const windowMs = this.getEffectiveWindow(
+        routeKey,
+        DEFAULT_LIMITS[routeKey].windowMs,
+      );
+      return [makeBucket(routeKey, dim, value, max, windowMs)];
+    }
     if (routeKey === 'POST /auth/forgot-password') {
       const buckets: any[] = [];
       const ip = this.extractIp(req);
@@ -384,6 +454,10 @@ export class RateLimitGuard implements CanActivate {
       'DELETE /cart': 'CART_RL_MAX',
       'DELETE /cart/:cartItemId': 'CART_RL_MAX',
       'products:mutation': 'PRODUCT_MUTATION_RL_MAX',
+      'POST /auth/refresh': 'REFRESH_RL_MAX',
+      'POST /auth/refresh:hash': 'REFRESH_HASH_RL_MAX',
+      'POST /auth/logout': 'LOGOUT_RL_MAX',
+      'POST /auth/logout-all': 'LOGOUT_ALL_RL_MAX',
     };
     const envKey = envMap[routeKey];
     if (!envKey) return fallback;
@@ -408,6 +482,10 @@ export class RateLimitGuard implements CanActivate {
       'DELETE /cart': 'CART_RL_WINDOW_MS',
       'DELETE /cart/:cartItemId': 'CART_RL_WINDOW_MS',
       'products:mutation': 'PRODUCT_MUTATION_RL_WINDOW_MS',
+      'POST /auth/refresh': 'REFRESH_RL_WINDOW_MS',
+      'POST /auth/refresh:hash': 'REFRESH_HASH_RL_WINDOW_MS',
+      'POST /auth/logout': 'LOGOUT_RL_WINDOW_MS',
+      'POST /auth/logout-all': 'LOGOUT_ALL_RL_WINDOW_MS',
     };
     const envKey = envMap[routeKey];
     if (!envKey) return fallback;

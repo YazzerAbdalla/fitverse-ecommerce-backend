@@ -14,9 +14,9 @@
 
 **Purpose**: Tooling, dependencies, config placeholders
 
-- [ ] T001 Install `cookie-parser` + `@types/cookie-parser` and add `app.use(cookieParser())` wiring placeholder in `src/main.ts`
-- [ ] T002 [P] Create `src/modules/auth/dto/refresh-token.dto.ts` skeleton (RefreshTokenDto, LogoutDto placeholders)
-- [ ] T003 [P] Update `.env.example` with `REFRESH_TOKEN_TTL=7d`, `REFRESH_TOKEN_COOKIE_NAME=refresh_token`, `REFRESH_TOKEN_COOKIE_SECURE=false`, `REFRESH_RL_MAX/LOGOUT_*` per `quickstart.md` in `.env.example`
+- [x] T001 Install `cookie-parser` + `@types/cookie-parser` and add `app.use(cookieParser())` wiring placeholder in `src/main.ts`
+- [x] T002 [P] Create `src/modules/auth/dto/refresh-token.dto.ts` skeleton (RefreshTokenDto, LogoutDto placeholders)
+- [x] T003 [P] Update `.env.example` with `REFRESH_TOKEN_TTL=7d`, `REFRESH_TOKEN_COOKIE_NAME=refresh_token`, `REFRESH_TOKEN_COOKIE_SECURE=false`, `REFRESH_RL_MAX/LOGOUT_*` per `quickstart.md` in `.env.example`
 
 ---
 
@@ -26,12 +26,12 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Create `RefreshToken` entity `src/modules/auth/entities/refresh-token.entity.ts` with `@Entity`, `@PrimaryGeneratedColumn('uuid')`, `userId FK CASCADE @Index`, `tokenHash @Index`, `expiresAt @Check`, `revokedAt nullable`, `createdAt/updatedAt`, indexes `userId/tokenHash/expiresAt/userId,expiresAt` per `data-model.md`
-- [ ] T005 Generate migration `src/migration/17xxxxxxxxxx-CreateRefreshToken.ts` for `RefreshToken` table + `CHK_refresh_token_expires_gt_createdAt` + indexes + partial unique `UQ_refresh_token_hash_active WHERE revokedAt IS NULL` + `FK_refresh_token_userId CASCADE` (synchronize:false)
-- [ ] T006 [P] Implement `RefreshTokenDto` (`refreshToken?: string @IsString @Length(64,64) @Matches(/^[0-9a-f]{64}$/) @IsOptional()`) + `LogoutDto` same in `src/modules/auth/dto/refresh-token.dto.ts` with class-validator decorators
-- [ ] T007 Wire `cookie-parser` in `src/main.ts` before `ValidationPipe` (`import cookieParser from 'cookie-parser'; app.use(cookieParser())`), verify `req.cookies` populated
-- [ ] T008 Extend `parseTtlMs` in `src/modules/auth/auth.service.ts` to handle `d` suffix (`7d → 604800000`) for `REFRESH_TOKEN_TTL` (support `s/m/h/d` per FR-009)
-- [ ] T009 Update `src/modules/auth/auth.module.ts` to import `TypeOrmModule.forFeature([RefreshToken])` alongside `User`, export `AuthService`/`RateLimitGuard`
+- [x] T004 Create `RefreshToken` entity `src/modules/auth/entities/refresh-token.entity.ts` with `@Entity`, `@PrimaryGeneratedColumn('uuid')`, `userId FK CASCADE @Index`, `tokenHash @Index`, `expiresAt @Check`, `revokedAt nullable`, `createdAt/updatedAt`, indexes `userId/tokenHash/expiresAt/userId,expiresAt` per `data-model.md`
+- [x] T005 Generate migration `src/migration/17xxxxxxxxxx-CreateRefreshToken.ts` for `RefreshToken` table + `CHK_refresh_token_expires_gt_createdAt` + indexes + partial unique `UQ_refresh_token_hash_active WHERE revokedAt IS NULL` + `FK_refresh_token_userId CASCADE` (synchronize:false)
+- [x] T006 [P] Implement `RefreshTokenDto` (`refreshToken?: string @IsString @Length(64,64) @Matches(/^[0-9a-f]{64}$/) @IsOptional()`) + `LogoutDto` same in `src/modules/auth/dto/refresh-token.dto.ts` with class-validator decorators
+- [x] T007 Wire `cookie-parser` in `src/main.ts` before `ValidationPipe` (`import cookieParser from 'cookie-parser'; app.use(cookieParser())`), verify `req.cookies` populated
+- [x] T008 Extend `parseTtlMs` in `src/modules/auth/auth.service.ts` to handle `d` suffix (`7d → 604800000`) for `REFRESH_TOKEN_TTL` (support `s/m/h/d` per FR-009)
+- [x] T009 Update `src/modules/auth/auth.module.ts` to import `TypeOrmModule.forFeature([RefreshToken])` alongside `User`, export `AuthService`/`RateLimitGuard`
 
 **Checkpoint**: Foundation ready — `RefreshToken` entity migrated, DTO validates `64hex`, `cookieParser`+`parseTtlMs` ready; US2/US1/US3/US4 can now start in parallel (US2 before US1 logical dependency)
 
@@ -45,15 +45,15 @@
 
 ### Tests for User Story 2
 
-- [ ] T010 [P] [US2] Unit test `login creates hashed refresh 7d` in `src/modules/auth/auth.service.spec.ts` — mock `DataSource`/`JwtService.signAsync`/`ConfigService REFRESH_TOKEN_TTL 7d`, assert `repo.save` called with `tokenHash 64hex sha256`, `expiresAt now+7d ±5s`, returned `refreshToken 64hex`, cap 5 LRU eviction when `active>=5` revokes oldest
-- [ ] T011 [P] [US2] Unit test `login invalid no refresh row` + `google callback issues refresh` in `src/modules/auth/auth.service.spec.ts` — invalid creds `401` `repo.save 0`, `handleGoogleLogin` verified profile creates/linked user then `repo.save` `RefreshToken` + `{accessToken,refreshToken}`
+- [x] T010 [P] [US2] Unit test `login creates hashed refresh 7d` in `src/modules/auth/auth.service.spec.ts` — mock `DataSource`/`JwtService.signAsync`/`ConfigService REFRESH_TOKEN_TTL 7d`, assert `repo.save` called with `tokenHash 64hex sha256`, `expiresAt now+7d ±5s`, returned `refreshToken 64hex`, cap 5 LRU eviction when `active>=5` revokes oldest
+- [x] T011 [P] [US2] Unit test `login invalid no refresh row` + `google callback issues refresh` in `src/modules/auth/auth.service.spec.ts` — invalid creds `401` `repo.save 0`, `handleGoogleLogin` verified profile creates/linked user then `repo.save` `RefreshToken` + `{accessToken,refreshToken}`
 
 ### Implementation for User Story 2
 
-- [ ] T012 [P] [US2] Implement `AuthService.login` extension in `src/modules/auth/auth.service.ts` — after `JwtService.signAsync`, generate `raw=randomBytes(32).hex 64`, `tokenHash=sha256(raw)`, `expiresAt=now+parseTtlMs(REFRESH_TOKEN_TTL||7d)`, enforce cap 5 LRU `if activeCount>=5 revoke oldest FOR UPDATE`, `repo.save {userId,tokenHash,expiresAt}`, return `{message, accessToken, refreshToken: raw}` + Logger prefix `tokenHash.slice(0,6)`
-- [ ] T013 [US2] Extend `AuthService.handleGoogleLogin` in `src/modules/auth/auth.service.ts` to issue `RefreshToken` same as `login` (cap 5, sha256, 7d) and return `{user, accessToken, refreshToken}` for controller
-- [ ] T014 [US2] Update `AuthController.login` in `src/modules/auth/auth.controller.ts` — keep `@UseGuards(RateLimitGuard, LocalAuthGuard)`, inject `@Res({passthrough:true}) res`, call `authService.login(user)`, `res.cookie(REFRESH_TOKEN_COOKIE_NAME, result.refreshToken, {httpOnly:true, secure:config.get(REFRESH_TOKEN_COOKIE_SECURE)==='true', sameSite:'strict', path:'/auth', maxAge: parseTtlMs(REFRESH_TOKEN_TTL)})`, return `{accessToken, refreshToken}`, Swagger `@ApiResponse 200 {accessToken,refreshToken}` `401/429`
-- [ ] T015 [US2] Update `AuthController.googleCallback` in `src/modules/auth/auth.controller.ts` — after `handleGoogleLogin(profile)`, set same `res.cookie` + return `{accessToken, refreshToken}` (handle `refreshToken` from service), `GET /auth/google/link` optional same if re-issues JWT
+- [x] T012 [P] [US2] Implement `AuthService.login` extension in `src/modules/auth/auth.service.ts` — after `JwtService.signAsync`, generate `raw=randomBytes(32).hex 64`, `tokenHash=sha256(raw)`, `expiresAt=now+parseTtlMs(REFRESH_TOKEN_TTL||7d)`, enforce cap 5 LRU `if activeCount>=5 revoke oldest FOR UPDATE`, `repo.save {userId,tokenHash,expiresAt}`, return `{message, accessToken, refreshToken: raw}` + Logger prefix `tokenHash.slice(0,6)`
+- [x] T013 [US2] Extend `AuthService.handleGoogleLogin` in `src/modules/auth/auth.service.ts` to issue `RefreshToken` same as `login` (cap 5, sha256, 7d) and return `{user, accessToken, refreshToken}` for controller
+- [x] T014 [US2] Update `AuthController.login` in `src/modules/auth/auth.controller.ts` — keep `@UseGuards(RateLimitGuard, LocalAuthGuard)`, inject `@Res({passthrough:true}) res`, call `authService.login(user)`, `res.cookie(REFRESH_TOKEN_COOKIE_NAME, result.refreshToken, {httpOnly:true, secure:config.get(REFRESH_TOKEN_COOKIE_SECURE)==='true', sameSite:'strict', path:'/auth', maxAge: parseTtlMs(REFRESH_TOKEN_TTL)})`, return `{accessToken, refreshToken}`, Swagger `@ApiResponse 200 {accessToken,refreshToken}` `401/429`
+- [x] T015 [US2] Update `AuthController.googleCallback` in `src/modules/auth/auth.controller.ts` — after `handleGoogleLogin(profile)`, set same `res.cookie` + return `{accessToken, refreshToken}` (handle `refreshToken` from service), `GET /auth/google/link` optional same if re-issues JWT
 
 **Checkpoint**: US2 fully functional — `POST /auth/login` + `GET /auth/google/callback` both issue refresh + cookie, DB `sha256` stored, cap 5 LRU, `Set-Cookie` HttpOnly correct
 
@@ -67,15 +67,15 @@
 
 ### Tests for User Story 1
 
-- [ ] T016 [P] [US1] Unit test `refresh rotation FOR UPDATE single-winner` in `src/modules/auth/auth.service.spec.ts` — mock `DataSource.transaction` `SELECT ... FOR UPDATE` active row → `UPDATE old revokedAt` + `INSERT new` + `sign`, then second `refresh(oldRaw)` → `401` `UPDATE 0 new 0`, assert `Logger.warn prefix` not raw, `X-Email-Unverified` header logic when `user.emailVerified=false`
-- [ ] T017 [P] [US1] Unit test `refresh expired/revoked/unknown 401` + `cookie fallback` in `src/modules/auth/auth.service.spec.ts` — fixtures `expiresAt=NOW()-1s`, `revokedAt=NOW()`, unknown hash → `401`; `req.cookies[REFRESH_TOKEN_COOKIE_NAME]` path succeeds when body empty
-- [ ] T018 [P] [US1] Integration test `refresh rotation + theft concurrent` with real PG `FOR UPDATE` in `src/modules/auth/test/refresh.integration.spec.ts` — real `RefreshToken` active, `POST /auth/refresh` body `200` new active `old revokedAt`, second old `401` `active count 1`; `Promise.all([refresh(old), refresh(old)])` single `200+401` `active 1` + theft bulk revoke; `EXPLAIN` shows `FOR UPDATE` on `tokenHash`
-- [ ] T019 [US1] Integration test `refresh expiry + secure cookie attributes` in `src/modules/auth/test/refresh.integration.spec.ts` — insert `expiresAt NOW()-1s` → `401`; assert `Set-Cookie` header `HttpOnly; SameSite=Strict; Path=/auth; Max-Age=604800` on `200`
+- [x] T016 [P] [US1] Unit test `refresh rotation FOR UPDATE single-winner` in `src/modules/auth/auth.service.spec.ts` — mock `DataSource.transaction` `SELECT ... FOR UPDATE` active row → `UPDATE old revokedAt` + `INSERT new` + `sign`, then second `refresh(oldRaw)` → `401` `UPDATE 0 new 0`, assert `Logger.warn prefix` not raw, `X-Email-Unverified` header logic when `user.emailVerified=false`
+- [x] T017 [P] [US1] Unit test `refresh expired/revoked/unknown 401` + `cookie fallback` in `src/modules/auth/auth.service.spec.ts` — fixtures `expiresAt=NOW()-1s`, `revokedAt=NOW()`, unknown hash → `401`; `req.cookies[REFRESH_TOKEN_COOKIE_NAME]` path succeeds when body empty
+- [x] T018 [P] [US1] Integration test `refresh rotation + theft concurrent` with real PG `FOR UPDATE` in `src/modules/auth/test/refresh.integration.spec.ts` — real `RefreshToken` active, `POST /auth/refresh` body `200` new active `old revokedAt`, second old `401` `active count 1`; `Promise.all([refresh(old), refresh(old)])` single `200+401` `active 1` + theft bulk revoke; `EXPLAIN` shows `FOR UPDATE` on `tokenHash`
+- [x] T019 [US1] Integration test `refresh expiry + secure cookie attributes` in `src/modules/auth/test/refresh.integration.spec.ts` — insert `expiresAt NOW()-1s` → `401`; assert `Set-Cookie` header `HttpOnly; SameSite=Strict; Path=/auth; Max-Age=604800` on `200`
 
 ### Implementation for User Story 1
 
-- [ ] T020 [US1] Implement `AuthService.refresh` in `src/modules/auth/auth.service.ts` — `raw = dto.refreshToken ?? cookieRaw ?? parseCookie(req.headers.cookie)`; if `!raw` throw `UnauthorizedException`; `tokenHash=sha256(raw)`; `dataSource.transaction(async manager => { FOR UPDATE SELECT RefreshToken WHERE tokenHash=:hash; if !found/!user → 401; if revokedAt → after-rollback theft UPDATE WHERE userId AND revokedAt IS NULL + Logger.warn prefix + INCR optional → 401; if expiresAt<=now → 401; else UPDATE old revokedAt + cap5 LRU check + newRaw/hash/expiresAt INSERT + sign newAccessToken })` + Logger after commit + `X-Email-Unverified` flag on user; JSDoc `@param @returns @throws UnauthorizedException`
-- [ ] T021 [US1] Add `AuthController.refresh` route `POST /auth/refresh` in `src/modules/auth/auth.controller.ts` — `@UseGuards(RateLimitGuard)` public, `@Body() dto: RefreshTokenDto` `@Req() req` `@Res({passthrough:true}) res`, resolve `raw = dto.refreshToken ?? req.cookies[cookieName] ?? parseCookie`, call `authService.refresh(raw, cookieRaw)`, set `res.cookie` same attributes, if service returns `emailVerified false` then `res.setHeader('X-Email-Unverified','true')`, return `{accessToken, refreshToken}`; Swagger `Refresh via Cookie or Body` `200/401/400/429` + `@UseGuards(RateLimitGuard)` outermost before `ValidationPipe`
+- [x] T020 [US1] Implement `AuthService.refresh` in `src/modules/auth/auth.service.ts` — `raw = dto.refreshToken ?? cookieRaw ?? parseCookie(req.headers.cookie)`; if `!raw` throw `UnauthorizedException`; `tokenHash=sha256(raw)`; `dataSource.transaction(async manager => { FOR UPDATE SELECT RefreshToken WHERE tokenHash=:hash; if !found/!user → 401; if revokedAt → after-rollback theft UPDATE WHERE userId AND revokedAt IS NULL + Logger.warn prefix + INCR optional → 401; if expiresAt<=now → 401; else UPDATE old revokedAt + cap5 LRU check + newRaw/hash/expiresAt INSERT + sign newAccessToken })` + Logger after commit + `X-Email-Unverified` flag on user; JSDoc `@param @returns @throws UnauthorizedException`
+- [x] T021 [US1] Add `AuthController.refresh` route `POST /auth/refresh` in `src/modules/auth/auth.controller.ts` — `@UseGuards(RateLimitGuard)` public, `@Body() dto: RefreshTokenDto` `@Req() req` `@Res({passthrough:true}) res`, resolve `raw = dto.refreshToken ?? req.cookies[cookieName] ?? parseCookie`, call `authService.refresh(raw, cookieRaw)`, set `res.cookie` same attributes, if service returns `emailVerified false` then `res.setHeader('X-Email-Unverified','true')`, return `{accessToken, refreshToken}`; Swagger `Refresh via Cookie or Body` `200/401/400/429` + `@UseGuards(RateLimitGuard)` outermost before `ValidationPipe`
 
 **Checkpoint**: US1 fully functional — `POST /auth/refresh` rotates single-use, theft 401+revoke-all, cookie fallback, `X-Email-Unverified`, concurrent single-winner proved real PG
 
@@ -89,13 +89,13 @@
 
 ### Tests for User Story 3
 
-- [ ] T022 [P] [US3] Unit test `logout idempotent 200 + logout-all tokenVersion++` in `src/modules/auth/auth.service.spec.ts` — `logout(r1) 200 revokedAt`, second `logout(r1) 200 0 UPDATE`; `logoutAll(userId)` `SELECT User FOR UPDATE` `tokenVersion 0→1` bulk `UPDATE revokedAt` `2→0` active
-- [ ] T023 [P] [US3] Integration test `logout + logout-all real PG` in `src/modules/auth/test/refresh.integration.spec.ts` — real `login×2` active 2 → `POST /auth/logout {r1} 200` `active 1` → `POST /auth/refresh r1 401` `r2 200` → `POST /auth/logout-all Bearer 200` `tokenVersion 1` `SELECT tokenVersion 1` `active 0` → `POST /auth/refresh r2 401` → `GET /order` old 401 + `POST /auth/reset-password → refresh old 401`
+- [x] T022 [P] [US3] Unit test `logout idempotent 200 + logout-all tokenVersion++` in `src/modules/auth/auth.service.spec.ts` — `logout(r1) 200 revokedAt`, second `logout(r1) 200 0 UPDATE`; `logoutAll(userId)` `SELECT User FOR UPDATE` `tokenVersion 0→1` bulk `UPDATE revokedAt` `2→0` active
+- [x] T023 [P] [US3] Integration test `logout + logout-all real PG` in `src/modules/auth/test/refresh.integration.spec.ts` — real `login×2` active 2 → `POST /auth/logout {r1} 200` `active 1` → `POST /auth/refresh r1 401` `r2 200` → `POST /auth/logout-all Bearer 200` `tokenVersion 1` `SELECT tokenVersion 1` `active 0` → `POST /auth/refresh r2 401` → `GET /order` old 401 + `POST /auth/reset-password → refresh old 401`
 
 ### Implementation for User Story 3
 
-- [ ] T024 [US3] Implement `AuthService.logout` + `AuthService.logoutAll` in `src/modules/auth/auth.service.ts` — `logout(raw, cookieRaw)` resolves `raw`, if `!raw` return `200` (anti-enum) else `sha256` `UPDATE RefreshToken SET revokedAt=NOW() WHERE tokenHash=:hash AND revokedAt IS NULL` `Logger prefix`; `logoutAll(userId)` `dataSource.transaction` `SELECT User FOR UPDATE` `userRepo.update(tokenVersion +1)` + `UPDATE RefreshToken SET revokedAt=NOW() WHERE userId=:id AND revokedAt IS NULL`; JSDoc + `// idempotent 0 rows still 200` comments
-- [ ] T025 [US3] Add `AuthController.logout` `POST /auth/logout` + `logoutAll` `POST /auth/logout-all` in `src/modules/auth/auth.controller.ts` — `logout` public `@UseGuards(RateLimitGuard)` body|cookie `authService.logout` `200 {message:"Logged out"}`; `logoutAll` `@Auth()` `@UseGuards(RateLimitGuard, JwtAuthGuard)` empty body `forbidNonWhitelisted`, `authService.logoutAll(currentUser.sub)` `200 {message:"All sessions revoked"}`; Swagger `401/429` for logoutAll
+- [x] T024 [US3] Implement `AuthService.logout` + `AuthService.logoutAll` in `src/modules/auth/auth.service.ts` — `logout(raw, cookieRaw)` resolves `raw`, if `!raw` return `200` (anti-enum) else `sha256` `UPDATE RefreshToken SET revokedAt=NOW() WHERE tokenHash=:hash AND revokedAt IS NULL` `Logger prefix`; `logoutAll(userId)` `dataSource.transaction` `SELECT User FOR UPDATE` `userRepo.update(tokenVersion +1)` + `UPDATE RefreshToken SET revokedAt=NOW() WHERE userId=:id AND revokedAt IS NULL`; JSDoc + `// idempotent 0 rows still 200` comments
+- [x] T025 [US3] Add `AuthController.logout` `POST /auth/logout` + `logoutAll` `POST /auth/logout-all` in `src/modules/auth/auth.controller.ts` — `logout` public `@UseGuards(RateLimitGuard)` body|cookie `authService.logout` `200 {message:"Logged out"}`; `logoutAll` `@Auth()` `@UseGuards(RateLimitGuard, JwtAuthGuard)` empty body `forbidNonWhitelisted`, `authService.logoutAll(currentUser.sub)` `200 {message:"All sessions revoked"}`; Swagger `401/429` for logoutAll
 
 **Checkpoint**: US3 fully functional — single logout idempotent `200` anti-enum, logout-all nukes `tokenVersion`+bulk `revokedAt`, `reset-password`→refresh `401` proven
 
@@ -109,13 +109,13 @@
 
 ### Tests for User Story 4
 
-- [ ] T026 [P] [US4] Unit test `RateLimitGuard dual buckets` in `src/modules/auth/guards/rate-limit.guard.spec.ts` — mock `CACHE_MANAGER get/set` `rl:POST /auth/refresh:ip:1.1.1.1` `10→429` + `rl:POST /auth/refresh:hash:abc123` `5→429` dual before `FOR UPDATE`, `logout 20/h` + `logout-all 10/h user isolation`, fail-open `CACHE throw → Logger.warn + true` headers absent, assert `DataSource.transaction 0` on `429`
-- [ ] T027 [US4] Integration test `rate-limit 429 real Redis FLUSHDB` in `src/modules/auth/test/refresh.integration.spec.ts` — `FLUSHDB` then `11× POST /auth/refresh` same IP `11th 429` `Retry-After 3600` `X-RateLimit-Limit`; `POST /auth/logout ×21` `21st 429`; mock `FLUSHDB` then `CACHE throw → POST /auth/refresh still 200 Logger.warn` fail-open `UPDATE inventory 0`
+- [x] T026 [P] [US4] Unit test `RateLimitGuard dual buckets` in `src/modules/auth/guards/rate-limit.guard.spec.ts` — mock `CACHE_MANAGER get/set` `rl:POST /auth/refresh:ip:1.1.1.1` `10→429` + `rl:POST /auth/refresh:hash:abc123` `5→429` dual before `FOR UPDATE`, `logout 20/h` + `logout-all 10/h user isolation`, fail-open `CACHE throw → Logger.warn + true` headers absent, assert `DataSource.transaction 0` on `429`
+- [x] T027 [US4] Integration test `rate-limit 429 real Redis FLUSHDB` in `src/modules/auth/test/refresh.integration.spec.ts` — `FLUSHDB` then `11× POST /auth/refresh` same IP `11th 429` `Retry-After 3600` `X-RateLimit-Limit`; `POST /auth/logout ×21` `21st 429`; mock `FLUSHDB` then `CACHE throw → POST /auth/refresh still 200 Logger.warn` fail-open `UPDATE inventory 0`
 
 ### Implementation for User Story 4
 
-- [ ] T028 [US4] Extend `RateLimitGuard` in `src/modules/auth/guards/rate-limit.guard.ts` — add `DEFAULT_LIMITS` keys `'POST /auth/refresh' {max:10, windowMs:3600_000, bucket:'ip+hash'}` dual check `await INCR rl:refresh:ip + rl:refresh:hash:tokenHash.slice(0,6)` `5/3600` (both must pass), `'POST /auth/logout' 20/ip`, `'POST /auth/logout-all' 10/user` (`req.user.sub ?? ip`), `ConfigService` overrides `REFRESH_RL_MAX` etc clamped `>=60000` else fallback + `Logger.warn`, fail-open `try { get/set } catch(e){ Logger.warn; return true }`, outermost `@UseGuards(RateLimitGuard)` before `JwtGuard`
-- [ ] T029 [US4] Harden `AuthService` logging to prefix-only in `src/modules/auth/auth.service.ts` — all `Logger.log/warn` use `tokenHash.slice(0,6)` never `rawRefresh`; ensure `AllExceptionsFilter` path for `429` forwards `options.headers Retry-After/X-RateLimit-*` already (Phase 10), verify `POST /auth/refresh/logout` Swagger `429`
+- [x] T028 [US4] Extend `RateLimitGuard` in `src/modules/auth/guards/rate-limit.guard.ts` — add `DEFAULT_LIMITS` keys `'POST /auth/refresh' {max:10, windowMs:3600_000, bucket:'ip+hash'}` dual check `await INCR rl:refresh:ip + rl:refresh:hash:tokenHash.slice(0,6)` `5/3600` (both must pass), `'POST /auth/logout' 20/ip`, `'POST /auth/logout-all' 10/user` (`req.user.sub ?? ip`), `ConfigService` overrides `REFRESH_RL_MAX` etc clamped `>=60000` else fallback + `Logger.warn`, fail-open `try { get/set } catch(e){ Logger.warn; return true }`, outermost `@UseGuards(RateLimitGuard)` before `JwtGuard`
+- [x] T029 [US4] Harden `AuthService` logging to prefix-only in `src/modules/auth/auth.service.ts` — all `Logger.log/warn` use `tokenHash.slice(0,6)` never `rawRefresh`; ensure `AllExceptionsFilter` path for `429` forwards `options.headers Retry-After/X-RateLimit-*` already (Phase 10), verify `POST /auth/refresh/logout` Swagger `429`
 
 **Checkpoint**: US4 fully functional — dual `10+5/h` buckets before `FOR UPDATE`, `429` headers, fail-open `200`, prefix-only logs, zero `stock` mutation
 
@@ -125,13 +125,13 @@
 
 **Purpose**: Purge job, docs, final validation
 
-- [ ] T030 [P] Add nightly purge job for `RefreshToken` `7d` in `src/modules/auth/auth.service.ts` or `src/modules/auth/refresh-cleanup.service.ts` — `DELETE FROM refresh_token WHERE (revokedAt IS NOT NULL AND revokedAt < NOW() - INTERVAL '7 days') OR (revokedAt IS NULL AND expiresAt < NOW() - INTERVAL '7 days')` (cron 02:00 or BullMQ `refresh-purge` repeat, ConfigService `REFRESH_PURGE_CRON`), log `purged n`
-- [ ] T031 [P] Update Swagger for all 5 auth refresh routes (`login` extended + `refresh` + `logout` + `logout-all` + `google callback`) with `@ApiOperation` `Refresh via Cookie or Body`, `@ApiResponse 200 {accessToken,refreshToken}` `401/400/429`, and `Set-Cookie`/`X-Email-Unverified` headers in `src/modules/auth/auth.controller.ts`
-- [ ] T032 Run `npm run build` must PASS with `synchronize:false` and no `client.emit` inside `dataSource.transaction` (`grep -c "client.emit" src/modules/auth/auth.service.ts 0`, `grep -c "FOR UPDATE" src/modules/auth/auth.service.ts >=1`)
-- [ ] T033 Run `npm run test -- --runInBand` must PASS including new `auth.service.spec.ts` (T010,T011,T016,T017,T022,T026) with mocked `DataSource`/`CACHE_MANAGER`
-- [ ] T034 Run `npm run test -- src/modules/auth/test/refresh.integration.spec.ts --runInBand` must PASS with real PG `FOR UPDATE` + real Redis `FLUSHDB` (T018,T019,T023,T027) — concurrent `refresh` single-winner, cap 5 LRU, `7d` purge, `429`, `X-Email-Unverified`
+- [x] T030 [P] Add nightly purge job for `RefreshToken` `7d` in `src/modules/auth/auth.service.ts` or `src/modules/auth/refresh-cleanup.service.ts` — `DELETE FROM refresh_token WHERE (revokedAt IS NOT NULL AND revokedAt < NOW() - INTERVAL '7 days') OR (revokedAt IS NULL AND expiresAt < NOW() - INTERVAL '7 days')` (cron 02:00 or BullMQ `refresh-purge` repeat, ConfigService `REFRESH_PURGE_CRON`), log `purged n`
+- [x] T031 [P] Update Swagger for all 5 auth refresh routes (`login` extended + `refresh` + `logout` + `logout-all` + `google callback`) with `@ApiOperation` `Refresh via Cookie or Body`, `@ApiResponse 200 {accessToken,refreshToken}` `401/400/429`, and `Set-Cookie`/`X-Email-Unverified` headers in `src/modules/auth/auth.controller.ts`
+- [x] T032 Run `npm run build` must PASS with `synchronize:false` and no `client.emit` inside `dataSource.transaction` (`grep -c "client.emit" src/modules/auth/auth.service.ts 0`, `grep -c "FOR UPDATE" src/modules/auth/auth.service.ts >=1`)
+- [x] T033 Run `npm run test -- --runInBand` must PASS including new `auth.service.spec.ts` (T010,T011,T016,T017,T022,T026) with mocked `DataSource`/`CACHE_MANAGER`
+- [x] T034 Run `npm run test -- src/modules/auth/test/refresh.integration.spec.ts --runInBand` must PASS with real PG `FOR UPDATE` + real Redis `FLUSHDB` (T018,T019,T023,T027) — concurrent `refresh` single-winner, cap 5 LRU, `7d` purge, `429`, `X-Email-Unverified`
 - [ ] T035 Run E2E `npm run test:e2e -- --runInBand` must PASS for `test/app.e2e-spec.ts` flow `register→login→GET /order 200→POST /auth/refresh 200→reuse old 401 theft→POST /auth/logout 200→POST /auth/logout-all 200 tokenVersion 1→GET /order 401→login new 200`
-- [ ] T036 [P] Update `docs/architecture/auth-refresh.md` + `docs/decisions/ADR-refresh-token.md` (opaque sha256 + FOR UPDATE theft revoke-all + cap 5 + dual rate-limit + 7d purge + X-Email-Unverified) and run `quickstart.md` validation (`psql SELECT tokenHash,expiresAt,revokedAt FROM refresh_token` `active<=5`, `FLUSHDB` `429`, `Set-Cookie` HttpOnly)
+- [x] T036 [P] Update `docs/architecture/auth-refresh.md` + `docs/decisions/ADR-refresh-token.md` (opaque sha256 + FOR UPDATE theft revoke-all + cap 5 + dual rate-limit + 7d purge + X-Email-Unverified) and run `quickstart.md` validation (`psql SELECT tokenHash,expiresAt,revokedAt FROM refresh_token` `active<=5`, `FLUSHDB` `429`, `Set-Cookie` HttpOnly)
 
 ---
 
