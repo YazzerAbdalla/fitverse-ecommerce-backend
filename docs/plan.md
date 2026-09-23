@@ -772,20 +772,76 @@ Reservation
 
 # Phase 10 — Rate Limiting
 
-**Status: PARTIALLY DONE / INFRASTRUCTURE DIRECTION EXISTS**
+**Status: DONE — 2026-09-23** (distributed `CACHE_MANAGER` `rl:*`, per-route `10/60/30` via `ConfigService`, outermost guard before `FOR UPDATE`, fail-open, `429` headers, Swagger, tests)
 
-The application already has rate-limiting requirements.
+**Goal:** Define and enforce per-route throttling with shared Redis state without holding inventory locks.
 
-Remaining work:
+## 10.1 Protected Endpoints & Limits
 
-* [ ] Define protected endpoints
-* [ ] Define limits per endpoint/use case
-* [ ] Decide whether distributed rate limiting is required
-* [ ] Use Redis for shared state when multiple API instances are used
-* [ ] Test rate-limit behavior
-* [ ] Test behavior when Redis is unavailable
+Conceptually (from `specs/010-rate-limiting/spec.md` FR-001/FR-002):
 
-Rate limiting must never compromise transactional inventory correctness.
+```text
+Auth (existing 005, kept): POST /auth/forgot-password 5/h/IP +3/h/email, reset/validate 10/h/IP,
+                           otp/request 5/h/phone+10/h/IP, otp/verify 10/h/phone,
+                           google/callback 20/h/IP, login/register 10/h/IP
+Order (new):               POST /order/checkout (+alias POST /order) 10/h per user else IP
+                           POST/PATCH /order/:id/complete 10/h per user
+Cart (new):                POST /cart + PATCH increase/decrease + DELETE :cartItemId + DELETE /cart 60/h per user (shared bucket)
+Product mutations (new):   GraphQL createProduct/createMany/updateProduct/updateMany/removeProduct/removeAllProducts
+                           + POST /inventory/:productId/increase|decrease 30/h per admin (products:mutation bucket)
+
+Excluded: GET /products /product/:id reads not strictly throttled (uncapped, fail-open cache remains per Phase 9)
+```
+
+All limits via `ConfigService` (`ORDER_CHECKOUT_RL_MAX` etc, default `3600_000` window clamped `>=60000` else fallback + `Logger.warn`).
+
+## 10.2 Distributed State
+
+```text
+Decision: Yes — shared CACHE_MANAGER (createKeyv REDIS_URL) rl:{METHOD} {PATH}:{dim}:{value} → count TTL windowMs
+  rl:POST /auth/login:ip:1.1.1.1 → 7
+  rl:POST /order/checkout:user:<sub> → 10
+  rl:products:mutation:user:<admin> → 30
+Fallback: REDIS_URL empty → in-memory cache-manager per-instance, log "Redis URL not set, using in-memory rate limit (non-distributed)"
+```
+
+## 10.3 Guard
+
+* [x] Define protected endpoints — `RateLimitGuard` `DEFAULT_LIMITS` 16 route keys including dual-bucket `forgot` IP+email and `otp/request` phone+IP
+* [x] Define limits per endpoint/use case — FR-002 table, ConfigService overrides clamped, per-user vs IP (`req.user.sub ?? ip`, `x-forwarded-for` first-value trimmed)
+* [x] Decide whether distributed rate limiting is required — **Yes** via shared `CACHE_MANAGER` (`src/app.module.ts:36` `createKeyv` same as `BullMQ`), two instances share `rl:*`
+* [x] Use Redis for shared state when multiple API instances are used — same connection as `CacheModule` + `BullMQ`, no second client, `GqlExecutionContext` mapping for `products:mutation`
+* [x] Test rate-limit behavior — unit 27 (`rate-limit.guard.spec.ts` 10→429 IP isolated, 3/email +5/IP dual, order 10/user isolation, cart 60 shared, product 30/admin mock, headers) + integration real Redis `FLUSHDB` Two-instance shared counter + `POST /auth/login x11`, `checkout x11` per-user E2E
+* [x] Test behavior when Redis is unavailable — `cache.get/set` throw → `Logger.warn RateLimit Redis fail-open for <routeKey>: ECONNREFUSED` + allow (`true`), no `500`, headers may be absent; proven for `POST /auth/login`, `checkout`, `cart`, `createProduct`
+* [x] Guard outermost — `@UseGuards(RateLimitGuard)` before `@Auth()`/`JwtGuard` in `AuthController` (+register now guarded), `OrderController` (`checkout`+`complete`), `CartController` (all writes), `ProductsResolver` (all mutations); `429` path spy `DataSource.transaction` 0 calls + `Inventory` 0 calls
+
+## 10.4 Headers & Observability
+
+```text
+Success: X-RateLimit-Limit: <max>, X-RateLimit-Remaining: <max-count>
+429: HttpException 429 with options.headers { 'Retry-After': ceil(windowMs/1000)='3600', 'X-RateLimit-Limit': String(limit), 'X-RateLimit-Remaining':'0' }
+AllExceptionsFilter forwards options.headers → res.setHeader → JSON {statusCode:429, message:"Too Many Requests", timestamp}
+Swagger each throttled route @ApiResponse 429, Logger.log "RateLimit guards: auth 5-20/h, checkout 10/h/user, cart 60/h/user, product 30/h/admin (REDIS_URL set, distributed)"
+```
+
+## 10.5 Configuration
+
+```text
+ORDER_CHECKOUT_RL_MAX=10  ORDER_CHECKOUT_RL_WINDOW_MS=3600000
+ORDER_COMPLETE_RL_MAX=10  ORDER_COMPLETE_RL_WINDOW_MS=3600000
+CART_RL_MAX=60            CART_RL_WINDOW_MS=3600000
+PRODUCT_MUTATION_RL_MAX=30 PRODUCT_MUTATION_RL_WINDOW_MS=3600000
+RATE_LIMIT_FAIL_OPEN_METRIC=auth_rate_limit_fallback_total (placeholder)
++ existing REDIS_URL / REDIS_HOST / REDIS_PORT / PRODUCT_CACHE_TTL_MS
+```
+
++ `docs/architecture/rate-limiting.md` (`rl:` namespace, distributed vs in-memory, fail-open, guard order, `AuthModule` exports `RateLimitGuard`).
+
+Rate limiting must never compromise transactional inventory correctness — **preserved**: guard outermost, no `cache.get/set` inside `OrderCheckoutService`/`OrderCompletionService`/`CartService`/`InventoryService`, `available = stock - reservedAmount` still via `FOR UPDATE`.
+
+### Phase 10 Exit Criteria
+
+Distributed, per-route rate limiting enforced via shared Redis with fail-open and inventory-safe gate — **MET 2026-09-23**: `RateLimitGuard` (`src/modules/auth/guards/rate-limit.guard.ts:16` `DEFAULT_LIMITS` 16 keys + `ConfigService` overrides) generalized from auth-only to order `10/h/user`, cart `60/h/user`, product `30/h/admin` with per-user (`req.user.sub ?? ip`) + `x-forwarded-for` handling + `GqlExecutionContext` `products:mutation` mapping; `AuthModule` exports guard, `OrderModule`/`CartModule`/`ProductsModule` import `AuthModule`; `AllExceptionsFilter` forwards `429` headers; `npm run build` + `npm run test -- --runInBand` 23 suites 217 tests PASS (+27 guard spec), 3 controller specs patched via `overrideGuard(RateLimitGuard)`; `docs/plan.md` §10 + `docs/architecture/rate-limiting.md` + `.env.example` updated; Swagger `429` on every throttled route.
 
 ---
 

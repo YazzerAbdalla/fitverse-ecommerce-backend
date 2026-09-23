@@ -48,6 +48,34 @@ export class AllExceptionsFilter implements ExceptionFilter {
         ? exception.getResponse()
         : 'Internal server error';
 
+    // Propagate RateLimit headers if present (B1 full headers: Retry-After + X-RateLimit-*)
+    if (exception instanceof HttpException) {
+      const opts: any = (exception as any).options;
+      const headers = opts?.headers as Record<string, string> | undefined;
+      if (headers) {
+        for (const [k, v] of Object.entries(headers)) {
+          try {
+            response.setHeader(k, v);
+          } catch {
+            // ignore if response not available (e.g., GraphQL)
+          }
+        }
+      }
+      // Also support legacy cause headers
+      const cause: any = (exception as any).cause;
+      if (cause?.headers) {
+        for (const [k, v] of Object.entries(
+          cause.headers as Record<string, string>,
+        )) {
+          try {
+            response.setHeader(k, v);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
     response.status(status).json({
       statusCode: status,
       message,

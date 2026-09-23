@@ -1,4 +1,6 @@
 import { Args, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { UseGuards } from '@nestjs/common';
+import { RateLimitGuard } from '../auth/guards/rate-limit.guard';
 import { CreateProductInput } from './dto/create-product.input';
 import { DeleteResponse } from './dto/delete-reponse.output';
 import { PaginationArgs } from './dto/pagination.dto';
@@ -12,6 +14,7 @@ export class ProductsResolver {
   constructor(private readonly productsService: ProductsService) {}
 
   @Mutation(() => Product)
+  @UseGuards(RateLimitGuard)
   createProduct(
     @Args('createProductInput') createProductInput: CreateProductInput,
   ) {
@@ -19,6 +22,7 @@ export class ProductsResolver {
   }
 
   @Mutation(() => [Product])
+  @UseGuards(RateLimitGuard)
   createManyProducts(
     @Args('createProductInputs', { type: () => [CreateProductInput] })
     createProductInputs: CreateProductInput[],
@@ -37,6 +41,7 @@ export class ProductsResolver {
   }
 
   @Mutation(() => Product)
+  @UseGuards(RateLimitGuard)
   updateProduct(
     @Args('id') id: string,
     @Args('updateProductInput') updateProductInput: UpdateProductInput,
@@ -45,11 +50,13 @@ export class ProductsResolver {
   }
 
   @Mutation(() => Product)
+  @UseGuards(RateLimitGuard)
   removeProduct(@Args('id') id: string) {
     return this.productsService.remove(id);
   }
 
   @Mutation(() => DeleteResponse)
+  @UseGuards(RateLimitGuard)
   async removeAllProducts() {
     const result = await this.productsService.resetAll();
 

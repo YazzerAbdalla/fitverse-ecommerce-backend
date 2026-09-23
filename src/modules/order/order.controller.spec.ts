@@ -5,6 +5,7 @@ import { OrderCheckoutService } from './order-checkout.service';
 import { OrderCompletionService } from './order-completion.service';
 import { JwtGuard } from '../auth/guards/jwt.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { RateLimitGuard } from '../auth/guards/rate-limit.guard';
 import { DataSource } from 'typeorm';
 
 describe('OrderController', () => {
@@ -23,6 +24,8 @@ describe('OrderController', () => {
       .overrideGuard(JwtGuard)
       .useValue({ canActivate: jest.fn().mockReturnValue(true) })
       .overrideGuard(RolesGuard)
+      .useValue({ canActivate: jest.fn().mockReturnValue(true) })
+      .overrideGuard(RateLimitGuard)
       .useValue({ canActivate: jest.fn().mockReturnValue(true) })
       .compile();
 

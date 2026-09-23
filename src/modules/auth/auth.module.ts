@@ -39,6 +39,6 @@ import { RateLimitGuard } from './guards/rate-limit.guard';
     { provide: 'WHATSAPP_PROVIDER', useClass: NoopWhatsAppProvider },
   ],
   controllers: [AuthController],
-  exports: [AuthService],
+  exports: [AuthService, RateLimitGuard],
 })
 export class AuthModule {}

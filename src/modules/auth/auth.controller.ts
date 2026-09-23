@@ -31,6 +31,13 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('/register')
+  @UseGuards(RateLimitGuard)
+  @ApiOperation({ summary: 'Register new user' })
+  @ApiResponse({ status: 201 })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   async register(@Body() userResgisterDto: UserRegisterDto) {
     return await this.authService.register(userResgisterDto);
   }
@@ -39,6 +46,10 @@ export class AuthController {
   @UseGuards(RateLimitGuard, LocalAuthGuard)
   @ApiBody({ type: LoginDto })
   @ApiResponse({ status: 200 })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   async login(@Request() req: ExpressRequest & { user: Partial<User> }) {
     const user: Partial<User> = req.user;
     return await this.authService.login(user);
@@ -47,6 +58,10 @@ export class AuthController {
   @Post('/forgot-password')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Request password reset (anti-enumeration)' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   async forgotPassword(@Body() dto: ForgotPasswordDto) {
     await this.authService.requestPasswordReset(dto.email);
     return { message: 'If an account exists, a reset link has been sent.' };
@@ -55,6 +70,10 @@ export class AuthController {
   @Post('/validate-reset-token')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Validate reset token' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   async validateResetToken(@Body() dto: ValidateResetTokenDto) {
     await this.authService.validateResetToken(dto.email, dto.token);
     return { valid: true };
@@ -63,6 +82,10 @@ export class AuthController {
   @Post('/reset-password')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Reset password with token (single-use)' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   async resetPassword(@Body() dto: ResetPasswordDto) {
     await this.authService.resetPassword(dto);
     return { message: 'Password reset successful.' };
@@ -74,6 +97,10 @@ export class AuthController {
   @UseGuards(RateLimitGuard)
   @ApiOperation({
     summary: 'Request WhatsApp OTP (login / verify_phone) — TODO Future (501)',
+  })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
   })
   async requestOtp(
     @Body() _dto: RequestOtpDto,
@@ -89,6 +116,10 @@ export class AuthController {
   @Post('/otp/verify')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Verify WhatsApp OTP — TODO Future (501)' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   async verifyOtp(@Body() _dto: VerifyOtpDto) {
     throw new HttpException(
       'WhatsApp OTP not enabled — password login only. TODO future.',
@@ -103,8 +134,12 @@ export class AuthController {
   async googleAuth() {}
 
   @Get('/google/callback')
-  @UseGuards(GoogleAuthGuard)
+  @UseGuards(RateLimitGuard, GoogleAuthGuard)
   @ApiOperation({ summary: 'Google OAuth callback (JSON)' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   async googleCallback(@Request() req: ExpressRequest & { user: any }) {
     const profile = req.user;
     const result = await this.authService.handleGoogleLogin(profile);

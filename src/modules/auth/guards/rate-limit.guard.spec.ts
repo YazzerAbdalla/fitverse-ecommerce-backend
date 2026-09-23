@@ -448,4 +448,232 @@ describe('RateLimitGuard', () => {
       }
     });
   });
+
+  describe('order checkout per-user 10/h (SC-003)', () => {
+    const makeAuthContext = (sub: string, ip = '1.1.1.1') => {
+      const res = { setHeader: jest.fn() };
+      const req: any = {
+        method: 'POST',
+        route: { path: '/order/checkout' },
+        path: '/order/checkout',
+        ip,
+        headers: {},
+        body: {},
+        user: { sub },
+      };
+      const ctx: any = {
+        switchToHttp: () => ({ getRequest: () => req, getResponse: () => res }),
+        getType: () => 'http',
+      };
+      return { ctx, req, res };
+    };
+    it('should allow 10 and block 11th per user', async () => {
+      cacheMock.get.mockResolvedValue(9);
+      const { ctx } = makeAuthContext('user-A-uuid');
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
+      cacheMock.get.mockResolvedValue(10);
+      const { ctx: ctx2 } = makeAuthContext('user-A-uuid');
+      await expect(guard.canActivate(ctx2)).rejects.toMatchObject({
+        status: 429,
+      });
+      try {
+        await guard.canActivate(ctx2);
+      } catch (e: any) {
+        expect(e.options.headers['X-RateLimit-Limit']).toBe('10');
+      }
+    });
+    it('should isolate different users same IP', async () => {
+      cacheMock.get.mockImplementation(async (key: string) => {
+        if (key.includes('user-A-uuid')) return 10;
+        if (key.includes('user-B-uuid')) return 0;
+        return 0;
+      });
+      const { ctx: ctxA } = makeAuthContext('user-A-uuid', '5.5.5.5');
+      await expect(guard.canActivate(ctxA)).rejects.toMatchObject({
+        status: 429,
+      });
+      const { ctx: ctxB } = makeAuthContext('user-B-uuid', '5.5.5.5');
+      await expect(guard.canActivate(ctxB)).resolves.toBe(true);
+      expect(cacheMock.get).toHaveBeenCalledWith(
+        expect.stringContaining('user:user-B-uuid'),
+      );
+    });
+    it('should fallback to IP when user missing', async () => {
+      cacheMock.get.mockResolvedValue(0);
+      const res = { setHeader: jest.fn() };
+      const req: any = {
+        method: 'POST',
+        route: { path: '/order/checkout' },
+        path: '/order/checkout',
+        ip: '9.9.9.9',
+        headers: {},
+        body: {},
+      };
+      const ctx: any = {
+        switchToHttp: () => ({ getRequest: () => req, getResponse: () => res }),
+        getType: () => 'http',
+      };
+      await guard.canActivate(ctx);
+      expect(cacheMock.get).toHaveBeenCalledWith(
+        expect.stringContaining(':ip:9.9.9.9'),
+      );
+    });
+  });
+
+  describe('cart 60/h per-user shared bucket (SC-004)', () => {
+    it('should allow 60 and block 61st shared across POST/PATCH/DELETE', async () => {
+      const makeCartCtx = (method: string, path: string, sub: string) => {
+        const res = { setHeader: jest.fn() };
+        const req: any = {
+          method,
+          route: { path },
+          path,
+          ip: '1.1.1.1',
+          headers: {},
+          body: {},
+          user: { sub },
+        };
+        const ctx: any = {
+          switchToHttp: () => ({
+            getRequest: () => req,
+            getResponse: () => res,
+          }),
+          getType: () => 'http',
+        };
+        return ctx;
+      };
+      cacheMock.get.mockResolvedValue(59);
+      await expect(
+        guard.canActivate(makeCartCtx('POST', '/cart', 'user-X')),
+      ).resolves.toBe(true);
+      cacheMock.get.mockResolvedValue(60);
+      await expect(
+        guard.canActivate(makeCartCtx('PATCH', '/cart/increase', 'user-X')),
+      ).rejects.toMatchObject({ status: 429 });
+      try {
+        await guard.canActivate(makeCartCtx('POST', '/cart', 'user-X'));
+      } catch (e: any) {
+        expect(e.options.headers['X-RateLimit-Limit']).toBe('60');
+      }
+    });
+  });
+
+  describe('product mutations 30/h per-admin (SC-004)', () => {
+    it('should allow 30 and block 31st per admin via GraphQL context', async () => {
+      const makeGqlCtx = (sub: string) => {
+        const req: any = {
+          method: 'POST',
+          path: '/graphql',
+          ip: '1.1.1.1',
+          headers: {},
+          body: {},
+          user: { sub },
+        };
+        const res = { setHeader: jest.fn() };
+        const gqlInfo = { fieldName: 'createProduct' } as any;
+        const ctx: any = {
+          switchToHttp: () => ({
+            getRequest: () => req,
+            getResponse: () => res,
+          }),
+          getType: () => 'graphql',
+          getClass: () => {},
+          getHandler: () => {},
+          getArgs: () => [],
+          getArgByIndex: () => {},
+        };
+        // Mock GqlExecutionContext.create to return our info
+        const { GqlExecutionContext } = require('@nestjs/graphql');
+        jest.spyOn(GqlExecutionContext, 'create').mockReturnValueOnce({
+          getInfo: () => gqlInfo,
+          getContext: () => ({ req, res }),
+          getType: () => 'graphql',
+        } as any);
+        // first call will consume mock, second call fallback to http path check for 31st
+        jest.spyOn(GqlExecutionContext, 'create').mockReturnValueOnce({
+          getInfo: () => gqlInfo,
+          getContext: () => ({ req, res }),
+          getType: () => 'graphql',
+        } as any);
+        return { ctx, req, res };
+      };
+      cacheMock.get.mockResolvedValue(29);
+      // need to handle two calls sequentially with mocks above; simpler to test via direct routeKey products:mutation
+      const res = { setHeader: jest.fn() };
+      const req: any = {
+        method: 'POST',
+        route: undefined,
+        path: '/graphql',
+        ip: '1.1.1.1',
+        headers: {},
+        body: {},
+        user: { sub: 'admin-uuid' },
+      };
+      // Force routeKey via Gql mock inside guard: we can bypass by calling with routeKey products:mutation directly via http path trick
+      // Instead test HTTP fallback: set req.path to products:mutation not possible, so test via http POST /graphql not covered; test direct guard bucket via routeKey products:mutation by calling guard with custom req.route.path
+      const gqlReq: any = {
+        method: 'POST',
+        route: undefined,
+        path: '/graphql',
+        ip: '1.1.1.1',
+        headers: {},
+        body: {},
+        user: { sub: 'admin-uuid' },
+      };
+      const gqlCtx: any = {
+        switchToHttp: () => ({
+          getRequest: () => gqlReq,
+          getResponse: () => res,
+        }),
+        getType: () => 'graphql',
+      };
+      // Mock GqlExecutionContext.create to return products:mutation
+      const { GqlExecutionContext } = require('@nestjs/graphql');
+      const spy = jest.spyOn(GqlExecutionContext, 'create').mockReturnValue({
+        getInfo: () => ({ fieldName: 'createProduct' }),
+        getContext: () => ({ req: gqlReq, res }),
+        getType: () => 'graphql',
+      } as any);
+      // 30 → allow
+      cacheMock.get.mockResolvedValue(29);
+      await expect(guard.canActivate(gqlCtx)).resolves.toBe(true);
+      // 31 → block
+      cacheMock.get.mockResolvedValue(30);
+      await expect(guard.canActivate(gqlCtx)).rejects.toMatchObject({
+        status: 429,
+      });
+      try {
+        await guard.canActivate(gqlCtx);
+      } catch (e: any) {
+        expect(e.options.headers['X-RateLimit-Limit']).toBe('30');
+      }
+      spy.mockRestore();
+    });
+  });
+
+  describe('fail-open for order/cart/product on Redis down (SC-005)', () => {
+    it('should allow checkout even when cache throws', async () => {
+      cacheMock.get.mockRejectedValue(new Error('ECONNREFUSED'));
+      const res = { setHeader: jest.fn() };
+      const req: any = {
+        method: 'POST',
+        route: { path: '/order/checkout' },
+        path: '/order/checkout',
+        ip: '1.1.1.1',
+        headers: {},
+        body: {},
+        user: { sub: 'u1' },
+      };
+      const ctx: any = {
+        switchToHttp: () => ({ getRequest: () => req, getResponse: () => res }),
+        getType: () => 'http',
+      };
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
+      expect(loggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'RateLimit Redis fail-open for POST /order/checkout',
+        ),
+      );
+    });
+  });
 });
