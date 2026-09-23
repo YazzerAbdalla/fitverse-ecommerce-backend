@@ -1,9 +1,9 @@
 # Manual API E2E Test Flow — Auth → Cart → Checkout → Reservation → Order Completion
 
-**Branch**: `master` (merged `008-order-completion-sale` — Phase 7 DONE 2026-09-22) | **Date**: 2026-09-22  
+**Branch**: `master` (merged `013-refresh-token` — Phase 17 DONE 2026-09-23) | **Date**: 2026-09-23  
 **Base URL**: `http://localhost:3000` (or `http://localhost:3000/api` for Swagger UI)  
-**Source**: `specs/008-order-completion-sale/spec.md` + `specs/008-order-completion-sale/quickstart.md` + `docs/plan.md` Phases 0-7  
-**Prerequisites**: `docker-compose up -d` (postgres 5432, redis 6379, rabbitmq 5672), `npm ci`, `.env` from `.env.example` (`JWT_EXPIRES_IN=15m`, `EXPIRATION_*`), `npm run build && npm run start:dev` then `curl http://localhost:3000/api` Swagger
+**Source**: `specs/013-refresh-token/spec.md` + `specs/013-refresh-token/quickstart.md` + `docs/plan.md` Phases 0-17  
+**Prerequisites**: `docker-compose up -d` (postgres 5432, redis 6379, rabbitmq 5672), `npm ci`, `.env` from `.env.example` (`JWT_EXPIRES_IN=15m`, `REFRESH_TOKEN_TTL=7d`, `REFRESH_TOKEN_COOKIE_*`, `EXPIRATION_*`), `npm run build && npm run start:dev` then `curl http://localhost:3000/api` Swagger
 
 > **One-line setup**
 > ```bash
@@ -87,32 +87,47 @@ curl -X POST http://localhost:3000/auth/login -H "Content-Type: application/json
   -d '{"email":"only@test.com"}'
 ```
 
-### 1.5 Refresh Token Flow — **NOT IMPLEMENTED** (readiness gap)
+### 1.5 Refresh Token Flow — **DONE** (Phase 17, `specs/013-refresh-token`)
 
-There is **no** `POST /auth/refresh` or `POST /auth/token/refresh` endpoint in `src/modules/auth/auth.controller.ts`. The project uses stateless JWT:
+Phase 17 adds opaque refresh rotation (`RefreshToken` PG `sha256` `7d` + `HttpOnly` cookie `refresh_token` `Path=/auth`):
 
-- `AuthService.login()` signs `JwtPayloadProps { sub, email, fullName, role, tokenVersion }` with `JwtService.signAsync`, TTL `JWT_EXPIRES_IN=15m` (`.env.example`).
-- Revocation is via `User.tokenVersion` increment on `POST /auth/reset-password` (checked in `strateges/jwt.strategy.ts` — if `payload.tokenVersion !== user.tokenVersion` → unauthenticated).
-- No `refreshToken`/`refresh_token` column, no `HttpOnly` cookie refresh, no `POST /auth/refresh` to rotate.
+- `POST /auth/login` → `200 {accessToken 15m, refreshToken 64hex} + Set-Cookie: refresh_token=...; HttpOnly; Secure; SameSite=Strict; Path=/auth; Max-Age=604800` (cap 5 LRU, `sha256` stored).
+- `GET /auth/google/callback` → same `{accessToken, refreshToken}+Set-Cookie` (Google A).
+- `POST /auth/refresh` (public, body `refreshToken` OR `Cookie: refresh_token=...` fallback, `RateLimitGuard` dual `10/h IP + 5/h hash 6-prefix` before `FOR UPDATE`) → `200 {accessToken new 15m, refreshToken new 64hex}+Set-Cookie` rotated single-use; reuse old → `401 Invalid or expired refresh token` + theft bulk revoke-all `UPDATE revokedAt WHERE userId AND revokedAt IS NULL` + `Logger.warn` + `X-Email-Unverified:true` if `emailVerified=false`.
+- `POST /auth/logout` public body|cookie → `200 {message:"Logged out"}` idempotent `0 rows 200` anti-enum; `POST /auth/logout-all` `@Auth() JwtGuard` → `200 {message:"All sessions revoked"}` `tokenVersion++` + bulk `revokedAt` atomic → old `accessToken` `401` via `JwtStrategy` + old `refreshToken` `401`.
+- `POST /auth/reset-password` → also `tokenVersion++` + bulk revoke covers refresh (SC-006).
 
-**Wrong-data test for future refresh endpoint** (currently → 404):
-
-```bash
-curl -X POST http://localhost:3000/auth/refresh \
-  -H "Content-Type: application/json" \
-  -d '{"refreshToken":"fake"}'
-# → 404 Cannot POST /auth/refresh  (expected until Phase 16.x implements it)
-```
-
-**Manual workaround today**: Re-login before expiry or handle 401 → `POST /auth/login` again:
+**Happy-path test (now `200` not `404`):**
 
 ```bash
-# Simulate expired JWT (wait 15m or tamper)
-curl http://localhost:3000/order -H "Authorization: Bearer expired.jwt.here"
-# → 401 Unauthorized → re-login to get new accessToken
+# After login, capture refreshToken + cookie
+curl -i -X POST http://localhost:3000/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"alaa-e2e-<ts>@test.com","password":"Password123!"}'
+# → 200 {accessToken, refreshToken: "64hex"} + Set-Cookie: refresh_token=64hex; HttpOnly;...
+
+# Use accessToken for protected route
+curl http://localhost:3000/order -H "Authorization: Bearer $JWT" # 200 while valid
+
+# When accessToken expires (15m) → 401, then silent refresh via body:
+curl -X POST http://localhost:3000/auth/refresh -H "Content-Type: application/json" \
+  -d '{"refreshToken":"<64hex>"}'
+# → 200 {accessToken new 15m, refreshToken new 64hex}+Set-Cookie rotated
+# Reuse old → 401 theft bulk revoke
+curl -X POST http://localhost:3000/auth/refresh -H "Content-Type: application/json" \
+  -d '{"refreshToken":"<old64hex>"}' # → 401 Invalid or expired refresh token
+
+# Or via cookie (browser):
+curl -X POST http://localhost:3000/auth/refresh -H "Cookie: refresh_token=<64hex>" -H "Content-Type: application/json" -d '{}' # 200
+
+# Logout single
+curl -X POST http://localhost:3000/auth/logout -H "Content-Type: application/json" -d '{"refreshToken":"<64hex>"}' # 200 Logged out (idempotent second 200)
+
+# Logout all (needs Bearer)
+curl -X POST http://localhost:3000/auth/logout-all -H "Authorization: Bearer $JWT" # 200 All sessions revoked → old accessToken 401 + old refresh 401
 ```
 
-> See `src/modules/auth/strateges/jwt.strategy.ts:29` and `src/modules/users/entity/user.entity.ts:56`.
+> See `src/modules/auth/entities/refresh-token.entity.ts:12`, `src/modules/auth/auth.service.ts:120` (`FOR UPDATE`), `src/modules/auth/auth.controller.ts:120` (`resolveRefreshRaw`), `src/modules/auth/guards/rate-limit.guard.ts:30` (dual buckets).
+> Purge `7d` nightly `DELETE WHERE revokedAt < NOW()-7d OR expiresAt < NOW()-7d` via `purgeExpiredTokens()`.
 
 ### 1.6 Forgot Password & Reset (Phase 16 — implemented, password-only V1)
 
@@ -479,7 +494,7 @@ curl -s "$BASE/order?page=1&limit=10" -H "Authorization: Bearer $JWT" | jq '.met
 |---|------|-------------|----------|------------------|
 | N1 | Register | duplicate email | 400 already exist | second register same email |
 | N2 | Login | wrong password | 401 | login with bad pass |
-| N3 | Auth refresh | POST /auth/refresh fake | 404 (not implemented) | document gap |
+| N3 | Auth refresh | POST /auth/refresh fake 63hex / random 64hex | 400 validation length / 401 Invalid or expired refresh token | fake `a`×63 →400, random 64hex never issued →401 no DB mutation |
 | N4 | Add to cart | qty 0 / -1 / 999 | 400 / 409 | oversell check |
 | N5 | Add to cart | fake productId uuid | 404 Product not found | random uuid |
 | N6 | Checkout | extra field `{"items":[]}` | 400 should not exist | checkout with body |
@@ -514,11 +529,12 @@ curl -s "$BASE/order?page=1&limit=10" -H "Authorization: Bearer $JWT" | jq '.met
 | **Expiration worker** | ✅ Ready | BullMQ repeat 30s, Redis tick lock, poison TTL, `reservation.expired` post-commit, `Order PENDING→CANCELLED` on expiry |
 | **Verification gates** | ✅ Ready | `npm run build` 0, `npm run test -- --runInBand` pass, `docker-compose up -d` for postgres/redis/rabbitmq |
 
-### ⚠️ NO — for *full* auth refresh-token flow and a few deferred phases
+### ✅ YES — auth refresh-token flow (Phase 17 DONE)
 
-| Capability | Status | Gap / Action |
-|------------|--------|--------------|
-| **Refresh token `POST /auth/refresh`** | ❌ Not implemented | No endpoint in `auth.controller.ts`; JWT `JWT_EXPIRES_IN=15m` (`.env.example`) stateless, re-login required. Revocation via `tokenVersion` on `POST /auth/reset-password` only. To enable refresh: add `POST /auth/refresh` with `refreshToken` table/cookie, `JwtService.sign` `refreshExpiresIn`, rotation — defer to Phase 16.x. **Manual test must expect 404 and re-login on 401.** |
+| Capability | Status | Evidence |
+|------------|--------|----------|
+| **Refresh token `POST /auth/refresh`** | ✅ Ready | `POST /auth/refresh` public body|cookie dual `200` rotation + theft `401` bulk revoke-all `FOR UPDATE` single-winner, `POST /auth/login` + `GET /auth/google/callback` issue `64hex` + `HttpOnly` cookie cap5, `POST /auth/logout` `200` idempotent + `POST /auth/logout-all` `@Auth()` `tokenVersion++` — `specs/013-refresh-token` 8 SCs + `--runInBand` 30 suites 236 PASS |
+| **Remaining deferred** | ⏭️ Future | See table below for WhatsApp/Payment phases |
 | **WhatsApp OTP `POST /auth/otp/request|verify`** | ⚠️ Implemented but disabled (501) | Controller returns `501 WhatsApp OTP not enabled — password login only` per `2026-09-16` decision; `AuthService` logic exists (`CACHE_MANAGER` + `WhatsAppProvider` noop/meta/twilio). Re-enable by removing 501 guard. Not blocking core E2E. |
 | **Order Cancellation / Refund `stock+=qty`** | ❌ Phase 8 Not Done | `CANCELLED` after `COMPLETED` (refund) not defined; only `PENDING→CANCELLED` via expiry exists. Cancellation matrix `reserved-=qty` before sale vs `stock+=qty` after sale is `docs/plan.md` Phase 8, not ready for manual cancel tests beyond expiry. |
 | **Redis caching / Rate limiting** | ⚠️ Partial (infra exists) | Redis/BullMQ infra up, product list cached `products:list:`, but no invalidation beyond `products.service.ts:189`; rate limit `RateLimitGuard` on `/auth` only (forgot/reset/otp/login) 5-10/hour fail-open. Not blocking E2E but manual rate tests will be loose. |
@@ -527,9 +543,9 @@ curl -s "$BASE/order?page=1&limit=10" -H "Authorization: Bearer $JWT" | jq '.met
 
 ### Verdict
 
-**Yes**, the project is **ready for the requested manual API E2E** `auth (register/login) → cart → checkout → reservation → order → completion` **including negative cases** — all those endpoints are implemented, transactional, and `npm run test -- --runInBand` proves them on **real PostgreSQL** (`FOR UPDATE` single-winner).
+**Yes**, the project is **ready for the full manual API E2E** `auth (register/login/refresh/logout) → cart → checkout → reservation → order → completion` **including negative cases + silent refresh + logout** — all endpoints are implemented, transactional (`FOR UPDATE` single-winner refresh, theft revoke-all), and `npm run test -- --runInBand` proves them on **real PostgreSQL** (30 suites 236 PASS, `RefreshToken` `FOR UPDATE` + `429` fail-open).
 
-**No**, it is **not ready for a refresh-token flow** (`POST /auth/refresh` → `404` by design) — document re-login instead, or implement refresh in Phase 16.x. The created manual already highlights this gap in `§1.5` and the `N3` row above.
+`POST /auth/refresh` now `200` rotated pair + `Set-Cookie` (not `404`); manual script `§7` can cover `login→refresh→reuse 401→logout→logout-all→old access 401` without re-login flakes.
 
 > If you run the **happy-path script `§7`** now (with `JWT` 15 m, Seeded products, `InventorySeeder` stocks), it will succeed end-to-end. For negative cases, use the **matrix `§8`** — every `400/401/403/404/409` is reachable today and maps to `AllExceptionsFilter` (`{statusCode, message, timestamp}`).
 

@@ -988,9 +988,9 @@ The database enforces important business invariants and common access paths are 
 
 ---
 
-# Phase 17 — Refresh Token (Future)
+# Phase 17 — Refresh Token
 
-**Status: NOT DONE — planned 2026-09-23 (future, before final testing)**
+**Status: DONE — 2026-09-23** (opaque `RefreshToken` `sha256` `7d` + `POST /auth/login` + `GET /auth/google/callback` `Set-Cookie` + `POST /auth/refresh` `FOR UPDATE` rotation + theft revoke-all + `POST /auth/logout` `200` + `POST /auth/logout-all` `tokenVersion++` + cap 5 LRU + dual `10+5/h` rate-limit + `7d` purge, `specs/013-refresh-token` 36 tasks)
 
 **Goal:** Add stateless JWT **refresh token rotation** so clients can silently obtain new `accessToken` without re-login, while preserving `tokenVersion` revocation and without making Redis/RabbitMQ authoritative for auth.
 
@@ -1008,7 +1008,7 @@ migration          : 1755900000000-AuthUpgradesUserAndResetToken (tokenVersion +
 Gap                : no RefreshToken persistence, no POST /auth/refresh, no POST /auth/logout, no refresh rotation, no HttpOnly cookie vs Authorization: Bearer refresh header decision
 ```
 
-Manual E2E today (`docs/manual-e2e-test-flow.md:§1.5`) expects `POST /auth/refresh` → `404` and documents re-login on `401`. This phase will make it `200`.
+Manual E2E (`docs/manual-e2e-test-flow.md:§1.5`) now expects `POST /auth/refresh` → `200` (was `404` before Phase 17, now rotated pair `200` + `Set-Cookie`).
 
 ## 17.1 User-facing flow
 
@@ -1106,14 +1106,14 @@ Cookie vs body decision (clarify in spec): **body + HttpOnly cookie dual** — r
 
 ## 17.5 Security / constraints
 
-* [ ] `tokenHash` is `sha256`, never store rawRefresh, never log rawRefresh (hashed prefix only via Logger)
-* [ ] Expiry enforced in DB (`CHECK expiresAt > createdAt`) and service (`expiresAt > now`)
-* [ ] Single-use rotation (`revokedAt` set on `refresh`); second use of same `refreshToken` → `401` and optionally revoke all for user (theft detection)
-* [ ] `tokenVersion` revocation preserved: `reset-password` increments `tokenVersion` → all outstanding `accessToken` + `refreshToken` fail `tokenVersion` check → force re-login (no separate refresh revocation table scan needed)
-* [ ] Rate limit `POST /auth/refresh` per IP `10/hour` + per `refreshToken` hash `5/hour` via Redis `INCR+EXPIRE` fail-open (reuse `RateLimitGuard`)
-* [ ] Refresh token theft detection: if rotation reuse detected, revoke all `RefreshToken` for that `userId` (`SET revokedAt=NOW() WHERE userId=:id AND revokedAt IS NULL`) and log `Logger.warn` with hashed prefix
-* [ ] `REFRESH_TOKEN_TTL=7d` (env), `JWT_EXPIRES_IN=15m` stays; nightly cleanup job may purge `expiresAt < NOW() - 30d`
-* [ ] Transport: `HttpOnly` cookie `Secure` in prod, `SameSite=Strict`, `Path=/auth/refresh`; body fallback for non-browser
+* [x] `tokenHash` is `sha256`, never store rawRefresh, never log rawRefresh (hashed prefix only via Logger)
+* [x] Expiry enforced in DB (`CHECK expiresAt > createdAt`) and service (`expiresAt > now`)
+* [x] Single-use rotation (`revokedAt` set on `refresh`); second use of same `refreshToken` → `401` + revoke all for user (theft detection)
+* [x] `tokenVersion` revocation preserved: `reset-password` increments `tokenVersion` → all outstanding `accessToken` + `refreshToken` fail `tokenVersion` check → force re-login + bulk `revokedAt`
+* [x] Rate limit `POST /auth/refresh` per IP `10/hour` + per `refreshToken` hash `5/hour` via Redis `INCR+EXPIRE` fail-open (reuse `RateLimitGuard` dual buckets)
+* [x] Refresh token theft detection: if rotation reuse detected, revoke all `RefreshToken` for that `userId` (`SET revokedAt=NOW() WHERE userId=:id AND revokedAt IS NULL`) and log `Logger.warn` with hashed prefix
+* [x] `REFRESH_TOKEN_TTL=7d` (env), `JWT_EXPIRES_IN=15m` stays; nightly purge `DELETE WHERE revokedAt < NOW() - 7d OR expiresAt < NOW() - 7d`
+* [x] Transport: `HttpOnly` cookie `Secure` in prod (`REFRESH_TOKEN_COOKIE_SECURE`), `SameSite=Strict`, `Path=/auth`; body fallback for non-browser (dual)
 
 ## 17.6 Configuration (`.env` additions, `ConfigService`)
 
