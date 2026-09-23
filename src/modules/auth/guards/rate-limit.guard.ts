@@ -5,16 +5,16 @@ import {
   HttpStatus,
   Injectable,
   Logger,
+  Optional,
 } from '@nestjs/common';
 import { Inject } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
 import { Request } from 'express';
+import { ConfigService } from '@nestjs/config';
+import { GqlExecutionContext } from '@nestjs/graphql';
 
-const LIMITS: Record<
-  string,
-  { max: number; windowMs: number; keyFn?: (req: Request) => string }
-> = {
+const DEFAULT_LIMITS: Record<string, { max: number; windowMs: number }> = {
   'POST /auth/forgot-password': { max: 5, windowMs: 3600_000 },
   'POST /auth/forgot-password:email': { max: 3, windowMs: 3600_000 },
   'POST /auth/reset-password': { max: 10, windowMs: 3600_000 },
@@ -25,52 +25,100 @@ const LIMITS: Record<
   'GET /auth/google/callback': { max: 20, windowMs: 3600_000 },
   'POST /auth/login': { max: 10, windowMs: 3600_000 },
   'POST /auth/register': { max: 10, windowMs: 3600_000 },
+  // Phase 10 — Order / Cart / Product mutations
+  'POST /order/checkout': { max: 10, windowMs: 3600_000 },
+  'POST /order': { max: 10, windowMs: 3600_000 },
+  'POST /order/:id/complete': { max: 10, windowMs: 3600_000 },
+  'PATCH /order/:id/complete': { max: 10, windowMs: 3600_000 },
+  'POST /cart': { max: 60, windowMs: 3600_000 },
+  'PATCH /cart/increase': { max: 60, windowMs: 3600_000 },
+  'PATCH /cart/decrease': { max: 60, windowMs: 3600_000 },
+  'DELETE /cart': { max: 60, windowMs: 3600_000 },
+  'DELETE /cart/:cartItemId': { max: 60, windowMs: 3600_000 },
+  'products:mutation': { max: 30, windowMs: 3600_000 },
 };
 
+/**
+ * This guard is responsible for distributed per-route rate limiting (Redis shared, fail-open).
+ * It handles IP and per-email/phone/user buckets via the shared CACHE_MANAGER (createKeyv REDIS_URL),
+ * enforces fixed-window quotas (auth 5-20/h, checkout/complete 10/h/user, cart 60/h/user, product 30/h/admin),
+ * applies outermost before JwtGuard/DataSource.transaction so throttling never holds inventory FOR UPDATE,
+ * and fails open on Redis errors (warn + allow).
+ */
 @Injectable()
 export class RateLimitGuard implements CanActivate {
   private readonly logger = new Logger(RateLimitGuard.name);
-  constructor(@Inject(CACHE_MANAGER) private cache: Cache) {}
+  constructor(
+    @Inject(CACHE_MANAGER) private cache: Cache,
+    @Optional() private readonly configService: ConfigService,
+  ) {
+    const redisUrl = this.configService?.get<string>('REDIS_URL');
+    if (!redisUrl) {
+      this.logger.warn(
+        'Redis URL not set, using in-memory rate limit (non-distributed)',
+      );
+    }
+    const checkoutMax = this.getConfigMax(
+      'ORDER_CHECKOUT_RL_MAX',
+      DEFAULT_LIMITS['POST /order/checkout'].max,
+    );
+    const checkoutWin = this.getConfigWindow(
+      'ORDER_CHECKOUT_RL_WINDOW_MS',
+      DEFAULT_LIMITS['POST /order/checkout'].windowMs,
+    );
+    const cartMax = this.getConfigMax(
+      'CART_RL_MAX',
+      DEFAULT_LIMITS['POST /cart'].max,
+    );
+    const prodMax = this.getConfigMax(
+      'PRODUCT_MUTATION_RL_MAX',
+      DEFAULT_LIMITS['products:mutation'].max,
+    );
+    this.logger.log(
+      `RateLimit guards: auth 5-20/h, checkout ${checkoutMax}/h/user (win ${checkoutWin}ms), cart ${cartMax}/h/user, product ${prodMax}/h/admin (REDIS_URL ${redisUrl ? 'set, distributed' : 'unset, in-memory'})`,
+    );
+  }
 
+  /**
+   * Determines if request is allowed under rate limits.
+   * @param context - Nest execution context (HTTP or GraphQL).
+   * @returns true if allowed, throws 429 if exceeded.
+   */
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = context.switchToHttp().getRequest<Request>();
-    const routeKey = `${req.method} ${req.route?.path || req.path}`;
-    const cfg = LIMITS[routeKey];
-    if (!cfg) return true;
+    const req = this.extractRequest(context);
+    const routeKey = this.resolveRouteKey(req, context);
+    const limits = this.getLimitsForRoute(routeKey, req);
+    if (!limits || limits.length === 0) return true;
 
     try {
-      const ip =
-        (req.headers['x-forwarded-for'] as string) || req.ip || 'unknown';
-      const ipKey = `rl:${routeKey}:ip:${ip}`;
-      const count = ((await this.cache.get<number>(ipKey)) || 0) + 1;
-      await (this.cache as any).set(ipKey, count, cfg.windowMs);
+      // For routes with single bucket (most), handle per-user vs IP
+      // For dual-bucket auth routes, handle both
+      for (const bucket of limits) {
+        const key = this.buildRateLimitKey(
+          bucket.routeKey,
+          bucket.dim,
+          bucket.value,
+        );
+        const count = ((await this.cache.get<number>(key)) || 0) + 1;
+        await (this.cache as any).set(key, count, bucket.windowMs);
 
-      // email/phone specific limits
-      let extraKey: string | null = null;
-      if (routeKey === 'POST /auth/forgot-password' && req.body?.email) {
-        extraKey = `rl:${routeKey}:email:${req.body.email}`;
-      } else if (
-        routeKey === 'POST /auth/otp/request' &&
-        req.body?.phoneNumber
-      ) {
-        extraKey = `rl:${routeKey}:phone:${req.body.phoneNumber}`;
+        if (count > bucket.max) {
+          throw this.tooMany(key, bucket.max, bucket.windowMs);
+        }
+
+        // On success, set headers for primary bucket only (first)
+        // to avoid overwriting; remaining reflects this bucket
+        if (bucket === limits[0]) {
+          const res: any = this.extractResponse(context);
+          if (res && typeof res.setHeader === 'function') {
+            res.setHeader('X-RateLimit-Limit', String(bucket.max));
+            res.setHeader(
+              'X-RateLimit-Remaining',
+              String(Math.max(0, bucket.max - count)),
+            );
+          }
+        }
       }
-      if (extraKey) {
-        const c = ((await this.cache.get<number>(extraKey)) || 0) + 1;
-        await (this.cache as any).set(extraKey, c, cfg.windowMs);
-        const limit = routeKey === 'POST /auth/forgot-password' ? 3 : 5;
-        if (c > limit) throw this.tooMany(extraKey, limit);
-      }
-
-      if (count > cfg.max) throw this.tooMany(ipKey, cfg.max);
-
-      // set headers even on success
-      const res = context.switchToHttp().getResponse();
-      res.setHeader('X-RateLimit-Limit', String(cfg.max));
-      res.setHeader(
-        'X-RateLimit-Remaining',
-        String(Math.max(0, cfg.max - count)),
-      );
     } catch (e) {
       if (
         e instanceof HttpException &&
@@ -78,25 +126,356 @@ export class RateLimitGuard implements CanActivate {
       )
         throw e;
       this.logger.warn(`RateLimit Redis fail-open for ${routeKey}: ${e}`);
-      // fail-open metric
-      // metric: auth_rate_limit_fallback_total would be incremented here
     }
     return true;
   }
 
-  private tooMany(_key: string, limit: number): HttpException {
+  /**
+   * Resolves route key for throttling.
+   * @param req - Express request.
+   * @param context - Execution context.
+   * @returns Route key like `POST /auth/login` or `products:mutation`.
+   */
+  private resolveRouteKey(req: any, context: ExecutionContext): string {
+    // GraphQL mutations: map to products:mutation bucket if field is product mutation
+    try {
+      const gqlCtx = GqlExecutionContext.create(context);
+      const info: any = gqlCtx.getInfo?.();
+      const fieldName: string | undefined = info?.fieldName;
+      const productMutations = new Set([
+        'createProduct',
+        'createManyProducts',
+        'updateProduct',
+        'removeProduct',
+        'removeAllProducts',
+      ]);
+      // updateMany is not a resolver field but check generic
+      if (
+        fieldName &&
+        (productMutations.has(fieldName) || fieldName === 'updateMany')
+      ) {
+        return 'products:mutation';
+      }
+    } catch {
+      // not graphql, fallback to http
+    }
+
+    const method: string = req.method || 'UNKNOWN';
+    const path: string = req.route?.path || req.path || '';
+
+    // Normalize order complete parameterized path
+    // Express may have /order/:id/complete as route.path
+    if (path.includes('/order/') && path.includes('/complete')) {
+      // keep as POST /order/:id/complete or PATCH
+      if (method === 'POST') return 'POST /order/:id/complete';
+      if (method === 'PATCH') return 'PATCH /order/:id/complete';
+    }
+    if (path.includes('/cart/') && method === 'DELETE') {
+      return 'DELETE /cart/:cartItemId';
+    }
+
+    const raw = `${method} ${path}`.trim();
+    // Direct match
+    if ((DEFAULT_LIMITS as any)[raw]) return raw;
+    // Fallback for routeKey with method+path but path may be /order/checkout vs /order
+    return raw;
+  }
+
+  /**
+   * Returns limits for route, applying ConfigService overrides.
+   * @param routeKey - Route key.
+   * @param req - Request for dimension extraction.
+   * @returns Array of buckets to check.
+   */
+  private getLimitsForRoute(
+    routeKey: string,
+    req: any,
+  ): Array<{
+    routeKey: string;
+    dim: string;
+    value: string;
+    max: number;
+    windowMs: number;
+  }> {
+    const makeBucket = (
+      rk: string,
+      dim: string,
+      value: string,
+      max: number,
+      windowMs: number,
+    ) => ({ routeKey: rk, dim, value, max, windowMs });
+
+    // Auth dual buckets handled separately
+    if (routeKey === 'POST /auth/forgot-password') {
+      const buckets: any[] = [];
+      const ip = this.extractIp(req);
+      const ipMax = this.getEffectiveMax(
+        routeKey,
+        DEFAULT_LIMITS[routeKey].max,
+      );
+      const ipWin = this.getEffectiveWindow(
+        routeKey,
+        DEFAULT_LIMITS[routeKey].windowMs,
+      );
+      buckets.push(makeBucket(routeKey, 'ip', ip, ipMax, ipWin));
+      // per-email only if body.email present
+      if (req.body?.email) {
+        const email = String(req.body.email).toLowerCase();
+        const emailKey = 'POST /auth/forgot-password:email';
+        const emailMax = this.getEffectiveMax(
+          emailKey,
+          DEFAULT_LIMITS[emailKey].max,
+        );
+        const emailWin = this.getEffectiveWindow(
+          emailKey,
+          DEFAULT_LIMITS[emailKey].windowMs,
+        );
+        buckets.push(makeBucket(emailKey, 'email', email, emailMax, emailWin));
+      }
+      return buckets;
+    }
+    if (routeKey === 'POST /auth/otp/request') {
+      const buckets: any[] = [];
+      const phone = req.body?.phoneNumber;
+      if (phone) {
+        const phoneMax = this.getEffectiveMax(
+          routeKey,
+          DEFAULT_LIMITS[routeKey].max,
+        );
+        const phoneWin = this.getEffectiveWindow(
+          routeKey,
+          DEFAULT_LIMITS[routeKey].windowMs,
+        );
+        buckets.push(
+          makeBucket(routeKey, 'phone', String(phone), phoneMax, phoneWin),
+        );
+      }
+      const ip = this.extractIp(req);
+      const ipKey = 'POST /auth/otp/request:ip';
+      const ipMax = this.getEffectiveMax(ipKey, DEFAULT_LIMITS[ipKey].max);
+      const ipWin = this.getEffectiveWindow(
+        ipKey,
+        DEFAULT_LIMITS[ipKey].windowMs,
+      );
+      buckets.push(makeBucket(ipKey, 'ip', ip, ipMax, ipWin));
+      return buckets;
+    }
+
+    // Order / Cart / Product per-user logic
+    const perUserRoutes = new Set([
+      'POST /order/checkout',
+      'POST /order',
+      'POST /order/:id/complete',
+      'PATCH /order/:id/complete',
+      'POST /cart',
+      'PATCH /cart/increase',
+      'PATCH /cart/decrease',
+      'DELETE /cart',
+      'DELETE /cart/:cartItemId',
+      'products:mutation',
+    ]);
+
+    if (perUserRoutes.has(routeKey)) {
+      const userSub: string | undefined = req.user?.sub;
+      // per-user only if authenticated, else fallback to IP
+      const dim = userSub ? 'user' : 'ip';
+      const value = userSub ? String(userSub) : this.extractIp(req);
+      const max = this.getEffectiveMax(
+        routeKey,
+        DEFAULT_LIMITS[routeKey]?.max ?? 60,
+      );
+      const windowMs = this.getEffectiveWindow(
+        routeKey,
+        DEFAULT_LIMITS[routeKey]?.windowMs ?? 3600_000,
+      );
+      return [makeBucket(routeKey, dim, value, max, windowMs)];
+    }
+
+    // Standard single-bucket auth routes
+    const def = (DEFAULT_LIMITS as any)[routeKey];
+    if (!def) return [];
+    const ip = this.extractIp(req);
+    const max = this.getEffectiveMax(routeKey, def.max);
+    const windowMs = this.getEffectiveWindow(routeKey, def.windowMs);
+    return [makeBucket(routeKey, 'ip', ip, max, windowMs)];
+  }
+
+  /**
+   * Builds rate-limit key.
+   * @param routeKey - Route key.
+   * @param dim - Dimension (ip, email, phone, user).
+   * @param value - Dimension value.
+   * @returns Key `rl:{routeKey}:{dim}:{value}`.
+   */
+  private buildRateLimitKey(
+    routeKey: string,
+    dim: string,
+    value: string,
+  ): string {
+    return `rl:${routeKey}:${dim}:${value}`;
+  }
+
+  /**
+   * Extracts client IP deterministically.
+   * @param req - Request.
+   * @returns IP string.
+   */
+  private extractIp(req: any): string {
+    const header = req.headers?.['x-forwarded-for'] as string | undefined;
+    // x-forwarded-for may be "a,b,c" -> take first trimmed
+    if (header) {
+      const first = header.split(',')[0]?.trim();
+      if (first) return first;
+    }
+    return req.ip || 'unknown';
+  }
+
+  /**
+   * Extracts request (HTTP or GraphQL).
+   * @param context - Execution context.
+   * @returns Request object.
+   */
+  private extractRequest(context: ExecutionContext): any {
+    try {
+      const gqlCtx = GqlExecutionContext.create(context);
+      const gqlReq = gqlCtx.getContext()?.req;
+      if (gqlReq) return gqlReq;
+    } catch {
+      // ignore
+    }
+    return context.switchToHttp().getRequest<Request>();
+  }
+
+  /**
+   * Extracts response for header setting.
+   * @param context - Execution context.
+   * @returns Response or null.
+   */
+  private extractResponse(context: ExecutionContext): any {
+    try {
+      const gqlCtx = GqlExecutionContext.create(context);
+      const gqlCtxObj = gqlCtx.getContext();
+      if (gqlCtxObj?.res) return gqlCtxObj.res;
+    } catch {
+      // ignore
+    }
+    try {
+      return context.switchToHttp().getResponse();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Gets max from config with fallback.
+   * @param routeKey - Route key.
+   * @param fallback - Default max.
+   * @returns Effective max.
+   */
+  private getEffectiveMax(routeKey: string, fallback: number): number {
+    const envMap: Record<string, string> = {
+      'POST /order/checkout': 'ORDER_CHECKOUT_RL_MAX',
+      'POST /order': 'ORDER_CHECKOUT_RL_MAX',
+      'POST /order/:id/complete': 'ORDER_COMPLETE_RL_MAX',
+      'PATCH /order/:id/complete': 'ORDER_COMPLETE_RL_MAX',
+      'POST /cart': 'CART_RL_MAX',
+      'PATCH /cart/increase': 'CART_RL_MAX',
+      'PATCH /cart/decrease': 'CART_RL_MAX',
+      'DELETE /cart': 'CART_RL_MAX',
+      'DELETE /cart/:cartItemId': 'CART_RL_MAX',
+      'products:mutation': 'PRODUCT_MUTATION_RL_MAX',
+    };
+    const envKey = envMap[routeKey];
+    if (!envKey) return fallback;
+    return this.getConfigMax(envKey, fallback);
+  }
+
+  /**
+   * Gets windowMs from config with fallback and clamp.
+   * @param routeKey - Route key.
+   * @param fallback - Default windowMs.
+   * @returns Effective windowMs clamped >=60000.
+   */
+  private getEffectiveWindow(routeKey: string, fallback: number): number {
+    const envMap: Record<string, string> = {
+      'POST /order/checkout': 'ORDER_CHECKOUT_RL_WINDOW_MS',
+      'POST /order': 'ORDER_CHECKOUT_RL_WINDOW_MS',
+      'POST /order/:id/complete': 'ORDER_COMPLETE_RL_WINDOW_MS',
+      'PATCH /order/:id/complete': 'ORDER_COMPLETE_RL_WINDOW_MS',
+      'POST /cart': 'CART_RL_WINDOW_MS',
+      'PATCH /cart/increase': 'CART_RL_WINDOW_MS',
+      'PATCH /cart/decrease': 'CART_RL_WINDOW_MS',
+      'DELETE /cart': 'CART_RL_WINDOW_MS',
+      'DELETE /cart/:cartItemId': 'CART_RL_WINDOW_MS',
+      'products:mutation': 'PRODUCT_MUTATION_RL_WINDOW_MS',
+    };
+    const envKey = envMap[routeKey];
+    if (!envKey) return fallback;
+    return this.getConfigWindow(envKey, fallback);
+  }
+
+  /**
+   * Parses max from ConfigService.
+   * @param key - Env key.
+   * @param fallback - Fallback max.
+   * @returns Parsed max or fallback with warn.
+   */
+  private getConfigMax(key: string, fallback: number): number {
+    const raw = this.configService?.get<string | number>(key);
+    if (raw === undefined || raw === null || raw === '') return fallback;
+    const parsed = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      this.logger.warn(
+        `Invalid rate-limit max config ${key}="${raw}", fallback to ${fallback}`,
+      );
+      return fallback;
+    }
+    return parsed;
+  }
+
+  /**
+   * Parses windowMs from ConfigService with clamp.
+   * @param key - Env key.
+   * @param fallback - Fallback window.
+   * @returns Clamped windowMs.
+   */
+  private getConfigWindow(key: string, fallback: number): number {
+    const raw = this.configService?.get<string | number>(key);
+    if (raw === undefined || raw === null || raw === '') return fallback;
+    const parsed = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
+    if (!Number.isFinite(parsed) || parsed < 60000) {
+      this.logger.warn(
+        `Invalid rate-limit window config ${key}="${raw}", fallback to ${fallback} (min 60000)`,
+      );
+      return fallback;
+    }
+    return parsed;
+  }
+
+  /**
+   * Creates 429 exception with B1 headers.
+   * @param _key - Key for logging (not used in header).
+   * @param limit - Limit that was exceeded.
+   * @param windowMs - Window for Retry-After.
+   * @returns HttpException 429.
+   */
+  private tooMany(
+    _key: string,
+    limit: number,
+    windowMs: number = 3600_000,
+  ): HttpException {
+    const retryAfter = String(Math.ceil(windowMs / 1000));
     const ex: any = new HttpException(
       'Too Many Requests',
       HttpStatus.TOO_MANY_REQUESTS,
     );
     ex.options = {
       headers: {
-        'Retry-After': '3600',
+        'Retry-After': retryAfter,
         'X-RateLimit-Limit': String(limit),
         'X-RateLimit-Remaining': '0',
       },
     };
-    // Nest will set status 429; headers set via filter if needed
     return ex;
   }
 }

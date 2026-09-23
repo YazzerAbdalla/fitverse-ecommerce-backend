@@ -6,8 +6,10 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { RateLimitGuard } from '../auth/guards/rate-limit.guard';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -33,10 +35,15 @@ export class OrderController {
   ) {}
 
   @Post('checkout')
+  @UseGuards(RateLimitGuard)
   @Auth()
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Checkout cart → Order + Reservation' })
   @ApiResponse({ status: 201, description: 'Order created' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   async checkout(@CurrentUser('sub') userId: string, @Body() dto: CheckoutDto) {
     const result = await this.orderCheckoutService.checkout(userId);
     // Return shape per contracts: {id, userId, status, total, createdAt, reservationId, expiresAt, items}
@@ -63,6 +70,7 @@ export class OrderController {
 
   // Alias deprecated POST /order -> checkout
   @Post()
+  @UseGuards(RateLimitGuard)
   @Auth()
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({
@@ -88,6 +96,7 @@ export class OrderController {
    * @throws ConflictException if invalid transition or DB CHECK violation.
    */
   @Post(':id/complete')
+  @UseGuards(RateLimitGuard)
   @Auth()
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Complete pending order → sale (stock-=qty)' })
@@ -100,6 +109,10 @@ export class OrderController {
   @ApiResponse({
     status: 409,
     description: 'Invalid transition or insufficient stock',
+  })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
   })
   async complete(
     @CurrentUser('sub') userId: string,
@@ -149,6 +162,7 @@ export class OrderController {
    * @returns Completed Order.
    */
   @Patch(':id/complete')
+  @UseGuards(RateLimitGuard)
   @Auth()
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({

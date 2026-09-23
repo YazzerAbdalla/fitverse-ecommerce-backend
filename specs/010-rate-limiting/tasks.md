@@ -20,9 +20,9 @@
 
 **Purpose**: Verify base infra and create scaffolding for distributed rate limiting
 
-- [ ] T001 Verify `CacheModule` global and `REDIS_URL` in `src/app.module.ts:36` and `.env.example`, ensure `CacheTestService` ping still logs but does not crash in `src/cache-test.service.ts`
-- [ ] T002 [P] Create env placeholders for rate-limit overrides in `.env.example` (add `ORDER_CHECKOUT_RL_MAX`, `ORDER_CHECKOUT_RL_WINDOW_MS`, `ORDER_COMPLETE_RL_MAX`, `ORDER_COMPLETE_RL_WINDOW_MS`, `CART_RL_MAX`, `CART_RL_WINDOW_MS`, `PRODUCT_MUTATION_RL_MAX`, `PRODUCT_MUTATION_RL_WINDOW_MS`, `RATE_LIMIT_FAIL_OPEN_METRIC`) without hardcoding in service
-- [ ] T003 [P] Confirm `AllExceptionsFilter` forwards `ex.options.headers` (`Retry-After`, `X-RateLimit-*`) for `HttpStatus.TOO_MANY_REQUESTS` in `src/filters/all-exceptions.filter.ts`
+- [x] T001 Verify `CacheModule` global and `REDIS_URL` in `src/app.module.ts:36` and `.env.example`, ensure `CacheTestService` ping still logs but does not crash in `src/cache-test.service.ts`
+- [x] T002 [P] Create env placeholders for rate-limit overrides in `.env.example` (add `ORDER_CHECKOUT_RL_MAX`, `ORDER_CHECKOUT_RL_WINDOW_MS`, `ORDER_COMPLETE_RL_MAX`, `ORDER_COMPLETE_RL_WINDOW_MS`, `CART_RL_MAX`, `CART_RL_WINDOW_MS`, `PRODUCT_MUTATION_RL_MAX`, `PRODUCT_MUTATION_RL_WINDOW_MS`, `RATE_LIMIT_FAIL_OPEN_METRIC`) without hardcoding in service
+- [x] T003 [P] Confirm `AllExceptionsFilter` forwards `ex.options.headers` (`Retry-After`, `X-RateLimit-*`) for `HttpStatus.TOO_MANY_REQUESTS` in `src/filters/all-exceptions.filter.ts`
 
 ---
 
@@ -32,12 +32,12 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Extend `RateLimitGuard` in `src/modules/auth/guards/rate-limit.guard.ts` to inject `ConfigService` and `Logger`, keep existing auth `LIMITS` (forgot 5/3, reset/validate 10, otp, google 20, login/register 10) byte-equal for regression SC-008
-- [ ] T005 [P] Add ConfigService-driven limits helper `getLimitsForRoute(routeKey)` in `src/modules/auth/guards/rate-limit.guard.ts` parsing `ORDER_CHECKOUT_RL_MAX` etc via `parseInt` with NaN fallback to defaults and `Logger.warn` + clamp `windowMs >= 60000` → 3600000
-- [ ] T006 [P] Add deterministic key helpers `buildRateLimitKey(routeKey, dim, value)`, `extractIp(req)`, `extractEmail/Phone/User(req)` (x-forwarded-for first-value trimmed → `req.ip` → unknown, email lowercased, `req.user?.sub ?? ip` fallback) in `src/modules/auth/guards/rate-limit.guard.ts` with JSDoc `/** @param @returns */` and `//` intent comments per `AGENTS.md` §3
-- [ ] T007 Add `toTooManyException(limit, windowMs)` in `src/modules/auth/guards/rate-limit.guard.ts` throwing `HttpException 429` with `options.headers { 'Retry-After': ceil(windowMs/1000), 'X-RateLimit-Limit': limit, 'X-RateLimit-Remaining':'0' }` and success path `res.setHeader('X-RateLimit-Limit', Remaining)`
-- [ ] T008 Export `RateLimitGuard` from `src/modules/auth/auth.module.ts` (`exports: [AuthService, RateLimitGuard]`) and ensure `CACHE_MANAGER` + `ConfigService` providers visible to importing modules
-- [ ] T009 Add class-level `/** This guard is responsible for distributed per-route rate limiting (Redis shared, fail-open) ... */` and method-level JSDoc for every public/private helper in `src/modules/auth/guards/rate-limit.guard.ts`
+- [x] T004 Extend `RateLimitGuard` in `src/modules/auth/guards/rate-limit.guard.ts` to inject `ConfigService` and `Logger`, keep existing auth `LIMITS` (forgot 5/3, reset/validate 10, otp, google 20, login/register 10) byte-equal for regression SC-008
+- [x] T005 [P] Add ConfigService-driven limits helper `getLimitsForRoute(routeKey)` in `src/modules/auth/guards/rate-limit.guard.ts` parsing `ORDER_CHECKOUT_RL_MAX` etc via `parseInt` with NaN fallback to defaults and `Logger.warn` + clamp `windowMs >= 60000` → 3600000
+- [x] T006 [P] Add deterministic key helpers `buildRateLimitKey(routeKey, dim, value)`, `extractIp(req)`, `extractEmail/Phone/User(req)` (x-forwarded-for first-value trimmed → `req.ip` → unknown, email lowercased, `req.user?.sub ?? ip` fallback) in `src/modules/auth/guards/rate-limit.guard.ts` with JSDoc `/** @param @returns */` and `//` intent comments per `AGENTS.md` §3
+- [x] T007 Add `toTooManyException(limit, windowMs)` in `src/modules/auth/guards/rate-limit.guard.ts` throwing `HttpException 429` with `options.headers { 'Retry-After': ceil(windowMs/1000), 'X-RateLimit-Limit': limit, 'X-RateLimit-Remaining':'0' }` and success path `res.setHeader('X-RateLimit-Limit', Remaining)`
+- [x] T008 Export `RateLimitGuard` from `src/modules/auth/auth.module.ts` (`exports: [AuthService, RateLimitGuard]`) and ensure `CACHE_MANAGER` + `ConfigService` providers visible to importing modules
+- [x] T009 Add class-level `/** This guard is responsible for distributed per-route rate limiting (Redis shared, fail-open) ... */` and method-level JSDoc for every public/private helper in `src/modules/auth/guards/rate-limit.guard.ts`
 
 **Checkpoint**: Foundation ready — guard core compiled (`npm run build` passes), unit wiring independently testable in isolation
 
@@ -53,15 +53,15 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T010 [P] [US1] Unit test auth `POST /auth/login` 10→429 IP isolated in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `CACHE_MANAGER.get/set` jest.fn, `ExecutionContext` `req.method POST`, `req.route.path /auth/login`, `req.ip 1.1.1.1` + `x-forwarded-for`, `res.setHeader` spy, ConfigService defaults)
-- [ ] T011 [P] [US1] Unit test `POST /auth/forgot-password` per-email 3 + per-IP 5 two-bucket in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `req.body.email`, verify two `cache.get` keys `rl:...:ip` and `rl:...:email:lc`, 4th email 429 `Limit:3`, 6th IP 429 `Limit:5`)
-- [ ] T012 [P] [US1] Integration test real Redis `FLUSHDB` auth 10→429 isolation in `src/modules/auth/test/rate-limit.integration.spec.ts` (Test.createTestingModule + CacheModule shared store, call `canActivate` 11× same IP, 11th `HttpException 429`, different IP true)
+- [x] T010 [P] [US1] Unit test auth `POST /auth/login` 10→429 IP isolated in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `CACHE_MANAGER.get/set` jest.fn, `ExecutionContext` `req.method POST`, `req.route.path /auth/login`, `req.ip 1.1.1.1` + `x-forwarded-for`, `res.setHeader` spy, ConfigService defaults)
+- [x] T011 [P] [US1] Unit test `POST /auth/forgot-password` per-email 3 + per-IP 5 two-bucket in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `req.body.email`, verify two `cache.get` keys `rl:...:ip` and `rl:...:email:lc`, 4th email 429 `Limit:3`, 6th IP 429 `Limit:5`)
+- [x] T012 [P] [US1] Integration test real Redis `FLUSHDB` auth 10→429 isolation in `src/modules/auth/test/rate-limit.integration.spec.ts` (Test.createTestingModule + CacheModule shared store, call `canActivate` 11× same IP, 11th `HttpException 429`, different IP true)
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Verify existing `@UseGuards(RateLimitGuard)` on `POST /auth/*` routes in `src/modules/auth/auth.controller.ts` still applied (`/register`, `/login` with `LocalAuthGuard`, `/forgot-password`, `/validate-reset-token`, `/reset-password`, `/otp/request`, `/otp/verify`) and guard is outermost before `LocalAuthGuard` — no change except JSDoc update if reordered
-- [ ] T014 [US1] Add regression assertion that `LIMITS` for auth routes equals `005-auth-upgrades` defaults (5/3, 10, 5/phone+10/IP, 20, 10) in `src/modules/auth/guards/rate-limit.guard.spec.ts` snapshot or explicit equality check
-- [ ] T015 [US1] Run `npm run test -- --runInBand` and `npm run build` for auth guard regression — fix any header `Retry-After` mismatch (must be `3600`)
+- [x] T013 [US1] Verify existing `@UseGuards(RateLimitGuard)` on `POST /auth/*` routes in `src/modules/auth/auth.controller.ts` still applied (`/register`, `/login` with `LocalAuthGuard`, `/forgot-password`, `/validate-reset-token`, `/reset-password`, `/otp/request`, `/otp/verify`) and guard is outermost before `LocalAuthGuard` — no change except JSDoc update if reordered
+- [x] T014 [US1] Add regression assertion that `LIMITS` for auth routes equals `005-auth-upgrades` defaults (5/3, 10, 5/phone+10/IP, 20, 10) in `src/modules/auth/guards/rate-limit.guard.spec.ts` snapshot or explicit equality check
+- [x] T015 [US1] Run `npm run test -- --runInBand` and `npm run build` for auth guard regression — fix any header `Retry-After` mismatch (must be `3600`)
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently — auth bursts throttled, headers correct, no `AuthService` call on 429, non-regression proven
 
@@ -75,17 +75,17 @@
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T016 [P] [US2] Unit test `POST /order/checkout` per-user 10→429 isolation in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `req.user.sub` uuid, `req.headers x-forwarded-for`, `req.route.path /order/checkout`, verify key `rl:POST /order/checkout:user:<sub>`, 11th 429, different `sub` still true)
-- [ ] T017 [P] [US2] Unit test `POST /order/:id/complete` per-user 10→429 in `src/modules/auth/guards/rate-limit.guard.spec.ts` (route `POST /order/:id/complete` + alias `PATCH`, same per-user key, 11th 429, spy `dataSource.transaction` not called)
-- [ ] T018 [P] [US2] Integration test real Redis `FLUSHDB` per-user isolation in `src/modules/order/test/rate-limit.integration.spec.ts` (new file, Test.createTestingModule with `AuthModule` guard + `OrderModule`, two users same IP, A 10→429, B 1→true)
-- [ ] T019 [US2] E2E `supertest` checkout burst `x11` in `test/order-rate-limit.e2e-spec.ts` (new, `POST /auth/login` get token, `POST /order/checkout` 11×, 11th 429 body `{statusCode:429}`, verify `Order` table count still 10)
+- [x] T016 [P] [US2] Unit test `POST /order/checkout` per-user 10→429 isolation in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `req.user.sub` uuid, `req.headers x-forwarded-for`, `req.route.path /order/checkout`, verify key `rl:POST /order/checkout:user:<sub>`, 11th 429, different `sub` still true)
+- [x] T017 [P] [US2] Unit test `POST /order/:id/complete` per-user 10→429 in `src/modules/auth/guards/rate-limit.guard.spec.ts` (route `POST /order/:id/complete` + alias `PATCH`, same per-user key, 11th 429, spy `dataSource.transaction` not called)
+- [x] T018 [P] [US2] Integration test real Redis `FLUSHDB` per-user isolation in `src/modules/order/test/rate-limit.integration.spec.ts` (new file, Test.createTestingModule with `AuthModule` guard + `OrderModule`, two users same IP, A 10→429, B 1→true)
+- [x] T019 [US2] E2E `supertest` checkout burst `x11` in `test/order-rate-limit.e2e-spec.ts` (new, `POST /auth/login` get token, `POST /order/checkout` 11×, 11th 429 body `{statusCode:429}`, verify `Order` table count still 10)
 
 ### Implementation for User Story 2
 
-- [ ] T020 [US2] Wire `@UseGuards(RateLimitGuard)` outermost on `POST /order/checkout` and alias `POST /order` in `src/modules/order/order.controller.ts` (before `@Auth()`/`JwtGuard`, add `ApiResponse 429`, keep JSDoc)
-- [ ] T021 [US2] Wire `@UseGuards(RateLimitGuard)` outermost on `POST /order/:id/complete` and `PATCH /order/:id/complete` in `src/modules/order/order.controller.ts` (per-user bucket, before `@Auth()`)
-- [ ] T022 [US2] Import `AuthModule` (or `RateLimitGuard` provider) in `src/modules/order/order.module.ts` (`imports: [AuthModule, TypeOrmModule.forFeature([Order, OrderItem]), ...]`) so guard DI resolves `CACHE_MANAGER`/`ConfigService`
-- [ ] T023 [US2] Add IP fallback path `req.user?.sub ?? extractIp(req)` in guard for checkout when JWT missing (verify `401` still from `Auth` after `429` check) in `src/modules/auth/guards/rate-limit.guard.ts`
+- [x] T020 [US2] Wire `@UseGuards(RateLimitGuard)` outermost on `POST /order/checkout` and alias `POST /order` in `src/modules/order/order.controller.ts` (before `@Auth()`/`JwtGuard`, add `ApiResponse 429`, keep JSDoc)
+- [x] T021 [US2] Wire `@UseGuards(RateLimitGuard)` outermost on `POST /order/:id/complete` and `PATCH /order/:id/complete` in `src/modules/order/order.controller.ts` (per-user bucket, before `@Auth()`)
+- [x] T022 [US2] Import `AuthModule` (or `RateLimitGuard` provider) in `src/modules/order/order.module.ts` (`imports: [AuthModule, TypeOrmModule.forFeature([Order, OrderItem]), ...]`) so guard DI resolves `CACHE_MANAGER`/`ConfigService`
+- [x] T023 [US2] Add IP fallback path `req.user?.sub ?? extractIp(req)` in guard for checkout when JWT missing (verify `401` still from `Auth` after `429` check) in `src/modules/auth/guards/rate-limit.guard.ts`
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should both work independently — checkout/complete throttled per-user before DB, second user isolated, inventory lock never held under 429
 
@@ -99,20 +99,20 @@
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T024 [P] [US3] Unit test `POST /cart` 60→429 shared bucket with `PATCH/DELETE` in `src/modules/auth/guards/rate-limit.guard.spec.ts` (same user sub, `POST /cart` + `PATCH /cart/increase` + `DELETE /cart` share `CART_RL_MAX=60`, 61st 429 `Limit:60`)
-- [ ] T025 [P] [US3] Unit test product mutations `products:mutation` 30→429 per-admin in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `GqlExecutionContext` + `req.user.sub` admin uuid, guard extracts via `getContext().req`, 30× true, 31st 429 `Limit:30`, different admin still true)
-- [ ] T026 [P] [US3] Unit test fail-open `CACHE_MANAGER.get/set` throwing `ECONNREFUSED` in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `cache.get` reject, `cache.set` reject, route `POST /cart` and `products:mutation`, expect true + `Logger.warn` spy `RateLimit Redis fail-open for <routeKey>`)
-- [ ] T027 [P] [US3] Unit test success headers `X-RateLimit-Limit/Remaining` on `POST /cart` in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `count 5`, `CART_RL_MAX 60`, expect `res.setHeader('X-RateLimit-Limit','60')` and `Remaining '55'`)
-- [ ] T028 [P] [US3] Integration test distributed two-instance shared counter in `src/modules/auth/test/rate-limit.distributed.integration.spec.ts` (new file, two `Test.createTestingModule` with same shared Map provider, A 5 + B 55 `POST /cart` same user, B 61st 429)
-- [ ] T029 [P] [US3] Integration test Redis-down fail-open real guard in `src/modules/cart/test/rate-limit.integration.spec.ts` (new, spy `cache.get` reject, `POST /cart` still `true`)
+- [x] T024 [P] [US3] Unit test `POST /cart` 60→429 shared bucket with `PATCH/DELETE` in `src/modules/auth/guards/rate-limit.guard.spec.ts` (same user sub, `POST /cart` + `PATCH /cart/increase` + `DELETE /cart` share `CART_RL_MAX=60`, 61st 429 `Limit:60`)
+- [x] T025 [P] [US3] Unit test product mutations `products:mutation` 30→429 per-admin in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `GqlExecutionContext` + `req.user.sub` admin uuid, guard extracts via `getContext().req`, 30× true, 31st 429 `Limit:30`, different admin still true)
+- [x] T026 [P] [US3] Unit test fail-open `CACHE_MANAGER.get/set` throwing `ECONNREFUSED` in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `cache.get` reject, `cache.set` reject, route `POST /cart` and `products:mutation`, expect true + `Logger.warn` spy `RateLimit Redis fail-open for <routeKey>`)
+- [x] T027 [P] [US3] Unit test success headers `X-RateLimit-Limit/Remaining` on `POST /cart` in `src/modules/auth/guards/rate-limit.guard.spec.ts` (mock `count 5`, `CART_RL_MAX 60`, expect `res.setHeader('X-RateLimit-Limit','60')` and `Remaining '55'`)
+- [x] T028 [P] [US3] Integration test distributed two-instance shared counter in `src/modules/auth/test/rate-limit.distributed.integration.spec.ts` (new file, two `Test.createTestingModule` with same shared Map provider, A 5 + B 55 `POST /cart` same user, B 61st 429)
+- [x] T029 [P] [US3] Integration test Redis-down fail-open real guard in `src/modules/cart/test/rate-limit.integration.spec.ts` (new, spy `cache.get` reject, `POST /cart` still `true`)
 
 ### Implementation for User Story 3
 
-- [ ] T030 [US3] Wire `@UseGuards(RateLimitGuard)` outermost on `POST /cart`, `PATCH /cart/increase`, `PATCH /cart/decrease`, `DELETE /cart/:cartItemId`, `DELETE /cart` in `src/modules/cart/cart.controller.ts` (per-user `60/h` shared, before `@Auth(User)`, add `ApiResponse 429`)
-- [ ] T031 [US3] Import `AuthModule` in `src/modules/cart/cart.module.ts` to provide `RateLimitGuard` DI
-- [ ] T032 [US3] Wire `@UseGuards(RateLimitGuard)` on GraphQL mutations `createProduct`, `createManyProducts`, `updateProduct`, `updateMany`, `removeProduct`, `removeAllProducts` in `src/modules/products/products.resolver.ts` (per-method or resolver-level, handle `GqlExecutionContext.create(ctx).getContext().req` fallback to `switchToHttp`, map to `products:mutation` bucket, before any `@Auth` if added)
-- [ ] T033 [US3] (Optional) Wire `@UseGuards(RateLimitGuard)` on `POST /inventory/:productId/increase|decrease` in `src/modules/inventory/inventory.controller.ts` (same `products:mutation` bucket `30/h` per admin) — if not exposed, document as TODO in `docs/architecture/rate-limiting.md`
-- [ ] T034 [US3] Ensure guard imports `GqlExecutionContext` from `@nestjs/graphql` for resolver path in `src/modules/auth/guards/rate-limit.guard.ts` with fallback `context.switchToHttp().getRequest()` and inline `// GraphQL vs REST context extraction` comment
+- [x] T030 [US3] Wire `@UseGuards(RateLimitGuard)` outermost on `POST /cart`, `PATCH /cart/increase`, `PATCH /cart/decrease`, `DELETE /cart/:cartItemId`, `DELETE /cart` in `src/modules/cart/cart.controller.ts` (per-user `60/h` shared, before `@Auth(User)`, add `ApiResponse 429`)
+- [x] T031 [US3] Import `AuthModule` in `src/modules/cart/cart.module.ts` to provide `RateLimitGuard` DI
+- [x] T032 [US3] Wire `@UseGuards(RateLimitGuard)` on GraphQL mutations `createProduct`, `createManyProducts`, `updateProduct`, `updateMany`, `removeProduct`, `removeAllProducts` in `src/modules/products/products.resolver.ts` (per-method or resolver-level, handle `GqlExecutionContext.create(ctx).getContext().req` fallback to `switchToHttp`, map to `products:mutation` bucket, before any `@Auth` if added)
+- [x] T033 [US3] (Optional) Wire `@UseGuards(RateLimitGuard)` on `POST /inventory/:productId/increase|decrease` in `src/modules/inventory/inventory.controller.ts` (same `products:mutation` bucket `30/h` per admin) — if not exposed, document as TODO in `docs/architecture/rate-limiting.md`
+- [x] T034 [US3] Ensure guard imports `GqlExecutionContext` from `@nestjs/graphql` for resolver path in `src/modules/auth/guards/rate-limit.guard.ts` with fallback `context.switchToHttp().getRequest()` and inline `// GraphQL vs REST context extraction` comment
 
 **Checkpoint**: All user stories 1–3 should now be independently functional — cart 60/h shared bucket before DB, product 30/h per-admin, fail-open allows on Redis throw, distributed counts shared
 
@@ -126,15 +126,15 @@
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T035 [P] [US4] Unit test inventory lock never held on 429 in `src/modules/order/order.controller.spec.ts` (mock `RateLimitGuard` throws 429 via `cache.get` populated, spy `orderCheckoutService.checkout` 0 calls, `dataSource.transaction` 0 calls)
-- [ ] T036 [P] [US4] Unit test headers on success vs 429 in `src/modules/auth/guards/rate-limit.guard.spec.ts` (success case asserts `res.setHeader('X-RateLimit-Limit','10')`+`Remaining`, 429 case asserts `ex.options.headers['Retry-After']='3600'` and `X-RateLimit-Remaining:'0'`)
-- [ ] T037 [P] [US4] E2E `supertest` headers propagation in `test/rate-limit-headers.e2e-spec.ts` (new, `POST /auth/login` 1× → `x-ratelimit-limit 10` present, 11× → `retry-after 3600` present, check `AllExceptionsFilter` body shape)
+- [x] T035 [P] [US4] Unit test inventory lock never held on 429 in `src/modules/order/order.controller.spec.ts` (mock `RateLimitGuard` throws 429 via `cache.get` populated, spy `orderCheckoutService.checkout` 0 calls, `dataSource.transaction` 0 calls)
+- [x] T036 [P] [US4] Unit test headers on success vs 429 in `src/modules/auth/guards/rate-limit.guard.spec.ts` (success case asserts `res.setHeader('X-RateLimit-Limit','10')`+`Remaining`, 429 case asserts `ex.options.headers['Retry-After']='3600'` and `X-RateLimit-Remaining:'0'`)
+- [x] T037 [P] [US4] E2E `supertest` headers propagation in `test/rate-limit-headers.e2e-spec.ts` (new, `POST /auth/login` 1× → `x-ratelimit-limit 10` present, 11× → `retry-after 3600` present, check `AllExceptionsFilter` body shape)
 
 ### Implementation for User Story 4
 
-- [ ] T038 [US4] Add `@ApiResponse({ status: 429, description: 'Too Many Requests — Retry-After: 3600' })` to every throttled handler in `src/modules/auth/auth.controller.ts`, `src/modules/order/order.controller.ts`, `src/modules/cart/cart.controller.ts`, `src/modules/products/products.resolver.ts`
-- [ ] T039 [US4] Add `Logger.log RateLimit guards: auth 5-20/h, checkout 10/h/user, cart 60/h/user, product 30/h/admin (REDIS_URL <set|unset>, distributed|in-memory)` on first activation or `onModuleInit` in `src/modules/auth/guards/rate-limit.guard.ts`
-- [ ] T040 [US4] Document protected routes map + limits table + `rl:` key pattern + shared vs in-memory + fail-open + inventory never inside guard in `docs/architecture/rate-limiting.md` (new file) or extend `docs/architecture/modules.md` with same content per plan
+- [x] T038 [US4] Add `@ApiResponse({ status: 429, description: 'Too Many Requests — Retry-After: 3600' })` to every throttled handler in `src/modules/auth/auth.controller.ts`, `src/modules/order/order.controller.ts`, `src/modules/cart/cart.controller.ts`, `src/modules/products/products.resolver.ts`
+- [x] T039 [US4] Add `Logger.log RateLimit guards: auth 5-20/h, checkout 10/h/user, cart 60/h/user, product 30/h/admin (REDIS_URL <set|unset>, distributed|in-memory)` on first activation or `onModuleInit` in `src/modules/auth/guards/rate-limit.guard.ts`
+- [x] T040 [US4] Document protected routes map + limits table + `rl:` key pattern + shared vs in-memory + fail-open + inventory never inside guard in `docs/architecture/rate-limiting.md` (new file) or extend `docs/architecture/modules.md` with same content per plan
 
 **Checkpoint**: At this point, User Stories 1–4 should all be independently functional — all 8 SCs observable: auth isolation, forgot two-bucket, checkout per-user before transaction, cart 60/h no read throttle, fail-open warn, distributed shared, 0 lock under 429, headers+Swagger
 
@@ -144,12 +144,12 @@
 
 **Purpose**: Env, docs, and verification that cross multiple stories
 
-- [ ] T041 Update `.env.example` with `ORDER_CHECKOUT_RL_MAX=10`, `ORDER_CHECKOUT_RL_WINDOW_MS=3600000`, `ORDER_COMPLETE_RL_MAX=10`, `ORDER_COMPLETE_RL_WINDOW_MS=3600000`, `CART_RL_MAX=60`, `CART_RL_WINDOW_MS=3600000`, `PRODUCT_MUTATION_RL_MAX=30`, `PRODUCT_MUTATION_RL_WINDOW_MS=3600000` in project root `.env.example`
-- [ ] T042 [P] Update `docs/plan.md` Phase 10 section to mark Exit Criteria met (list protected endpoints + limits + distributed + Redis shared + fail-open) and reference `specs/010-rate-limiting/spec.md` — keep `synchronize:false` note
-- [ ] T043 [P] Run `npm run lint` and fix any guard JSDoc or `no-console` violations in `src/modules/auth/guards/rate-limit.guard.ts` and wired controllers
-- [ ] T044 Run `npm run build` and `npm run test -- --runInBand` (≥20 suites + 8+ new) — all PASS, no regression on `005-auth-upgrades` limits (`forgot 5/3`, `reset 10`, `login 10`) byte-equal per SC-008
-- [ ] T045 Run quickstart validation from `specs/010-rate-limiting/quickstart.md` (manual bursts `POST /auth/login x11`, `POST /order/checkout x11` per-user, `POST /cart x61`, `FLUSHDB` distributed, Redis-down `docker-compose stop redis` → still 200)
-- [ ] T046 [P] Clean up `Logger.warn` messages to match exact strings expected in tests (`RateLimit Redis fail-open for ${routeKey}:` and `Redis URL not set, using in-memory rate limit (non-distributed)`)
+- [x] T041 Update `.env.example` with `ORDER_CHECKOUT_RL_MAX=10`, `ORDER_CHECKOUT_RL_WINDOW_MS=3600000`, `ORDER_COMPLETE_RL_MAX=10`, `ORDER_COMPLETE_RL_WINDOW_MS=3600000`, `CART_RL_MAX=60`, `CART_RL_WINDOW_MS=3600000`, `PRODUCT_MUTATION_RL_MAX=30`, `PRODUCT_MUTATION_RL_WINDOW_MS=3600000` in project root `.env.example`
+- [x] T042 [P] Update `docs/plan.md` Phase 10 section to mark Exit Criteria met (list protected endpoints + limits + distributed + Redis shared + fail-open) and reference `specs/010-rate-limiting/spec.md` — keep `synchronize:false` note
+- [x] T043 [P] Run `npm run lint` and fix any guard JSDoc or `no-console` violations in `src/modules/auth/guards/rate-limit.guard.ts` and wired controllers
+- [x] T044 Run `npm run build` and `npm run test -- --runInBand` (≥20 suites + 8+ new) — all PASS, no regression on `005-auth-upgrades` limits (`forgot 5/3`, `reset 10`, `login 10`) byte-equal per SC-008
+- [x] T045 Run quickstart validation from `specs/010-rate-limiting/quickstart.md` (manual bursts `POST /auth/login x11`, `POST /order/checkout x11` per-user, `POST /cart x61`, `FLUSHDB` distributed, Redis-down `docker-compose stop redis` → still 200)
+- [x] T046 [P] Clean up `Logger.warn` messages to match exact strings expected in tests (`RateLimit Redis fail-open for ${routeKey}:` and `Redis URL not set, using in-memory rate limit (non-distributed)`)
 
 ---
 

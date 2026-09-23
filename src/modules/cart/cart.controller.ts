@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -17,6 +18,7 @@ import { Auth } from '../auth/decorators/auth.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { UserRoles } from '../users/enum/roles';
 import { CartService } from './cart.service';
+import { RateLimitGuard } from '../auth/guards/rate-limit.guard';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemQuantityDto } from './dto/update-cart-item-quantity.dto';
 import { CartItem } from './entities/cart-items.entity';
@@ -41,6 +43,7 @@ export class CartController {
   }
 
   @Post()
+  @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: "Add a product to the authenticated user's cart." })
   @ApiResponse({
     status: 201,
@@ -59,6 +62,10 @@ export class CartController {
     status: 409,
     description: 'Insufficient stock for the requested quantity.',
   })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   addItem(
     @CurrentUser('sub') userId: string,
     @Body() addCartItemDto: AddCartItemDto,
@@ -71,6 +78,7 @@ export class CartController {
   }
 
   @Patch('increase')
+  @UseGuards(RateLimitGuard)
   @ApiOperation({
     summary: 'Increase the quantity of a product in the cart.',
   })
@@ -91,6 +99,10 @@ export class CartController {
     status: 409,
     description: 'Insufficient stock for the requested quantity.',
   })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   increaseItem(
     @CurrentUser('sub') userId: string,
     @Body() updateCartItemQuantityDto: UpdateCartItemQuantityDto,
@@ -103,6 +115,7 @@ export class CartController {
   }
 
   @Patch('decrease')
+  @UseGuards(RateLimitGuard)
   @ApiOperation({
     summary: 'Decrease the quantity of a product in the cart.',
   })
@@ -119,6 +132,10 @@ export class CartController {
     status: 404,
     description: 'Product is not in the cart.',
   })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   decreaseItem(
     @CurrentUser('sub') userId: string,
     @Body() updateCartItemQuantityDto: UpdateCartItemQuantityDto,
@@ -131,6 +148,7 @@ export class CartController {
   }
 
   @Delete(':cartItemId')
+  @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Remove an item from the cart.' })
   @ApiResponse({
     status: 200,
@@ -141,6 +159,10 @@ export class CartController {
     status: 404,
     description: 'Cart or cart item not found.',
   })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
   removeItem(
     @CurrentUser('sub') userId: string,
     @Param('cartItemId') cartItemId: string,
@@ -149,6 +171,7 @@ export class CartController {
   }
 
   @Delete()
+  @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Clear all items from the cart.' })
   @ApiResponse({
     status: 200,
@@ -158,6 +181,10 @@ export class CartController {
   @ApiResponse({
     status: 404,
     description: 'Cart not found.',
+  })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
   })
   clearCart(@CurrentUser('sub') userId: string): Promise<Cart> {
     return this.cartService.clearCart(userId);

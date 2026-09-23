@@ -6,7 +6,7 @@ service another module needs.
 
 ## auth (REST) — Phase 16
 
-- `auth.module.ts` — imports `UsersModule`, `TypeOrmModule.forFeature([PasswordResetToken, OtpVerification])`, registers `JwtModule` (global, secret from `ConfigService`), `PassportModule({session:false})`; provides `AuthService`, `LocalStrategy`, `JwtStrategy` (tokenVersion revocation per F2 C), `GoogleStrategy` (passport-google-oauth20, state true), `RateLimitGuard` (Redis fail-open, full headers B1), `NoopWhatsAppProvider` (`WHATSAPP_PROVIDER`); exports `AuthService`.
+- `auth.module.ts` — imports `UsersModule`, `TypeOrmModule.forFeature([PasswordResetToken, OtpVerification])`, registers `JwtModule` (global, secret from `ConfigService`), `PassportModule({session:false})`; provides `AuthService`, `LocalStrategy`, `JwtStrategy` (tokenVersion revocation per F2 C), `GoogleStrategy` (passport-google-oauth20, state true), `RateLimitGuard` (Redis fail-open, full headers B1, `ConfigService` limits `ORDER_CHECKOUT_RL_MAX` etc, distributed `rl:` keys, outermost before `JwtGuard`); exports `AuthService` **and `RateLimitGuard`** (shared guard for `Order`/`Cart`/`Products` via `AuthModule` import).
 - `auth.controller.ts` — `POST /auth/register`, `POST /auth/login` (rate-limited), plus Phase 16: `POST /auth/forgot-password` (anti-enum 200, T019), `POST /auth/validate-reset-token`, `POST /auth/reset-password` (FOR UPDATE single-winner, T021 tokenVersion increment), `POST /auth/otp/request` (public+JwtGuard, T032 hybrid BullMQ, cooldown 60s), `POST /auth/otp/verify` (Q4 fallback, every-attempt B2, T033), `GET /auth/google` (302, GoogleAuthGuard), `GET /auth/google/callback` (JSON per Q5), `GET /auth/google/link` (JwtAuthGuard+GoogleAuthGuard).
 - `auth.service.ts` — `register` (bcrypt 10, duplicate check, Logger.debug), `userValidation` (handles `password IS NULL` → null per pure OAuth), `login` (signs `{sub,email,fullName,role,tokenVersion}`), plus `requestPasswordReset` (sha256, 15m, invalidate priors, hybrid RabbitMQ), `validateResetToken`, `resetPassword` (bcrypt + tokenVersion increment, single-winner), `requestWhatsAppOtp`/`verifyWhatsAppOtp` (crypto.randomInt, sha256, Redis+PG fallback, 3 attempts, 60s cooldown, WhatsAppProvider), `handleGoogleLogin`/`linkGoogleAccount` (auto-link verified email Q1, password null).
 - DTOs: `forgot-password.dto.ts`, `reset-password.dto.ts` (Min 8 Max 72), `validate-reset-token.dto.ts`, `request-otp.dto.ts` (`@Matches E.164`, optional phone when authed per C1), `verify-otp.dto.ts` (`@Length 6`).
@@ -23,34 +23,28 @@ service another module needs.
 
 ## products (GraphQL, Apollo code-first) — Phase 9 Redis / Product Caching DONE
 
-- `products.module.ts` — `forFeature([Product])` + `forwardRef(InventoryModule)`, global `CACHE_MANAGER` (`@keyv/redis` ioredis, `REDIS_URL`) via `src/app.module.ts` `CacheModule` `ttl 60*1000`; exports `ProductsService`. `ConfigService` provides `PRODUCT_LIST_CACHE_TTL_MS=60000` (min 5000) / `PRODUCT_SINGLE_CACHE_TTL_MS=300000` (min 30000) with clamp + `Logger.log` on init.
-- `products.resolver.ts` — thin GraphQL (no cache logic), mapped 1:1 to service methods (`createProduct`, `createManyProducts`, `products`→`findAll`, `product`→`findOne`, `updateProduct`, `updateMany`, `removeProduct`, `removeAllProducts`).
+- `products.module.ts` — `forFeature([Product])` + `forwardRef(InventoryModule)` + `AuthModule` (for `RateLimitGuard` shared), global `CACHE_MANAGER` (`@keyv/redis` ioredis, `REDIS_URL`) via `src/app.module.ts` `CacheModule` `ttl 60*1000`; exports `ProductsService`. `ConfigService` provides `PRODUCT_LIST_CACHE_TTL_MS=60000` (min 5000) / `PRODUCT_SINGLE_CACHE_TTL_MS=300000` (min 30000) with clamp + `Logger.log` on init.
+- `products.resolver.ts` — thin GraphQL, mapped 1:1 to service methods (`createProduct`, `createManyProducts`, `products`→`findAll`, `product`→`findOne`, `updateProduct`, `updateMany`, `removeProduct`, `removeAllProducts`); mutations `createProduct/updateProduct/etc` throttled **30/h per admin** via `@UseGuards(RateLimitGuard)` (extracts `req` via `GqlExecutionContext`, key `rl:products:mutation:user:<admin>`, fail-open).
 - `products.service.ts` — **This service is responsible for product catalog and product-cache (cache-aside).** `create`/`createMany` (slugify + unique name/slug, `InventoryService.createForProduct` 0-stock) → post-commit `invalidateAllLists()`; `findAll` cache-aside `products:list:{page}:{limit}` TTL 60s (fail-open `try/catch get` → `Cache HIT/MISS` `Logger.debug`, `set` TTL, fallback to `findAndCount` on `ECONNREFUSED`); `findOne` cache-aside `product:{id}` TTL 300s (no negative cache, fail-open); `update` → `del product:{id}` + `del products:list:*` via `store.keys('products:list:*')→del` selective + `clear()` fallback (warn if `clear()` would evict `expiration:tick:lock`); `updateMany` (`pessimistic_write` lock transactional after `manager.save` → `invalidateProductCaches(ids)` outside tx); `remove`/`resetAll` → `del product:{id}` + lists (resetAll clears `product:*` plus lists). Never caches `stock`/`available`, never inside `dataSource.transaction` (post-commit). Strictly products-only per FR-007.
 - Entity carries `@ObjectType()`/`@Field()` (GraphQL) **and** TypeORM decorators.
   Has `@Check('"price" >= 0')` and `@Unique(['name'])`, `@Index(['name'])`. No `stock` field (owned by `Inventory`).
 
-## cart (REST)
+## cart (REST) — Phase 10 rate-limited
 
-- `cart.module.ts` — imports `ProductsModule` (uses `ProductsService`); provides
-  `CartService` + `Logger`.
+- `cart.module.ts` — imports `AuthModule` (for `RateLimitGuard` shared) + `ProductsModule` + `InventoryModule`; provides `CartService` + `Logger`.
+- `cart.controller.ts` — `GET /cart` (reads not strictly throttled), writes throttled **60/h per user** shared bucket via `@UseGuards(RateLimitGuard)` outermost before `@Auth(User)`: `POST /cart`, `PATCH /cart/increase|decrease`, `DELETE /cart/:cartItemId`, `DELETE /cart` each `@ApiResponse 429`, key `rl:POST /cart:user:<sub>` (fallback IP), fail-open on `ECONNREFUSED`.
 - `cart.service.ts` — find-or-create user cart, add/update/remove/clear items.
   `CartItem.product` is `eager: true`. Stock is **checked but not reserved**;
   final inventory mutation happens at checkout. `clearCart` deletes items
   fire-and-forget (not a durable job).
 - DTOs: `add-cart-item.dto.ts`, `update-cart-item-quantity.dto.ts`.
 
-## order (REST — STUB)
+## order (REST) — Phases 6-7 DONE, Phase 10 rate-limited
 
-- `order.module.ts` — only controller + service, no `forFeature`, no exports.
-- `order.controller.ts` — routes exist (`POST /order`, `GET /order`,
-  `GET /order/:id`, `PATCH`, `DELETE`) but `OrderService` returns placeholder
-  strings. `GET /order` is protected with `@Auth(UserRoles.User)`.
-- `order.service.ts` — **stub** (`create` returns `"This action adds a new
-  order"`, etc.).
-- `order.enum.ts` — `OrderStatus { SUCCESS, FAILD, PENDING }`.
-  - **Note:** `FAILD` is a typo and the set does not match the reservation/
-    order state machine in `docs/plan.md`. Open question in `docs/decisions/`.
-- `CreateOrderDto` is **empty** (`export class CreateOrderDto {}`).
+- `order.module.ts` — imports `AuthModule` (for `RateLimitGuard`) + `TypeOrmModule.forFeature([Order, OrderItem])` + `ReservationModule` + `CartModule` + `ProductsModule` + `InventoryModule`; providers `OrderService` + `OrderCheckoutService` + `OrderCompletionService`; exports all three.
+- `order.controller.ts` — `POST /order/checkout` + alias `POST /order` throttled **10/h per user** (`@UseGuards(RateLimitGuard)` outermost before `@Auth()`), key `rl:POST /order/checkout:user:<sub>`; `POST/PATCH /order/:id/complete` throttled **10/h per user** same guard; `GET /order` + `GET /order/:id` (reads not strictly throttled); each throttled handler `@ApiResponse 429`. Checkout creates `Order PENDING + Reservation RESERVED + reservedAmount` inside `DataSource.transaction` (caller owns `EntityManager`); completion does `stock-=qty reserved-=qty` via `OrderCompletionService` (`FOR UPDATE` Order→Reservation→sorted Inventories). `429` never holds lock (spy 0 calls).
+- `order.service.ts` — `findAll`/`findOne` paginated owner-scoped.
+- Legacy `order.enum.ts` `FAILD` typo retained for compat, `order-status.enum.ts` holds `PENDING|COMPLETED|CANCELLED|FAILED`.
 
 ## inventory (REST — Phase 1 DONE)
 
