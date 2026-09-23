@@ -2,12 +2,16 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In } from 'typeorm';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 import { Reservation } from './entities/reservation.entity';
 import { ReservationItem } from './entities/reservation-item.entity';
 import { ReservationStatus } from './entities/reservation-status.enum';
@@ -31,13 +35,86 @@ const ALLOWED_TRANSITIONS: Record<ReservationStatus, ReservationStatus[]> = {
 
 const DEFAULT_TTL_MS = 15 * 60 * 1000;
 
+/**
+ * This service is responsible for reservation lifecycle domain.
+ * It handles creation, transitions (complete/cancel/expire) and enforces inventory reservation invariants.
+ * It enforces idempotent same-transition (200 with 0 delta) and single-winner FOR UPDATE ordering.
+ */
 @Injectable()
 export class ReservationService {
   private readonly logger = new Logger(ReservationService.name);
 
-  constructor(@InjectDataSource() public readonly dataSource: DataSource) {}
+  constructor(
+    @InjectDataSource() public readonly dataSource: DataSource,
+    @Optional()
+    @Inject(CACHE_MANAGER)
+    private readonly cache?: Cache,
+  ) {}
 
+  /**
+   * Maps ReservationStatus transition target to idempotency counter type.
+   * @param to - Target reservation status.
+   * @returns Counter type key suffix (expiration|complete|cancel).
+   */
+  private getIdempotencyType(to: ReservationStatus): string {
+    switch (to) {
+      case ReservationStatus.EXPIRED:
+        return 'expiration';
+      case ReservationStatus.CANCELLED:
+        return 'cancel';
+      case ReservationStatus.COMPLETED:
+        return 'complete';
+      default:
+        return to.toLowerCase();
+    }
+  }
+
+  /**
+   * Increments idempotency duplicate skipped counter via CACHE_MANAGER (fail-open).
+   * @param to - Target status to derive counter key idempotency:duplicate:skipped:<type>.
+   */
+  private async incrementIdempotencyCounter(
+    to: ReservationStatus,
+  ): Promise<void> {
+    const type = this.getIdempotencyType(to);
+    const key = `idempotency:duplicate:skipped:${type}`;
+    try {
+      if (!this.cache) return;
+      // Try direct redis INCR via Keyv store client (ioredis)
+      const anyCache: any = this.cache as any;
+      const store: any = anyCache.store ?? anyCache.stores?.[0];
+      const client =
+        store?.client ?? store?.store?.client ?? anyCache.client ?? null;
+      if (client && typeof client.incr === 'function') {
+        await client.incr(key);
+        // ensure 24h expiry (86400s)
+        if (typeof client.expire === 'function') {
+          await client.expire(key, 86400);
+        } else if (typeof client.pexpire === 'function') {
+          await client.pexpire(key, 86400000);
+        }
+        return;
+      }
+      // Fallback to cache-manager get/set (fail-open)
+      const current = (await this.cache.get<number>(key)) ?? 0;
+      // cache-manager ttl in ms
+      await this.cache.set(key, current + 1, 86400000);
+    } catch (e: any) {
+      // Fail-open: log warn but do not throw on counter failure
+      this.logger.warn(
+        `Redis fail-open for idempotency counter ${key}: ${e?.message}`,
+      );
+    }
+  }
+
+  /**
+   * Validates allowed reservation status transition.
+   * @param from - Current reservation status.
+   * @param to - Target reservation status.
+   * @throws ConflictException if transition is not allowed.
+   */
   validateTransition(from: ReservationStatus, to: ReservationStatus): void {
+    // Guard allowed transitions map; same-status is handled idempotently before this call
     if (!ALLOWED_TRANSITIONS[from].includes(to)) {
       throw new ConflictException(
         `Invalid reservation transition: ${from} -> ${to}`,
@@ -211,6 +288,15 @@ export class ReservationService {
     return reservation;
   }
 
+  /**
+   * Finds a reservation by id with owner check.
+   * @param requestingUserId - Requesting user id.
+   * @param id - Reservation id.
+   * @param role - Requesting role for admin bypass.
+   * @returns Reservation with items.
+   * @throws NotFoundException if not found.
+   * @throws ForbiddenException if not owner.
+   */
   async findById(
     requestingUserId: string,
     id: string,
@@ -227,6 +313,14 @@ export class ReservationService {
     return reservation;
   }
 
+  /**
+   * Lists reservations for a user with pagination.
+   * @param requestingUserId - Requesting user id.
+   * @param pagination - Pagination params page/limit.
+   * @param filter - Optional admin userId filter.
+   * @param role - Requesting role.
+   * @returns Paginated reservations.
+   */
   async listByUser(
     requestingUserId: string,
     pagination: { page?: number; limit?: number },
@@ -264,6 +358,17 @@ export class ReservationService {
     };
   }
 
+  /**
+   * Completes a reservation (RESERVED→COMPLETED) inside caller's transaction.
+   * @param manager - EntityManager of the enclosing transaction.
+   * @param requestingUserId - Requesting user id.
+   * @param id - Reservation id.
+   * @param dto - Optional orderId payload.
+   * @param role - Requesting role.
+   * @returns Updated reservation (or idempotent 200 if already COMPLETED).
+   * @throws NotFoundException if not found.
+   * @throws ConflictException if invalid transition.
+   */
   async complete(
     manager: EntityManager,
     requestingUserId: string,
@@ -281,6 +386,17 @@ export class ReservationService {
     );
   }
 
+  /**
+   * Cancels a reservation (RESERVED→CANCELLED) inside caller's transaction.
+   * Idempotent CANCELLED→CANCELLED returns 200 with 0 delta before Inventory FOR UPDATE.
+   * @param manager - EntityManager of the enclosing transaction.
+   * @param requestingUserId - Requesting user id.
+   * @param id - Reservation id.
+   * @param role - Requesting role.
+   * @returns Updated reservation (or idempotent 200 if already CANCELLED).
+   * @throws NotFoundException if not found.
+   * @throws ConflictException if invalid transition.
+   */
   async cancel(
     manager: EntityManager,
     requestingUserId: string,
@@ -297,6 +413,15 @@ export class ReservationService {
     );
   }
 
+  /**
+   * Expires a reservation (RESERVED→EXPIRED) inside caller's transaction.
+   * Idempotent EXPIRED→EXPIRED returns 200 with 0 delta before Inventory FOR UPDATE.
+   * @param manager - EntityManager of the enclosing transaction.
+   * @param id - Reservation id.
+   * @returns Updated reservation (or idempotent 200 if already EXPIRED).
+   * @throws NotFoundException if not found.
+   * @throws ConflictException if invalid transition.
+   */
   async expire(manager: EntityManager, id: string): Promise<Reservation> {
     // Admin-only at controller; service does not enforce role, but still transactional with inventory
     // Q1: immediate override — no expiresAt check
@@ -354,6 +479,22 @@ export class ReservationService {
     );
   }
 
+  /**
+   * Executes a reservation status transition inside the caller's transaction.
+   * Enforces idempotent same-transition (200 with 0 delta) BEFORE any Inventory FOR UPDATE and BEFORE validateTransition.
+   * Only RESERVED→* mutates inventory (reservedAmount/stock); same-transition returns 200 without mutation and increments idempotency counter.
+   * @param manager - EntityManager of the enclosing transaction (caller owns commit/rollback).
+   * @param requestingUserId - Requesting user id or null for worker bypass.
+   * @param id - Reservation id.
+   * @param to - Target status (EXPIRED|CANCELLED|COMPLETED).
+   * @param orderId - Optional orderId to attach (COMPLETED overwrite).
+   * @param role - Requesting role for owner check.
+   * @param checkOwner - Whether to enforce owner assertion.
+   * @returns Updated or idempotently returned Reservation.
+   * @throws NotFoundException if reservation/inventory/order missing.
+   * @throws ConflictException if invalid cross-transition or DB CHECK violation.
+   * @throws ForbiddenException if not owner.
+   */
   private async transitionWithInventoryInternal(
     manager: EntityManager,
     requestingUserId: string | null,
@@ -382,35 +523,39 @@ export class ReservationService {
       this.assertOwner(reservation, requestingUserId, role);
     }
 
-    // Idempotent COMPLETED -> COMPLETED (Q4 B) — return 200 without inventory re-mutation
-    if (
-      reservation.status === ReservationStatus.COMPLETED &&
-      to === ReservationStatus.COMPLETED
-    ) {
-      // Still handle orderId overwrite per Q3 if supplied and different
-      if (orderId) {
+    // Idempotent guard: same-transition -> 200 with 0 delta (must be BEFORE any Inventory FOR UPDATE and BEFORE validateTransition)
+    // This ensures second expire/cancel/complete on already terminal does not double-subtract reservedAmount/stock
+    // Do not treat 200 idempotent as poison — expiration worker excludes 200/404 from poison count (D2)
+    if (reservation.status === to) {
+      // Handle orderId overwrite for COMPLETED->COMPLETED if supplied and different (per Q3)
+      if (
+        to === ReservationStatus.COMPLETED &&
+        orderId &&
+        reservation.orderId !== orderId
+      ) {
         const orderRepo = manager.getRepository(Order);
         const order = await orderRepo.findOne({ where: { id: orderId } });
         if (!order) throw new NotFoundException(`Order ${orderId} not found`);
-        if (reservation.orderId !== orderId) {
-          reservation.orderId = orderId;
-          const saved = await reservationRepo.save(reservation);
-          this.logger.log(
-            `Idempotent complete (with orderId overwrite) for ${id} -> ${to}, orderId ${orderId}`,
-          );
-          return reservationRepo.findOne({
-            where: { id: saved.id },
-            relations: { items: true },
-          }) as Promise<Reservation>;
-        }
+        reservation.orderId = orderId;
+        const saved = await reservationRepo.save(reservation);
+        this.logger.log(
+          `reservation idempotent skip id=${id} status=${reservation.status} -> ${to} (with orderId overwrite)`,
+        );
+        await this.incrementIdempotencyCounter(to);
+        return (await reservationRepo.findOne({
+          where: { id: saved.id },
+          relations: { items: true },
+        })) as Reservation;
       }
       this.logger.log(
-        `Idempotent complete for ${id} already COMPLETED — no inventory change`,
+        `reservation idempotent skip id=${id} status=${reservation.status} -> ${to}`,
       );
+      await this.incrementIdempotencyCounter(to);
       return reservation;
     }
 
     const fromStatus = reservation.status;
+    // Validate cross-transition; same-transition already returned 200 above, cross-transition COMPLETED->EXPIRED etc stays 409
     this.validateTransition(fromStatus, to);
 
     if (orderId) {
@@ -540,6 +685,13 @@ export class ReservationService {
     })) as Reservation;
   }
 
+  /**
+   * Asserts reservation owner or admin.
+   * @param reservation - Reservation to check.
+   * @param requestingUserId - Requesting user id.
+   * @param role - Requesting role.
+   * @throws ForbiddenException if not owner and not admin.
+   */
   private assertOwner(
     reservation: Reservation,
     requestingUserId: string,

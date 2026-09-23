@@ -3,11 +3,14 @@ import {
   Inject,
   Injectable,
   Logger,
+  NotFoundException,
   Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 import { Reservation } from './entities/reservation.entity';
 import { ReservationStatus } from './entities/reservation-status.enum';
 import { ReservationService } from './reservation.service';
@@ -40,6 +43,9 @@ export class ReservationExpirationService {
     @Optional()
     @Inject('REDIS_CLIENT')
     private readonly redis?: any,
+    @Optional()
+    @Inject(CACHE_MANAGER)
+    private readonly cache?: Cache,
   ) {}
 
   private poisonCountKey(id: string): string {
@@ -124,6 +130,65 @@ export class ReservationExpirationService {
     this.skipSet.delete(id);
   }
 
+  /**
+   * Increments idempotency duplicate skipped counter for expiration (fail-open).
+   * Uses CACHE_MANAGER INCR with 24h expiry; on failure logs warn and continues.
+   */
+  private async incrementIdempotencyCounter(): Promise<void> {
+    const key = 'idempotency:duplicate:skipped:expiration';
+    try {
+      if (!this.cache) return;
+      const anyCache: any = this.cache as any;
+      const store: any = anyCache.store ?? anyCache.stores?.[0];
+      const client =
+        store?.client ?? store?.store?.client ?? anyCache.client ?? null;
+      if (client && typeof client.incr === 'function') {
+        await client.incr(key);
+        if (typeof client.expire === 'function') {
+          await client.expire(key, 86400);
+        } else if (typeof client.pexpire === 'function') {
+          await client.pexpire(key, 86400000);
+        }
+        return;
+      }
+      const current = (await this.cache.get<number>(key)) ?? 0;
+      await this.cache.set(key, current + 1, 86400000);
+    } catch (e: any) {
+      this.logger.warn(
+        `Redis fail-open for idempotency counter ${key}: ${e?.message}`,
+      );
+    }
+  }
+
+  /**
+   * Determines if error is transient and should count toward poison quarantine.
+   * Only 23514, ETIMEDOUT, ECONNREFUSED, 500 are transient per D2; 200/404/409 are not.
+   * @param e - Error to classify.
+   * @returns True if transient (should poison).
+   */
+  private isTransientFailure(e: any): boolean {
+    const msg: string = e?.message ?? '';
+    const code: string = e?.code ?? '';
+    // DB CHECK violation 23514 is considered transient poison (should quarantine)
+    if (code === '23514' || msg.includes('23514') || msg.includes('CHK_'))
+      return true;
+    if (msg.includes('ETIMEDOUT') || code === 'ETIMEDOUT') return true;
+    if (msg.includes('ECONNREFUSED') || code === 'ECONNREFUSED') return true;
+    // Generic 500
+    if (e?.status === 500 || msg.includes('500')) return true;
+    // NotFound (404) and Conflict (409) and idempotent 200 are not transient
+    if (e instanceof NotFoundException) return false;
+    if (
+      e instanceof ConflictException &&
+      msg.includes('Invalid reservation transition')
+    )
+      return false;
+    // Other 4xx are not transient
+    if (e?.status >= 400 && e?.status < 500) return false;
+    // Default: treat as transient for safety (DB failures)
+    return true;
+  }
+
   private get batchSize(): number {
     const v = this.configService.get<string>('EXPIRATION_BATCH_SIZE');
     const n = parseInt(v || '10', 10);
@@ -201,24 +266,47 @@ export class ReservationExpirationService {
       try {
         // Per-candidate transaction — outbox events inserted atomically with state change
         let result: Reservation | null = null;
+        let reservationBeforeStatus: ReservationStatus | null = null;
+        let isIdempotentDuplicate = false;
         await this.dataSource.transaction(async (manager) => {
-          // Capture order status before expire to detect newly cancelled order (FR-006)
-          let orderBeforeStatus: OrderStatus | null = null;
+          // Capture reservation status BEFORE expire to detect idempotent duplicate (RESERVED vs already terminal)
+          // Idempotent guard is inside ReservationService before any Inventory FOR UPDATE; 200 duplicate must not poison (D2)
           try {
             const pre = await manager.getRepository(Reservation).findOne({
               where: { id },
             });
+            reservationBeforeStatus =
+              (pre?.status as ReservationStatus) ?? null;
+            // Also capture order status before expire to detect newly cancelled order (FR-006)
             if (pre?.orderId) {
               const ordBefore = await manager
                 .getRepository(Order)
                 .findOne({ where: { id: pre.orderId } });
-              orderBeforeStatus = (ordBefore?.status as OrderStatus) ?? null;
+              // stash for outbox check after expire
+              (manager as any).__orderBeforeStatus =
+                (ordBefore?.status as OrderStatus) ?? null;
+            } else {
+              (manager as any).__orderBeforeStatus = null;
             }
           } catch {
             // ignore pre-fetch errors — best effort
+            (manager as any).__orderBeforeStatus = null;
           }
 
           result = await this.expireOne(manager, id);
+
+          // Detect idempotent duplicate: before was already terminal (not RESERVED) but expire returned 200 with 0 delta
+          if (
+            reservationBeforeStatus &&
+            reservationBeforeStatus !== ReservationStatus.RESERVED
+          ) {
+            // Same-transition idempotent (EXPIRED->EXPIRED, CANCELLED->CANCELLED, COMPLETED->COMPLETED) — do not create outbox
+            isIdempotentDuplicate = true;
+            return;
+          }
+
+          const orderBeforeStatus: OrderStatus | null = (manager as any)
+            .__orderBeforeStatus;
 
           // OutboxEvent INSERT inside same transaction — no client.emit
           if (this.outboxService) {
@@ -282,6 +370,16 @@ export class ReservationExpirationService {
             }
           }
         });
+        // Handle idempotent duplicate 200 after commit: do not increment poison, INCR counter, count as skipped
+        if (isIdempotentDuplicate) {
+          await this.clearPoison(id);
+          skipped++;
+          this.logger.log(
+            `reservation idempotent skip id=${id} status=${reservationBeforeStatus} -> ${ReservationStatus.EXPIRED}`,
+          );
+          await this.incrementIdempotencyCounter();
+          continue;
+        }
         // Success - clear poison state (Redis or memory)
         await this.clearPoison(id);
         expired++;
@@ -290,20 +388,35 @@ export class ReservationExpirationService {
           `expiring reservation ${id} expiresAt=${expAt ? expAt.toISOString() : 'unknown'}`,
         );
       } catch (e: any) {
-        // Handle idempotent skip for already-terminal (Conflict due to invalid transition) as skipped, not failed
+        // Handle idempotent skip for already-terminal (Conflict due to invalid transition) as skipped, not failed (cross-transition 409)
+        // Do NOT treat 200 idempotent as poison — poison excludes 200/404 (D2)
         const msg: string = e?.message || '';
+        if (e instanceof NotFoundException) {
+          // 404 not-found (stale candidate) is not poison per D2
+          this.logger.debug(`skip reservation ${id} not found: ${msg}`);
+          skipped++;
+          await this.clearPoison(id);
+          continue;
+        }
         if (
           e instanceof ConflictException &&
           msg.includes('Invalid reservation transition')
         ) {
-          // Could be EXPIRED->EXPIRED, COMPLETED->EXPIRED etc - treat as idempotent skip
+          // Could be COMPLETED->EXPIRED etc cross-transition → 409 but still not poison (business terminal)
           this.logger.debug(`skip reservation ${id} status=${msg}`);
           skipped++;
           // Do not count as retry, clear poison state
           await this.clearPoison(id);
           continue;
         }
-        // Poison / missing inventory / CHECK violation -> retry logic (Redis-backed)
+        // Only transient DB failures count toward poison (23514, ETIMEDOUT, ECONNREFUSED, 500) per D2
+        if (!this.isTransientFailure(e)) {
+          this.logger.debug(`skip reservation ${id} non-transient: ${msg}`);
+          skipped++;
+          await this.clearPoison(id);
+          continue;
+        }
+        // Poison / CHECK violation -> retry logic (Redis-backed)
         const next = await this.incrementPoisonCount(id);
         retried++;
         if (next >= this.maxRetries) {

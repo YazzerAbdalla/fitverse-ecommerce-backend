@@ -41,7 +41,9 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     // Do not start polling in test environment to avoid open handles and noise
     if (process.env.NODE_ENV === 'test') {
-      this.logger.log('outbox publisher polling disabled in test (NODE_ENV=test)');
+      this.logger.log(
+        'outbox publisher polling disabled in test (NODE_ENV=test)',
+      );
       return;
     }
     const intervalMs = (() => {
@@ -51,7 +53,9 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
     })();
     // Simple interval: every OUTBOX_POLL_INTERVAL_MS publishBatch()
     this.interval = setInterval(() => {
-      this.publishBatch().catch((e) => this.logger.error(`outbox poll failed: ${e?.message}`, e?.stack));
+      this.publishBatch().catch((e) =>
+        this.logger.error(`outbox poll failed: ${e?.message}`, e?.stack),
+      );
     }, intervalMs);
     // Allow process to exit even if interval remains
     if (this.interval && typeof (this.interval as any).unref === 'function') {
@@ -242,7 +246,9 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         // Success: mark SENT only if still owned by this publisher (token check) — prevents A overwriting B after lease reclaim
         let sentAffected = 1;
         try {
-          if (typeof (this.dataSource as any).createQueryBuilder === 'function') {
+          if (
+            typeof (this.dataSource as any).createQueryBuilder === 'function'
+          ) {
             const res = await (this.dataSource as any)
               .createQueryBuilder()
               .update(OutboxEvent)
@@ -253,11 +259,14 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
                 processingStartedAt: null as any,
                 processingToken: null as any,
               })
-              .where('id = :id AND status = :status AND processingToken = :token', {
-                id: event.id,
-                status: OutboxStatus.PROCESSING,
-                token: (event as any).processingToken,
-              })
+              .where(
+                'id = :id AND status = :status AND processingToken = :token',
+                {
+                  id: event.id,
+                  status: OutboxStatus.PROCESSING,
+                  token: (event as any).processingToken,
+                },
+              )
               .execute();
             sentAffected = res?.affected ?? 1;
           } else {
@@ -265,12 +274,12 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
           }
         } catch {
           // Fallback for test mocks that only support getRepository.update
-          await this.dataSource.getRepository(OutboxEvent).update(event.id as any, {
-            status: OutboxStatus.SENT as any,
-            sentAt: new Date() as any,
-            lastError: null as any,
-            processingStartedAt: null as any,
-            processingToken: null as any,
+          await this.dataSource.getRepository(OutboxEvent).update(event.id, {
+            status: OutboxStatus.SENT,
+            sentAt: new Date(),
+            lastError: null,
+            processingStartedAt: null,
+            processingToken: null,
           });
           sentAffected = 1;
         }
@@ -294,7 +303,9 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         // Failure: mark PENDING/FAILED only if still owned (token check) — prevents late A overwriting B
         let failAffected = 1;
         try {
-          if (typeof (this.dataSource as any).createQueryBuilder === 'function') {
+          if (
+            typeof (this.dataSource as any).createQueryBuilder === 'function'
+          ) {
             const res = await (this.dataSource as any)
               .createQueryBuilder()
               .update(OutboxEvent)
@@ -302,28 +313,33 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
                 attempts: nextAttempts as any,
                 lastError: msg as any,
                 nextRetryAt: nextRetryAt as any,
-                status: (willFail ? OutboxStatus.FAILED : OutboxStatus.PENDING) as any,
+                status: (willFail
+                  ? OutboxStatus.FAILED
+                  : OutboxStatus.PENDING) as any,
                 processingStartedAt: null as any,
                 processingToken: null as any,
               })
-              .where('id = :id AND status = :status AND processingToken = :token', {
-                id: event.id,
-                status: OutboxStatus.PROCESSING,
-                token: (event as any).processingToken,
-              })
+              .where(
+                'id = :id AND status = :status AND processingToken = :token',
+                {
+                  id: event.id,
+                  status: OutboxStatus.PROCESSING,
+                  token: (event as any).processingToken,
+                },
+              )
               .execute();
             failAffected = res?.affected ?? 1;
           } else {
             throw new Error('no queryBuilder');
           }
         } catch {
-          await this.dataSource.getRepository(OutboxEvent).update(event.id as any, {
-            attempts: nextAttempts as any,
-            lastError: msg as any,
-            nextRetryAt: nextRetryAt as any,
-            status: (willFail ? OutboxStatus.FAILED : OutboxStatus.PENDING) as any,
-            processingStartedAt: null as any,
-            processingToken: null as any,
+          await this.dataSource.getRepository(OutboxEvent).update(event.id, {
+            attempts: nextAttempts,
+            lastError: msg,
+            nextRetryAt: nextRetryAt,
+            status: willFail ? OutboxStatus.FAILED : OutboxStatus.PENDING,
+            processingStartedAt: null,
+            processingToken: null,
           });
           failAffected = 1;
         }

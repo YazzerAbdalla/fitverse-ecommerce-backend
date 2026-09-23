@@ -242,7 +242,7 @@ export class OrderCheckoutService {
               reservationId: reservation.id,
               expiresAt: reservation.expiresAt?.toISOString() ?? null,
               createdAt: savedOrder.created_at
-                ? (savedOrder.created_at as Date).toISOString()
+                ? savedOrder.created_at.toISOString()
                 : new Date().toISOString(),
             },
           });
