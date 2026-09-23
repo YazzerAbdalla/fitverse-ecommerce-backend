@@ -12,6 +12,11 @@ import {
 } from 'typeorm';
 import { Product } from '../../products/entities/product.entity';
 
+/**
+ * This entity represents inventory stock for a product.
+ * It enforces DB checks stock>=0, reservedAmount>=0, reservedAmount<=stock and derives available = stock - reservedAmount.
+ * Only InventoryService may mutate stock/reservedAmount inside FOR UPDATE transactions.
+ */
 @Entity()
 @Unique(['productId'])
 @Index(['productId'])

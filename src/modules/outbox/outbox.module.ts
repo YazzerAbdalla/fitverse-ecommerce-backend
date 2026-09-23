@@ -5,16 +5,16 @@ import { OutboxEvent } from './entities/outbox-event.entity';
 import { OutboxService } from './outbox.service';
 import { OutboxPublisher } from './outbox.publisher';
 import { OutboxCleanupService } from './outbox-cleanup.service';
-import { OutboxController } from './outbox.controller';
+import { OutboxAdminController } from './outbox.controller';
 
 /**
  * This module exposes transactional outbox primitives.
  * It handles durable event buffering and async publishing to RabbitMQ.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([OutboxEvent]), ConfigModule],
-  controllers: [OutboxController],
+  imports: [TypeOrmModule.forFeature([OutboxEvent])],
+  controllers: [OutboxAdminController],
   providers: [OutboxService, OutboxPublisher, OutboxCleanupService],
-  exports: [OutboxService, OutboxPublisher, OutboxCleanupService],
+  exports: [OutboxService],
 })
 export class OutboxModule {}

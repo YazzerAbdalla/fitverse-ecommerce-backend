@@ -9,6 +9,8 @@ import {
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In } from 'typeorm';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 import { Order } from './entities/order.entity';
 import { OrderStatus } from './order-status.enum';
 import { Reservation } from '../reservation/entities/reservation.entity';
@@ -36,7 +38,7 @@ const ALLOWED_ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 
 /**
  * This service is responsible for order sale domain.
- * It handles atomic Order PENDING→COMPLETED sale with Reservation and Inventory.
+ * It handles atomic Order PENDING→COMPLETED sale with Reservation and Inventory and enforces idempotent guards.
  */
 @Injectable()
 export class OrderCompletionService {
@@ -48,7 +50,44 @@ export class OrderCompletionService {
     @Optional()
     @Inject(OutboxService)
     private readonly outboxService?: OutboxService,
+    @Optional()
+    @Inject(CACHE_MANAGER)
+    private readonly cache?: Cache,
   ) {}
+
+  /**
+   * Increments idempotency duplicate skipped counter for order complete (fail-open).
+   * @returns Void.
+   */
+  private async incrementCounter(): Promise<void> {
+    // Each idempotent COMPLETED→COMPLETED skip increments INCR idempotency:duplicate:skipped:complete EX 86400
+    const key = 'idempotency:duplicate:skipped:complete';
+    try {
+      if (!this.cache) return;
+      const anyCache: any = this.cache as any;
+      const store: any = anyCache.store ?? anyCache.stores?.[0];
+      const client =
+        store?.client ?? store?.store?.client ?? anyCache.client ?? null;
+      if (client && typeof client.incr === 'function') {
+        await client.incr(key);
+        // Ensure 24h expiry (86400s) per Q5 B
+        if (typeof client.expire === 'function') {
+          await client.expire(key, 86400);
+        } else if (typeof client.pexpire === 'function') {
+          await client.pexpire(key, 86400000);
+        }
+        return;
+      }
+      // Fallback to cache-manager get/set
+      const current = (await this.cache.get<number>(key)) ?? 0;
+      await this.cache.set(key, current + 1, 86400000);
+    } catch (e: any) {
+      // Fail-open: log warn but do not throw on counter failure
+      this.logger.warn(
+        `Redis fail-open for idempotency counter ${key}: ${e?.message}`,
+      );
+    }
+  }
 
   /**
    * Validates an Order status transition.
@@ -119,11 +158,18 @@ export class OrderCompletionService {
 
     this.assertOwner(currentOrder, requestingUserId, role);
 
+    // Idempotent guard before FOR UPDATE Reservation/Inventories (spec Q2 A): COMPLETED→COMPLETED must not mutate inventory
     // 2. Idempotent COMPLETED→COMPLETED — no inventory re-mutation (spec D1)
     if (currentOrder.status === OrderStatus.COMPLETED) {
+      // Order already COMPLETED → idempotent 200 with zero inventory delta (before any Reservation/Inventories lock)
+      this.logger.log(
+        `order complete idempotent skip id=${orderId} status=COMPLETED`,
+      );
+      // Also log legacy message for operator search
       this.logger.log(
         `Idempotent order complete for ${orderId} already COMPLETED — no inventory change`,
       );
+      await this.incrementCounter();
       const reservationRepoIdem = manager.getRepository(Reservation);
       const resIdem = await reservationRepoIdem.findOne({
         where: { orderId },

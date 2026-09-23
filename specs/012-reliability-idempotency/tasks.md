@@ -15,9 +15,9 @@ description: "Task list for Reliability / Idempotency — Phase 12 implementatio
 
 **Purpose**: Verify tech stack and shared test infra for idempotency
 
-- [ ] T001 Verify Docker infra and shared config per quickstart.md in `docker-compose.yml` and `.env.example`
-- [ ] T002 [P] Verify existing `OutboxEvent` entity and migration `17559xxxxxx-CreateOutboxEvent` remain untouched in `src/modules/outbox/entities/outbox-event.entity.ts`
-- [ ] T003 [P] Verify `CACHE_MANAGER` (`@keyv/redis` createKeyv REDIS_URL) and `BullModule` shared `REDIS_URL` available in `src/app.module.ts`
+- [X] T001 Verify Docker infra and shared config per quickstart.md in `docker-compose.yml` and `.env.example`
+- [X] T002 [P] Verify existing `OutboxEvent` entity and migration `17559xxxxxx-CreateOutboxEvent` remain untouched in `src/modules/outbox/entities/outbox-event.entity.ts`
+- [X] T003 [P] Verify `CACHE_MANAGER` (`@keyv/redis` createKeyv REDIS_URL) and `BullModule` shared `REDIS_URL` available in `src/app.module.ts`
 
 ---
 
@@ -27,10 +27,10 @@ description: "Task list for Reliability / Idempotency — Phase 12 implementatio
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 [P] Create optional `NotificationLog` entity with `eventId @Unique` fallback dedup in `src/modules/notifications/entities/notification-log.entity.ts`
-- [ ] T005 [P] Ensure `ReservationTransitionBuilder` ordering `Reservation → sorted Inventories → Order` documented with JSDoc in `src/modules/reservation/reservation-transition.builder.ts`
-- [ ] T006 Create/verify `OutboxService.requeue` helper signature and `CACHE_MANAGER INCR` counter utility in `src/modules/outbox/outbox.service.ts` (stub for admin requeue and idempotency:duplicate:skipped:* )
-- [ ] T007 Configure `ConfigService` idempotency keys `IDEMPOTENCY_TTL=86400` and `OUTBOX_*`/`EXPIRATION_*` clamping in `src/modules/outbox/outbox.publisher.ts` and `src/modules/reservation/reservation-expiration.service.ts`
+- [X] T004 [P] Create optional `NotificationLog` entity with `eventId @Unique` fallback dedup in `src/modules/notifications/entities/notification-log.entity.ts`
+- [X] T005 [P] Ensure `ReservationTransitionBuilder` ordering `Reservation → sorted Inventories → Order` documented with JSDoc in `src/modules/reservation/reservation-transition.builder.ts`
+- [X] T006 Create/verify `OutboxService.requeue` helper signature and `CACHE_MANAGER INCR` counter utility in `src/modules/outbox/outbox.service.ts` (stub for admin requeue and idempotency:duplicate:skipped:* )
+- [X] T007 Configure `ConfigService` idempotency keys `IDEMPOTENCY_TTL=86400` and `OUTBOX_*`/`EXPIRATION_*` clamping in `src/modules/outbox/outbox.publisher.ts` and `src/modules/reservation/reservation-expiration.service.ts`
 
 **Checkpoint**: Foundation ready — `FOR UPDATE` guards and dedup primitives available; user stories can now begin
 
@@ -44,15 +44,15 @@ description: "Task list for Reliability / Idempotency — Phase 12 implementatio
 
 ### Tests for User Story 1
 
-- [ ] T008 [P] [US1] Unit test expiration idempotent second `expire` returns `200` `0` `UPDATE Inventory` in `src/modules/reservation/test/reservation.service.spec.ts`
-- [ ] T009 [P] [US1] Integration test expiration double + concurrency `Promise.all([expire,expire])` single `reserved-=qty` with real PG `FOR UPDATE` in `src/modules/reservation/test/reservation-expiration.integration.spec.ts`
-- [ ] T010 [P] [US1] E2E `register→checkout→PATCH /reservations/:id/expire` twice `200` `GET /inventory reserved 0` in `test/app.e2e-spec.ts`
+- [X] T008 [P] [US1] Unit test expiration idempotent second `expire` returns `200` `0` `UPDATE Inventory` in `src/modules/reservation/test/reservation.service.spec.ts`
+- [X] T009 [P] [US1] Integration test expiration double + concurrency `Promise.all([expire,expire])` single `reserved-=qty` with real PG `FOR UPDATE` in `src/modules/reservation/test/reservation-expiration.integration.spec.ts`
+- [X] T010 [P] [US1] E2E `register→checkout→PATCH /reservations/:id/expire` twice `200` `GET /inventory reserved 0` in `test/app.e2e-spec.ts`
 
 ### Implementation for User Story 1
 
-- [ ] T011 [US1] Harden `ReservationService.cancel/expire` idempotent guard (`if status != 'RESERVED' → 200 + Logger.log already terminal + INCR idempotency:duplicate:skipped:expiration`) before `FOR UPDATE sorted Inventories` in `src/modules/reservation/reservation.service.ts`
-- [ ] T012 [US1] Update `ReservationController` Swagger `@ApiResponse 200 already terminal` and thin delegate to service in `src/modules/reservation/reservation.controller.ts`
-- [ ] T013 [US1] Ensure `ReservationExpirationService.processExpiredBatch` per-candidate guard delegates to `ReservationService` and logs `already terminal` in `src/modules/reservation/reservation-expiration.service.ts`
+- [X] T011 [US1] Harden `ReservationService.cancel/expire` idempotent guard (`if status != 'RESERVED' → 200 + Logger.log already terminal + INCR idempotency:duplicate:skipped:expiration`) before `FOR UPDATE sorted Inventories` in `src/modules/reservation/reservation.service.ts`
+- [X] T012 [US1] Update `ReservationController` Swagger `@ApiResponse 200 already terminal` and thin delegate to service in `src/modules/reservation/reservation.controller.ts`
+- [X] T013 [US1] Ensure `ReservationExpirationService.processExpiredBatch` per-candidate guard delegates to `ReservationService` and logs `already terminal` in `src/modules/reservation/reservation-expiration.service.ts`
 
 **Checkpoint**: US1 fully idempotent and testable independently — duplicate expire leaves `reserved 0`
 
@@ -66,16 +66,16 @@ description: "Task list for Reliability / Idempotency — Phase 12 implementatio
 
 ### Tests for User Story 2
 
-- [ ] T014 [P] [US2] Unit test `NotificationWorker.handle` duplicate `eventId` → `send 0` `Logger duplicate skipped` + `INCR` in `src/modules/notifications/test/notifications.worker.spec.ts`
-- [ ] T015 [P] [US2] Integration test real Redis `SET NX notification:processed:<eventId> EX 24h` bulk `sendBulk` re-scan `10` → second retry `10` `Log` not `15` in `src/modules/notifications/test/notifications.integration.spec.ts`
-- [ ] T016 [P] [US2] Unit test bulk `sendBulk` re-scan full eligible with `SET NX` per user skips sent in `src/modules/notifications/notifications.worker.ts` (test helper)
+- [X] T014 [P] [US2] Unit test `NotificationWorker.handle` duplicate `eventId` → `send 0` `Logger duplicate skipped` + `INCR` in `src/modules/notifications/test/notifications.worker.spec.ts`
+- [X] T015 [P] [US2] Integration test real Redis `SET NX notification:processed:<eventId> EX 24h` bulk `sendBulk` re-scan `10` → second retry `10` `Log` not `15` in `src/modules/notifications/test/notifications.integration.spec.ts`
+- [X] T016 [P] [US2] Unit test bulk `sendBulk` re-scan full eligible with `SET NX` per user skips sent in `src/modules/notifications/notifications.worker.ts` (test helper)
 
 ### Implementation for User Story 2
 
-- [ ] T017 [US2] Implement `NotificationWorker` dedup guard `SET NX notification:processed:<eventId> EX 24h` else `notification:send:<template>:<aggregate>:<userId>` + `INCR idempotency:duplicate:skipped:notification` + `Logger.log duplicate` before `EmailProvider.send` in `src/modules/notifications/notifications.worker.ts`
-- [ ] T018 [US2] Implement bulk `sendBulk` re-scan full `SELECT WHERE marketingOptIn` + per-user `SET NX` skip logic per Q4 A in `src/modules/notifications/notifications.worker.ts`
-- [ ] T019 [P] [US2] Add `NotificationLog` fallback `INSERT ON CONFLICT (eventId) DO NOTHING` guard if entity exists in `src/modules/notifications/notifications.worker.ts`
-- [ ] T020 [US2] Inject `CACHE_MANAGER` and `Logger` with JSDoc and `// idempotent guard` comment in `src/modules/notifications/notifications.worker.ts`
+- [X] T017 [US2] Implement `NotificationWorker` dedup guard `SET NX notification:processed:<eventId> EX 24h` else `notification:send:<template>:<aggregate>:<userId>` + `INCR idempotency:duplicate:skipped:notification` + `Logger.log duplicate` before `EmailProvider.send` in `src/modules/notifications/notifications.worker.ts`
+- [X] T018 [US2] Implement bulk `sendBulk` re-scan full `SELECT WHERE marketingOptIn` + per-user `SET NX` skip logic per Q4 A in `src/modules/notifications/notifications.worker.ts`
+- [X] T019 [P] [US2] Add `NotificationLog` fallback `INSERT ON CONFLICT (eventId) DO NOTHING` guard if entity exists in `src/modules/notifications/notifications.worker.ts`
+- [X] T020 [US2] Inject `CACHE_MANAGER` and `Logger` with JSDoc and `// idempotent guard` comment in `src/modules/notifications/notifications.worker.ts`
 
 **Checkpoint**: US2 duplicate `eventId` delivered twice → `EmailProvider.send` once, bulk re-scan skips sent
 
@@ -89,14 +89,14 @@ description: "Task list for Reliability / Idempotency — Phase 12 implementatio
 
 ### Tests for User Story 3
 
-- [ ] T021 [P] [US3] Unit test `OrderCompletionService.complete` second `COMPLETED→COMPLETED` returns `200` `0` `UPDATE Inventory` + `INCR idempotency:duplicate:skipped:complete` in `src/modules/order/test/order-completion.service.spec.ts`
-- [ ] T022 [P] [US3] Integration test real PG duplicate `POST /order/:id/complete` twice `supertest` `200` `stock 8` `outbox 1` in `src/modules/order/test/order-completion.integration.spec.ts`
-- [ ] T023 [P] [US3] Concurrency test `Promise.all([complete,complete])` `FOR UPDATE Order` then `Reservation` then sorted `Inventories` single `stock-=qty` in `src/modules/order/test/order-completion.integration.spec.ts`
+- [X] T021 [P] [US3] Unit test `OrderCompletionService.complete` second `COMPLETED→COMPLETED` returns `200` `0` `UPDATE Inventory` + `INCR idempotency:duplicate:skipped:complete` in `src/modules/order/test/order-completion.service.spec.ts`
+- [X] T022 [P] [US3] Integration test real PG duplicate `POST /order/:id/complete` twice `supertest` `200` `stock 8` `outbox 1` in `src/modules/order/test/order-completion.integration.spec.ts`
+- [X] T023 [P] [US3] Concurrency test `Promise.all([complete,complete])` `FOR UPDATE Order` then `Reservation` then sorted `Inventories` single `stock-=qty` in `src/modules/order/test/order-completion.integration.spec.ts`
 
 ### Implementation for User Story 3
 
-- [ ] T024 [US3] Verify/harden `OrderCompletionService.complete` guard `if order.status == COMPLETED → return 200 + Logger.log + INCR idempotency:duplicate:skipped:complete` before `FOR UPDATE Reservation/Inventories` in `src/modules/order/order-completion.service.ts`
-- [ ] T025 [US3] Ensure `OrderController` `@ApiResponse 200 already COMPLETED idempotent` for `POST /order/:id/complete` in `src/modules/order/order.controller.ts`
+- [X] T024 [US3] Verify/harden `OrderCompletionService.complete` guard `if order.status == COMPLETED → return 200 + Logger.log + INCR idempotency:duplicate:skipped:complete` before `FOR UPDATE Reservation/Inventories` in `src/modules/order/order-completion.service.ts`
+- [X] T025 [US3] Ensure `OrderController` `@ApiResponse 200 already COMPLETED idempotent` for `POST /order/:id/complete` in `src/modules/order/order.controller.ts`
 
 **Checkpoint**: US3 second `complete` leaves `stock 8` unchanged, `OutboxEvent order.completed` count `1`
 
@@ -110,13 +110,13 @@ description: "Task list for Reliability / Idempotency — Phase 12 implementatio
 
 ### Tests for User Story 4
 
-- [ ] T026 [P] [US4] Integration test real PG `cancel` then `expire` same `id` second `200` `0` delta in `src/modules/reservation/test/reservation.integration.spec.ts`
-- [ ] T027 [P] [US4] Concurrency test `Promise.all([cancel,expire])` `FOR UPDATE Reservation` single `reserved-=qty` in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [X] T026 [P] [US4] Integration test real PG `cancel` then `expire` same `id` second `200` `0` delta in `src/modules/reservation/test/reservation.integration.spec.ts`
+- [X] T027 [P] [US4] Concurrency test `Promise.all([cancel,expire])` `FOR UPDATE Reservation` single `reserved-=qty` in `src/modules/reservation/test/reservation.integration.spec.ts`
 
 ### Implementation for User Story 4
 
-- [ ] T028 [US4] Harden `ReservationService.cancel` same guard as `expire` (`if status != RESERVED → 200` same-transition `0` delta + `INCR idempotency:duplicate:skipped:cancel`) in `src/modules/reservation/reservation.service.ts`
-- [ ] T029 [US4] Document cross-transition `CANCELLED→EXPIRED` `409` vs same-transition `200` with `// idempotent vs conflicting` comment in `src/modules/reservation/reservation.service.ts`
+- [X] T028 [US4] Harden `ReservationService.cancel` same guard as `expire` (`if status != RESERVED → 200` same-transition `0` delta + `INCR idempotency:duplicate:skipped:cancel`) in `src/modules/reservation/reservation.service.ts`
+- [X] T029 [US4] Document cross-transition `CANCELLED→EXPIRED` `409` vs same-transition `200` with `// idempotent vs conflicting` comment in `src/modules/reservation/reservation.service.ts`
 
 **Checkpoint**: US4 `reservedAmount` decremented exactly once regardless of `cancel`/`expire` order
 
@@ -130,15 +130,15 @@ description: "Task list for Reliability / Idempotency — Phase 12 implementatio
 
 ### Tests for User Story 5
 
-- [ ] T030 [P] [US5] Unit test `OutboxPublisher` transient `ECONNREFUSED` attempts `1→5` `nextRetryAt +1s..+16s` → `FAILED` retained in `src/modules/outbox/test/outbox.publisher.spec.ts`
-- [ ] T031 [P] [US5] Unit test `ReservationExpirationService` poison excludes `200`/`404` only counts `23514`/`ETIMEDOUT`/`500` toward `3→quarantine` in `src/modules/reservation/test/reservation-expiration.service.spec.ts`
-- [ ] T032 [P] [US5] Integration test real PG `processExpiredBatch` `23514` `3` → `expiration:poison:quarantined` `24h` tick skipped in `src/modules/reservation/test/expiration-poison.integration.spec.ts`
+- [X] T030 [P] [US5] Unit test `OutboxPublisher` transient `ECONNREFUSED` attempts `1→5` `nextRetryAt +1s..+16s` → `FAILED` retained in `src/modules/outbox/test/outbox.publisher.spec.ts`
+- [X] T031 [P] [US5] Unit test `ReservationExpirationService` poison excludes `200`/`404` only counts `23514`/`ETIMEDOUT`/`500` toward `3→quarantine` in `src/modules/reservation/test/reservation-expiration.service.spec.ts`
+- [X] T032 [P] [US5] Integration test real PG `processExpiredBatch` `23514` `3` → `expiration:poison:quarantined` `24h` tick skipped in `src/modules/reservation/test/expiration-poison.integration.spec.ts`
 
 ### Implementation for User Story 5
 
-- [ ] T033 [US5] Implement poison exclusion logic `if status==EXPIRED|CANCELLED|COMPLETED 200 or 404 → return without INCR poison:count` in `src/modules/reservation/reservation-expiration.service.ts`
-- [ ] T034 [US5] Verify `OutboxPublisher` `lease 30s` reclaim `PROCESSING older than 30s` and `maxAttempts 5` retained `FAILED` not deleted in `src/modules/outbox/outbox.publisher.ts`
-- [ ] T035 [US5] Document retry layers `A Outbox pulisher / B expiration / C notifications / D business 200` with `// Retry Layer` comments in `src/modules/outbox/outbox.publisher.ts` and `src/modules/reservation/reservation-expiration.service.ts`
+- [X] T033 [US5] Implement poison exclusion logic `if status==EXPIRED|CANCELLED|COMPLETED 200 or 404 → return without INCR poison:count` in `src/modules/reservation/reservation-expiration.service.ts`
+- [X] T034 [US5] Verify `OutboxPublisher` `lease 30s` reclaim `PROCESSING older than 30s` and `maxAttempts 5` retained `FAILED` not deleted in `src/modules/outbox/outbox.publisher.ts`
+- [X] T035 [US5] Document retry layers `A Outbox pulisher / B expiration / C notifications / D business 200` with `// Retry Layer` comments in `src/modules/outbox/outbox.publisher.ts` and `src/modules/reservation/reservation-expiration.service.ts`
 
 **Checkpoint**: US5 duplicate `200` does not poison-quarantine; transient `5` → `FAILED` retained
 
@@ -152,17 +152,17 @@ description: "Task list for Reliability / Idempotency — Phase 12 implementatio
 
 ### Tests for User Story 6
 
-- [ ] T036 [P] [US6] E2E `supertest` `PATCH /admin/outbox/:id/requeue` `403` non-Admin, `404` not found, `409` not FAILED, `200` Admin on FAILED → `PENDING` in `test/e2e/outbox-requeue.e2e-spec.ts`
-- [ ] T037 [P] [US6] Integration test `GET /admin/outbox?status=FAILED` paginated `createdAt DESC` Admin-only in `test/e2e/outbox-requeue.e2e-spec.ts`
-- [ ] T038 [P] [US6] Unit test `INCR idempotency:duplicate:skipped:*` called on each idempotent skip (`expiration`, `complete`, `notification`) mocked `CACHE_MANAGER.incr` in `src/modules/outbox/test/outbox.service.spec.ts`
+- [X] T036 [P] [US6] E2E `supertest` `PATCH /admin/outbox/:id/requeue` `403` non-Admin, `404` not found, `409` not FAILED, `200` Admin on FAILED → `PENDING` in `test/e2e/outbox-requeue.e2e-spec.ts`
+- [X] T037 [P] [US6] Integration test `GET /admin/outbox?status=FAILED` paginated `createdAt DESC` Admin-only in `test/e2e/outbox-requeue.e2e-spec.ts`
+- [X] T038 [P] [US6] Unit test `INCR idempotency:duplicate:skipped:*` called on each idempotent skip (`expiration`, `complete`, `notification`) mocked `CACHE_MANAGER.incr` in `src/modules/outbox/test/outbox.service.spec.ts`
 
 ### Implementation for User Story 6
 
-- [ ] T039 [US6] Implement `OutboxAdminController` `PATCH ':id/requeue'` `JwtGuard @Auth(Admin)` `FOR UPDATE WHERE status=FAILED → PENDING attempts=0 nextRetryAt=NOW()` `200` in `src/modules/outbox/outbox.controller.ts`
-- [ ] T040 [US6] Implement `GET /admin/outbox` list `?status,page,limit` paginated `createdAt DESC` `Admin` in `src/modules/outbox/outbox.controller.ts`
-- [ ] T041 [P] [US6] Register `OutboxAdminController` in `OutboxModule` `controllers` and export `OutboxService` in `src/modules/outbox/outbox.module.ts`
-- [ ] T042 [P] [US6] Add Swagger `@ApiOperation @ApiResponse 200/403/404/409` for `PATCH requeue` in `src/modules/outbox/outbox.controller.ts`
-- [ ] T043 [US6] Wire `CACHE_MANAGER INCR idempotency:duplicate:skipped:<type> EX 86400` on every idempotent skip path (expiration, complete, notification) in respective services (`reservation.service.ts`, `order-completion.service.ts`, `notifications.worker.ts`) per Q5 B
+- [X] T039 [US6] Implement `OutboxAdminController` `PATCH ':id/requeue'` `JwtGuard @Auth(Admin)` `FOR UPDATE WHERE status=FAILED → PENDING attempts=0 nextRetryAt=NOW()` `200` in `src/modules/outbox/outbox.controller.ts`
+- [X] T040 [US6] Implement `GET /admin/outbox` list `?status,page,limit` paginated `createdAt DESC` `Admin` in `src/modules/outbox/outbox.controller.ts`
+- [X] T041 [P] [US6] Register `OutboxAdminController` in `OutboxModule` `controllers` and export `OutboxService` in `src/modules/outbox/outbox.module.ts`
+- [X] T042 [P] [US6] Add Swagger `@ApiOperation @ApiResponse 200/403/404/409` for `PATCH requeue` in `src/modules/outbox/outbox.controller.ts`
+- [X] T043 [US6] Wire `CACHE_MANAGER INCR idempotency:duplicate:skipped:<type> EX 86400` on every idempotent skip path (expiration, complete, notification) in respective services (`reservation.service.ts`, `order-completion.service.ts`, `notifications.worker.ts`) per Q5 B
 
 **Checkpoint**: US6 `Admin` can verify `FAILED` and requeue to `PENDING`, counters observable
 
@@ -172,9 +172,9 @@ description: "Task list for Reliability / Idempotency — Phase 12 implementatio
 
 **Purpose**: Docs, JSDoc, and quickstart validation
 
-- [ ] T044 [P] Add class-level `/** This service is responsible for ... */` and method `/** @param @returns @throws */` JSDoc + `// idempotent guard` / `// available = stock - reservedAmount` comments to all modified services in `src/modules/reservation/reservation.service.ts`, `src/modules/order/order-completion.service.ts`, `src/modules/outbox/outbox.service.ts`, `src/modules/notifications/notifications.worker.ts`
-- [ ] T045 [P] Update `docs/architecture/reliability.md` and `docs/decisions/ADR-reliability-idempotency.md` per plan.md decisions D1-D8 in `docs/architecture/reliability.md`
-- [ ] T046 Run `npm run lint`, `npm run build`, `npm run test -- --runInBand`, and E2E `PATCH requeue` + duplicate `expire`/`complete` validation per `specs/012-reliability-idempotency/quickstart.md`
+- [X] T044 [P] Add class-level `/** This service is responsible for ... */` and method `/** @param @returns @throws */` JSDoc + `// idempotent guard` / `// available = stock - reservedAmount` comments to all modified services in `src/modules/reservation/reservation.service.ts`, `src/modules/order/order-completion.service.ts`, `src/modules/outbox/outbox.service.ts`, `src/modules/notifications/notifications.worker.ts`
+- [X] T045 [P] Update `docs/architecture/reliability.md` and `docs/decisions/ADR-reliability-idempotency.md` per plan.md decisions D1-D8 in `docs/architecture/reliability.md`
+- [X] T046 Run `npm run lint`, `npm run build`, `npm run test -- --runInBand`, and E2E `PATCH requeue` + duplicate `expire`/`complete` validation per `specs/012-reliability-idempotency/quickstart.md`
 
 ---
 

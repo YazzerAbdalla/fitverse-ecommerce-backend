@@ -8,6 +8,12 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { UserRoles } from '../users/enum/roles';
@@ -18,8 +24,10 @@ import { Reservation } from './entities/reservation.entity';
 
 /**
  * This controller exposes reservation endpoints.
- * Checkout is the only user-facing reservation producer; manual POST is Admin-only.
+ * It handles thin delegation to ReservationService inside DataSource.transaction and documents idempotency semantics.
+ * Same-transition (EXPIRED→EXPIRED, CANCELLED→CANCELLED) returns 200 idempotent with 0 delta; cross-transition returns 409.
  */
+@ApiTags('reservations')
 @Controller('reservations')
 @Auth(UserRoles.User, UserRoles.Admin)
 export class ReservationController {
@@ -85,7 +93,26 @@ export class ReservationController {
     );
   }
 
+  /**
+   * Cancels a reservation (RESERVED→CANCELLED). Idempotent CANCELLED→CANCELLED returns 200 with 0 delta.
+   * @param userId - Requesting user id.
+   * @param role - Requesting role.
+   * @param id - Reservation id.
+   * @returns Reservation with 200 idempotent or 409 for cross-transition.
+   * @throws ForbiddenException if not admin.
+   */
   @Patch(':id/cancel')
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({ summary: 'Cancel reservation (RESERVED→CANCELLED)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Cancelled or already CANCELLED idempotent (0 delta)',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Conflicting cross-transition (e.g. COMPLETED→CANCELLED)',
+  })
+  @ApiResponse({ status: 404, description: 'Reservation not found' })
   async cancel(
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: UserRoles,
@@ -101,8 +128,24 @@ export class ReservationController {
     );
   }
 
+  /**
+   * Expires a reservation (RESERVED→EXPIRED). Idempotent EXPIRED→EXPIRED returns 200 with 0 delta.
+   * @param id - Reservation id.
+   * @returns Reservation with 200 idempotent or 409 for cross-transition.
+   */
   @Patch(':id/expire')
   @Auth(UserRoles.Admin)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({ summary: 'Expire reservation (RESERVED→EXPIRED)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Expired or already EXPIRED idempotent (0 delta)',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Conflicting cross-transition (e.g. COMPLETED→EXPIRED)',
+  })
+  @ApiResponse({ status: 404, description: 'Reservation not found' })
   async expire(@Param('id') id: string): Promise<Reservation> {
     return this.reservationService.dataSource.transaction((manager) =>
       this.reservationService.expire(manager, id),
