@@ -19,6 +19,8 @@ import { OrderModule } from './modules/order/order.module';
 import { ProductsModule } from './modules/products/products.module';
 import { ReservationModule } from './modules/reservation/reservation.module';
 import { UsersModule } from './modules/users/users.module';
+import { OutboxModule } from './modules/outbox/outbox.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 @Module({
   imports: [
@@ -89,6 +91,8 @@ import { UsersModule } from './modules/users/users.module';
     InventoryModule,
     CartModule,
     ReservationModule,
+    OutboxModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService, CacheTestService],

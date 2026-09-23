@@ -9,12 +9,14 @@ import { ReservationService } from './reservation.service';
 import { ReservationController } from './reservation.controller';
 import { ReservationExpirationProcessor } from './reservation-expiration.processor';
 import { ReservationExpirationService } from './reservation-expiration.service';
+import { OutboxModule } from '../outbox/outbox.module';
 
 @Module({
   imports: [
     ConfigModule,
     TypeOrmModule.forFeature([Reservation, ReservationItem]),
     BullModule.registerQueue({ name: 'reservation-expiration' }),
+    OutboxModule,
   ],
   controllers: [ReservationController],
   providers: [

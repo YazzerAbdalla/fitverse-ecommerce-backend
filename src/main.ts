@@ -18,6 +18,7 @@ async function bootstrap() {
   );
 
   // 2. Connect the microservice using variables
+  // noAck=false for manual ACK after verification processing (Correction 3)
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.RMQ,
     options: {
@@ -26,6 +27,8 @@ async function bootstrap() {
       queueOptions: {
         durable: true,
       },
+      noAck: false,
+      prefetchCount: 10,
     },
   });
 
