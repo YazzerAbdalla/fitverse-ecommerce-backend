@@ -14,7 +14,7 @@ and [`skills/`](./skills); do not duplicate that detail here.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at `specs/010-rate-limiting/plan.md` (Phase 10 — Rate Limiting / Distributed Throttling).
+at `specs/011-async-events-notifications/plan.md` (Phase 11 — Transactional Outbox / Asynchronous Events).
 <!-- SPECKIT END -->
 
 ---
