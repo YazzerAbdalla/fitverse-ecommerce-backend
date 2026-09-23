@@ -9,6 +9,7 @@ import { OrderItem } from './modules/order/entities/order-items.entity';
 import { Inventory } from './modules/inventory/entities/inventory.entity';
 import { Reservation } from './modules/reservation/entities/reservation.entity';
 import { ReservationItem } from './modules/reservation/entities/reservation-item.entity';
+import { OutboxEvent } from './modules/outbox/entities/outbox-event.entity';
 
 dotenv.config();
 
@@ -31,6 +32,7 @@ export const AppDataSource = new DataSource({
     Inventory,
     Reservation,
     ReservationItem,
+    OutboxEvent,
   ],
   migrations: ['src/migration/**/*.ts'],
   subscribers: ['src/subscriber/**/*.ts'],

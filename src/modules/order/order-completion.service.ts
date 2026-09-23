@@ -1,9 +1,11 @@
 import {
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In } from 'typeorm';
@@ -14,6 +16,8 @@ import { ReservationStatus } from '../reservation/entities/reservation-status.en
 import { Inventory } from '../inventory/entities/inventory.entity';
 import { ReservationService } from '../reservation/reservation.service';
 import { UserRoles } from '../users/enum/roles';
+import { OutboxService } from '../outbox/outbox.service';
+import { randomUUID } from 'crypto';
 
 /**
  * Allowed Order status transitions for sale.
@@ -41,6 +45,9 @@ export class OrderCompletionService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly reservationService: ReservationService,
+    @Optional()
+    @Inject(OutboxService)
+    private readonly outboxService?: OutboxService,
   ) {}
 
   /**
@@ -90,6 +97,7 @@ export class OrderCompletionService {
     requestingUserId: string,
     orderId: string,
     role?: UserRoles,
+    correlationId?: string,
   ): Promise<any> {
     const orderRepo = manager.getRepository(Order);
 
@@ -166,6 +174,34 @@ export class OrderCompletionService {
 
     // 5. No items? Still allow COMPLETED without inventory mutation (edge)
     if (!reservation.items || reservation.items.length === 0) {
+      // OutboxEvent INSERT inside same transaction — no client.emit
+      const corrIdNoItems = correlationId || randomUUID();
+      if (this.outboxService) {
+        try {
+          await this.outboxService.createEvent(manager, {
+            eventType: 'order.completed',
+            aggregateType: 'Order',
+            aggregateId: orderId,
+            payload: {
+              version: 1,
+              eventType: 'order.completed',
+              correlationId: corrIdNoItems,
+              orderId,
+              userId: currentOrder.userId,
+              previousStatus: 'PENDING',
+              newStatus: 'COMPLETED',
+              reservationId: reservation.id,
+              items: [],
+              completedAt: new Date().toISOString(),
+            },
+            correlationId: corrIdNoItems,
+          });
+        } catch (e: any) {
+          this.logger.warn(
+            `outbox order.completed insert failed for ${orderId}: ${e?.message}`,
+          );
+        }
+      }
       currentOrder.status = OrderStatus.COMPLETED;
       reservation.status = ReservationStatus.COMPLETED;
       const savedOrder = await orderRepo.save(currentOrder);
@@ -228,7 +264,39 @@ export class OrderCompletionService {
       throw e;
     }
 
-    // 9. Save Order COMPLETED + Reservation COMPLETED
+    // 9. OutboxEvent INSERT inside same transaction — no client.emit
+    const corrId = correlationId || randomUUID();
+    if (this.outboxService) {
+      try {
+        await this.outboxService.createEvent(manager, {
+          eventType: 'order.completed',
+          aggregateType: 'Order',
+          aggregateId: orderId,
+          payload: {
+            version: 1,
+            eventType: 'order.completed',
+            correlationId: corrId,
+            orderId,
+            userId: currentOrder.userId,
+            previousStatus: 'PENDING',
+            newStatus: 'COMPLETED',
+            reservationId: reservation.id,
+            items: reservation.items.map((i) => ({
+              inventoryId: i.inventoryId,
+              quantity: i.quantity,
+            })),
+            completedAt: new Date().toISOString(),
+          },
+          correlationId: corrId,
+        });
+      } catch (e: any) {
+        this.logger.warn(
+          `outbox order.completed insert failed for ${orderId}: ${e?.message}`,
+        );
+      }
+    }
+
+    // 10. Save Order COMPLETED + Reservation COMPLETED
     currentOrder.status = OrderStatus.COMPLETED;
     if (reservation.status !== ReservationStatus.COMPLETED) {
       reservation.status = ReservationStatus.COMPLETED;

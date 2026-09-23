@@ -7,15 +7,19 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { ClientProxy } from '@nestjs/microservices';
 import { DataSource, EntityManager } from 'typeorm';
 import { Reservation } from './entities/reservation.entity';
 import { ReservationStatus } from './entities/reservation-status.enum';
 import { ReservationService } from './reservation.service';
+import { OutboxService } from '../outbox/outbox.service';
+import { Order } from '../order/entities/order.entity';
+import { OrderStatus } from '../order/order-status.enum';
+import { randomUUID } from 'crypto';
 
 /**
  * This service is responsible for expiration cleanup domain.
  * It handles scanning expired reservations and releasing reserved inventory with poison/ TTL handling.
+ * It creates transactional outbox events inside the same DataSource.transaction as business state.
  */
 @Injectable()
 export class ReservationExpirationService {
@@ -31,8 +35,8 @@ export class ReservationExpirationService {
     private readonly reservationService: ReservationService,
     private readonly configService: ConfigService,
     @Optional()
-    @Inject('NOTIFICATION_SERVICE')
-    private readonly client?: ClientProxy,
+    @Inject(OutboxService)
+    private readonly outboxService?: OutboxService,
     @Optional()
     @Inject('REDIS_CLIENT')
     private readonly redis?: any,
@@ -195,54 +199,102 @@ export class ReservationExpirationService {
         continue;
       }
       try {
-        // Per-candidate transaction
+        // Per-candidate transaction — outbox events inserted atomically with state change
         let result: Reservation | null = null;
         await this.dataSource.transaction(async (manager) => {
+          // Capture order status before expire to detect newly cancelled order (FR-006)
+          let orderBeforeStatus: OrderStatus | null = null;
+          try {
+            const pre = await manager.getRepository(Reservation).findOne({
+              where: { id },
+            });
+            if (pre?.orderId) {
+              const ordBefore = await manager
+                .getRepository(Order)
+                .findOne({ where: { id: pre.orderId } });
+              orderBeforeStatus = (ordBefore?.status as OrderStatus) ?? null;
+            }
+          } catch {
+            // ignore pre-fetch errors — best effort
+          }
+
           result = await this.expireOne(manager, id);
+
+          // OutboxEvent INSERT inside same transaction — no client.emit
+          if (this.outboxService) {
+            try {
+              const corrId = randomUUID();
+              await this.outboxService.createEvent(manager, {
+                eventType: 'reservation.expired',
+                aggregateType: 'Reservation',
+                aggregateId: result.id,
+                payload: {
+                  version: 1,
+                  eventType: 'reservation.expired',
+                  correlationId: corrId,
+                  reservationId: result.id,
+                  userId: result.userId,
+                  orderId: result.orderId ?? null,
+                  items: (result.items || []).map((i: any) => ({
+                    inventoryId: i.inventoryId,
+                    quantity: i.quantity,
+                  })),
+                  expiresAt: result.expiresAt?.toISOString() ?? null,
+                  expiredAt: new Date().toISOString(),
+                },
+                correlationId: corrId,
+              });
+
+              if (result.orderId) {
+                const orderAfter = await manager
+                  .getRepository(Order)
+                  .findOne({ where: { id: result.orderId } });
+                // Only create order.cancelled if we just transitioned PENDING→CANCELLED
+                if (
+                  orderAfter &&
+                  orderBeforeStatus === OrderStatus.PENDING &&
+                  orderAfter.status === OrderStatus.CANCELLED
+                ) {
+                  const corrId2 = randomUUID();
+                  try {
+                    await this.outboxService.createEvent(manager, {
+                      eventType: 'order.cancelled',
+                      aggregateType: 'Order',
+                      aggregateId: result.orderId,
+                      payload: {
+                        version: 1,
+                        eventType: 'order.cancelled',
+                        correlationId: corrId2,
+                        orderId: result.orderId,
+                        userId: result.userId,
+                        previousStatus: 'PENDING',
+                        newStatus: 'CANCELLED',
+                        reason: 'expired',
+                        reservationId: result.id,
+                      },
+                      correlationId: corrId2,
+                    });
+                  } catch (e2: any) {
+                    this.logger.warn(
+                      `outbox order.cancelled insert failed for ${result.orderId}: ${e2?.message}`,
+                    );
+                  }
+                }
+              }
+            } catch (e: any) {
+              this.logger.warn(
+                `outbox reservation.expired insert failed for ${result.id}: ${e?.message}`,
+              );
+            }
+          }
         });
-        // Success - clear poison state (Redis or memory) and publish RabbitMQ event post-commit
+        // Success - clear poison state (Redis or memory)
         await this.clearPoison(id);
         expired++;
         const expAt = (result as Reservation | null)?.expiresAt;
         this.logger.debug(
           `expiring reservation ${id} expiresAt=${expAt ? expAt.toISOString() : 'unknown'}`,
         );
-        // Publish RabbitMQ event after commit (at-most-once, failures logged not rolled back)
-        if (this.client && result) {
-          const payload = {
-            reservationId: (result as Reservation).id,
-            userId: (result as Reservation).userId,
-            expiredAt: new Date().toISOString(),
-            expiresAt: (result as Reservation).expiresAt?.toISOString(),
-            inventoryIds: ((result as Reservation).items || [])
-              .map((i: any) => i.inventoryId)
-              .sort(),
-            items: ((result as Reservation).items || []).map((i: any) => ({
-              inventoryId: i.inventoryId,
-              quantity: i.quantity,
-            })),
-            status: 'EXPIRED' as const,
-          };
-          try {
-            // fire-and-forget, subscribe to ensure error callback
-            const obs = this.client.emit('reservation.expired', payload);
-            if (obs && typeof (obs as any).subscribe === 'function') {
-              (obs as any).subscribe({
-                error: (e: any) =>
-                  this.logger.error(
-                    `reservation.expired emit failed for ${id}: ${e?.message}`,
-                    e?.stack,
-                  ),
-              });
-            }
-            this.logger.debug(`reservation.expired emitted for ${id}`);
-          } catch (e: any) {
-            this.logger.error(
-              `reservation.expired emit threw for ${id}: ${e?.message}`,
-              e?.stack,
-            );
-          }
-        }
       } catch (e: any) {
         // Handle idempotent skip for already-terminal (Conflict due to invalid transition) as skipped, not failed
         const msg: string = e?.message || '';

@@ -1,9 +1,11 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
@@ -16,6 +18,8 @@ import { OrderItem } from './entities/order-items.entity';
 import { OrderStatus } from './order-status.enum';
 import { ReservationService } from '../reservation/reservation.service';
 import { CartService } from '../cart/cart.service';
+import { OutboxService } from '../outbox/outbox.service';
+import { randomUUID } from 'crypto';
 
 /**
  * This service is responsible for checkout domain.
@@ -29,11 +33,15 @@ export class OrderCheckoutService {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly reservationService: ReservationService,
     private readonly cartService: CartService,
+    @Optional()
+    @Inject(OutboxService)
+    private readonly outboxService?: OutboxService,
   ) {}
 
   /**
    * Performs cart-only checkout for user.
    * @param userId - Authenticated user id from JWT sub.
+   * @param correlationId - Optional correlationId for outbox tracing (generated if missing).
    * @returns Created order and reservation.
    * @throws BadRequestException if cart empty.
    * @throws NotFoundException if product/inventory missing.
@@ -41,6 +49,7 @@ export class OrderCheckoutService {
    */
   async checkout(
     userId: string,
+    correlationId?: string,
   ): Promise<{ order: Order; reservation: any; items: OrderItem[] }> {
     return this.dataSource.transaction(async (manager) => {
       // 1. Load cart with items + product via manager (stay in transaction)
@@ -208,6 +217,44 @@ export class OrderCheckoutService {
 
       // 12. Clear cart atomically via manager
       await this.cartService.clearCartForCheckout(manager, userId);
+
+      // 13. OutboxEvent INSERT inside same transaction — no client.emit
+      const corrId = correlationId || randomUUID();
+      if (this.outboxService) {
+        try {
+          await this.outboxService.createEvent(manager, {
+            eventType: 'order.created',
+            aggregateType: 'Order',
+            aggregateId: savedOrder.id,
+            payload: {
+              version: 1,
+              eventType: 'order.created',
+              correlationId: corrId,
+              orderId: savedOrder.id,
+              userId,
+              total,
+              currency: 'usd',
+              items: checkoutItems.map((i) => ({
+                productId: i.productId,
+                inventoryId: i.inventoryId,
+                quantity: i.quantity,
+                unit_price: i.unit_price,
+              })),
+              reservationId: reservation.id,
+              expiresAt: reservation.expiresAt?.toISOString() ?? null,
+              createdAt: savedOrder.created_at
+                ? savedOrder.created_at.toISOString()
+                : new Date().toISOString(),
+            },
+            correlationId: corrId,
+          });
+        } catch (e: any) {
+          // Best-effort outbox — if table missing (integration without migration) log and continue so business still commits
+          this.logger.warn(
+            `outbox order.created insert failed for ${savedOrder.id}: ${e?.message}`,
+          );
+        }
+      }
 
       this.logger.log(
         `Checkout succeeded for user ${userId} order ${savedOrder.id} total ${total}`,

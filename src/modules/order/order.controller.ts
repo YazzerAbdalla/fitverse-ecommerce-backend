@@ -6,8 +6,12 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
+  Optional,
+  Inject,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { RateLimitGuard } from '../auth/guards/rate-limit.guard';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -20,6 +24,7 @@ import { CompleteOrderDto } from './dto/complete-order.dto';
 import { OrderService } from './order.service';
 import { OrderCheckoutService } from './order-checkout.service';
 import { OrderCompletionService } from './order-completion.service';
+import { OrderCancellationService } from './order-cancellation.service';
 
 /**
  * This controller exposes order endpoints.
@@ -32,20 +37,38 @@ export class OrderController {
     private readonly orderCheckoutService: OrderCheckoutService,
     private readonly orderCompletionService: OrderCompletionService,
     @InjectDataSource() private readonly dataSource: DataSource,
+    @Optional()
+    @Inject(OrderCancellationService)
+    private readonly orderCancellationService?: OrderCancellationService,
   ) {}
 
   @Post('checkout')
   @UseGuards(RateLimitGuard)
   @Auth()
   @ApiBearerAuth('JWT-auth')
-  @ApiOperation({ summary: 'Checkout cart → Order + Reservation' })
+  @ApiOperation({
+    summary: 'Checkout cart → Order + Reservation',
+    description:
+      'Async event: order.created via transactional outbox (OutboxEvent PENDING→OutboxPublisher→RabbitMQ)',
+  })
   @ApiResponse({ status: 201, description: 'Order created' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
-  async checkout(@CurrentUser('sub') userId: string, @Body() dto: CheckoutDto) {
-    const result = await this.orderCheckoutService.checkout(userId);
+  async checkout(
+    @CurrentUser('sub') userId: string,
+    @Body() dto: CheckoutDto,
+    @Req() req: any,
+  ) {
+    const correlationId =
+      req?.headers?.['x-request-id'] ||
+      req?.headers?.['x-correlation-id'] ||
+      randomUUID();
+    const result = await this.orderCheckoutService.checkout(
+      userId,
+      correlationId,
+    );
     // Return shape per contracts: {id, userId, status, total, createdAt, reservationId, expiresAt, items}
     const order: any = result.order;
     return {
@@ -79,8 +102,9 @@ export class OrderController {
   async createAlias(
     @CurrentUser('sub') userId: string,
     @Body() dto: CheckoutDto,
+    @Req() req: any,
   ) {
-    return this.checkout(userId, dto);
+    return this.checkout(userId, dto, req);
   }
 
   /**
@@ -119,9 +143,20 @@ export class OrderController {
     @CurrentUser('role') role: UserRoles,
     @Param('id') id: string,
     @Body() dto: CompleteOrderDto,
+    @Req() req: any,
   ) {
+    const correlationId =
+      req?.headers?.['x-request-id'] ||
+      req?.headers?.['x-correlation-id'] ||
+      randomUUID();
     const result: any = await this.dataSource.transaction((manager) =>
-      this.orderCompletionService.complete(manager, userId, id, role),
+      this.orderCompletionService.complete(
+        manager,
+        userId,
+        id,
+        role,
+        correlationId,
+      ),
     );
     // Normalize response shape per contracts/order-complete.md
     return {
@@ -173,8 +208,60 @@ export class OrderController {
     @CurrentUser('role') role: UserRoles,
     @Param('id') id: string,
     @Body() dto: CompleteOrderDto,
+    @Req() req: any,
   ) {
-    return this.complete(userId, role, id, dto);
+    return this.complete(userId, role, id, dto, req);
+  }
+
+  /**
+   * Cancels a pending order (user or admin). Centralized outbox.
+   * @param userId - JWT sub.
+   * @param role - User role.
+   * @param id - Order id.
+   * @param req - Request for correlationId.
+   * @returns Cancelled order.
+   */
+  @Post(':id/cancel')
+  @UseGuards(RateLimitGuard)
+  @Auth()
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'Cancel pending order → order.cancelled via outbox',
+    description:
+      'Async event: order.cancelled via transactional outbox (OutboxEvent PENDING→OutboxPublisher→RabbitMQ)',
+  })
+  @ApiResponse({ status: 200, description: 'Order cancelled' })
+  @ApiResponse({ status: 404, description: 'Order not found' })
+  @ApiResponse({ status: 409, description: 'Invalid transition' })
+  async cancel(
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: UserRoles,
+    @Param('id') id: string,
+    @Req() req: any,
+  ) {
+    const correlationId =
+      req?.headers?.['x-request-id'] ||
+      req?.headers?.['x-correlation-id'] ||
+      randomUUID();
+    if (!this.orderCancellationService) {
+      throw new Error('OrderCancellationService not available');
+    }
+    const result: any = await this.dataSource.transaction((manager) =>
+      this.orderCancellationService!.cancel(
+        manager,
+        id,
+        'user',
+        correlationId,
+        userId,
+        role,
+      ),
+    );
+    return {
+      id: result.id,
+      status: result.status,
+      total: result.total,
+      userId: result.userId,
+    };
   }
 
   @Get()
