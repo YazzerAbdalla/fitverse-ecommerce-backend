@@ -907,19 +907,19 @@ Asynchronous failures do not roll back already committed business transactions.
 
 # Phase 12 — Reliability / Idempotency
 
-**Status: NOT DONE**
+**Status: DONE — 2026-09-23** (idempotent `RESERVED→EXPIRED|CANCELLED` `200` same-transition `0 delta` + `COMPLETED→COMPLETED 200` `stock` single decrement + `SET NX notification:processed:<eventId> EX 24h` + `INCR idempotency:duplicate:skipped:*` + `PATCH /admin/outbox/:id/requeue` `@Auth(Admin)` + poison excludes `200`/`404` + bulk re-scan)
 
-This phase becomes important once background processing and events exist.
+**Goal**: Make retryable operations idempotent so reprocessing twice leaves state identical.
 
 ## Tasks
 
-* [ ] Identify retryable operations
-* [ ] Make reservation expiration idempotent
-* [ ] Make notification jobs idempotent
-* [ ] Prevent duplicate order completion
-* [ ] Prevent duplicate inventory release
-* [ ] Define event/job retry behavior
-* [ ] Define failure handling
+* [x] Identify retryable operations — `FR-001` table `Reservation expiration`/`Outbox publish`/`Notification worker` retryable (`1s·2^n` `3→quarantine`), `Order completion`/`Inventory release` server `200` idempotent no `BullMQ` (`research D1-D8`)
+* [x] Make reservation expiration idempotent — `reservation.service.ts:1` generic `status==to → 200` before `FOR UPDATE sorted Inventories` + `Logger` + `INCR expiration`, `reservation-expiration.service.ts:1` `FOR UPDATE → status check → 0 delta` per candidate `200` `poison` excludes `200`/`404`
+* [x] Make notification jobs idempotent — `notifications.worker.ts:1` `SET NX notification:processed:<eventId> EX 24h` before `EmailProvider.send` + `INCR notification` + `NotificationLog eventId @Unique` fallback + bulk `SET NX per user` re-scan `Q4 A`, `event-verification.consumer.ts:1`, `NoopEmailProvider`
+* [x] Prevent duplicate order completion — `order-completion.service.ts:1` `COMPLETED→COMPLETED 200` before `FOR UPDATE Reservation/Inventories` + `INCR complete` `Logger`, `order-checkout.service.ts:1` `client.emit` outside `manager` already
+* [x] Prevent duplicate inventory release — `reservation.service.ts:1` `cancel` same guard `status != RESERVED → 200` `0 delta` `INCR cancel` + `CHECK 23514→409` poison transient only
+* [x] Define event/job retry behavior — `FR-006` layers `A Outbox 5→FAILED 1s·2^n` `B expiration BullMQ 3→quarantine 24h` `C notifications 3` `D business 200` all `ConfigService`, `outbox.publisher.ts:1` `SKIP LOCKED` `lease 30s` retained, `outbox.service.ts:1` `requeue()`
+* [x] Define failure handling — `FR-007` `AllExceptionsFilter` `{statusCode,message,timestamp}` `409/404` no `OutboxEvent` on rollback, `FAILED` retained `PATCH requeue` `Admin`, `quarantine 24h` skip, `Logger`+`INCR` per `Q5 B` `fail-open`
 
 Example:
 
@@ -928,14 +928,15 @@ If the cleanup worker processes the same reservation twice:
 ```text
 First attempt:
 RESERVED → EXPIRED
-reserved_amount -= quantity
+reserved_amount -= quantity // FOR UPDATE Reservation status==RESERVED → delta 1
 
 Second attempt:
 reservation is already EXPIRED
-→ do nothing
+→ 200 already terminal + INCR idempotency:duplicate:skipped:expiration (before FOR UPDATE Inventories)
+→ do nothing (0 delta)
 ```
 
-The second attempt must not subtract inventory again.
+The second attempt must not subtract inventory again — **MET**: `POST /reservations/:id/expire` twice `200` `reserved 0` `INCR 1`, `Promise.all([expire,expire])` single `reserved-=qty`, `POST /order/:id/complete` twice `200` `stock 8` `outbox 1`, `SET NX 1→0` `NotificationLog 1`, `PATCH /admin/outbox/:id/requeue` `Admin 200` `PENDING`, `npm run build` `PASS`, `tasks.md` `46/46` `spec 012`
 
 ---
 
