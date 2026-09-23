@@ -11,13 +11,18 @@ import { GoogleStrategy } from './strateges/google.strategy';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PasswordResetToken } from './entities/password-reset-token.entity';
 import { OtpVerification } from './entities/otp-verification.entity';
+import { RefreshToken } from './entities/refresh-token.entity';
 import { NoopWhatsAppProvider } from './providers/whatsapp.provider';
 import { RateLimitGuard } from './guards/rate-limit.guard';
 
 @Module({
   imports: [
     UsersModule,
-    TypeOrmModule.forFeature([PasswordResetToken, OtpVerification]),
+    TypeOrmModule.forFeature([
+      PasswordResetToken,
+      OtpVerification,
+      RefreshToken,
+    ]),
     JwtModule.registerAsync({
       global: true,
       imports: [ConfigModule],

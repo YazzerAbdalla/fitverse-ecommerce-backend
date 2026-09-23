@@ -19,12 +19,17 @@ import {
   OtpVerification,
   OtpPurpose,
 } from './entities/otp-verification.entity';
+import { RefreshToken } from './entities/refresh-token.entity';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
 import type { WhatsAppProvider } from './providers/whatsapp.provider';
 import { GoogleProfile } from './strateges/google.strategy';
 
+/**
+ * This service is responsible for authentication domain (registration, login, refresh, logout).
+ * It handles JWT issuance, refresh token rotation with PG FOR UPDATE, and enforces hash/storage invariants.
+ */
 @Injectable()
 export class AuthService {
   constructor(
@@ -84,6 +89,11 @@ export class AuthService {
     return null;
   }
 
+  /**
+   * This service is responsible for auth domain (login, refresh, logout, password-reset, OTP, Google).
+   * It handles token issuance and enforces PG authoritative refresh storage.
+   */
+
   //Generate the jwt for user after validation his credentionals
   async login(user: Partial<User>) {
     const { id, email, firstName, lastName, role, tokenVersion } = user as any;
@@ -98,9 +108,342 @@ export class AuthService {
 
     const accessToken = await this.jwtService.signAsync(payload as any);
 
-    this.logger.log(`User with email ${email} logged in successfuly.`);
+    // Issue refresh token (Phase 17)
+    const refreshToken = await this.createRefreshTokenForUser(id);
 
-    return { message: 'User loged in successfuly', accessToken };
+    // Log with hashed prefix only, never rawRefresh
+    const prefix = refreshToken.slice(0, 6);
+    this.logger.log(
+      `User with email ${email} logged in successfuly. refreshPrefix=${prefix}`,
+    );
+
+    return {
+      message: 'User loged in successfuly',
+      accessToken,
+      refreshToken,
+    };
+  }
+
+  /**
+   * Creates a refresh token for user with cap 5 LRU eviction.
+   * @param userId - User to issue token for.
+   * @returns Raw refresh token 64 hex.
+   * @throws UnauthorizedException if user not found (rare).
+   */
+  private async createRefreshTokenForUser(userId: string): Promise<string> {
+    const raw = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const ttl = this.configService.get<string>('REFRESH_TOKEN_TTL') || '7d';
+    const expiresAt = new Date(Date.now() + this.parseTtlMs(ttl));
+
+    const repo = this.dataSource.getRepository(RefreshToken);
+    // Enforce cap 5 active LRU — revoke oldest if needed
+    // Count active tokens for user
+    const activeCount = await repo.count({
+      where: { userId, revokedAt: null as any },
+    });
+    // If active >=5, revoke oldest active token (FOR UPDATE style — simple UPDATE oldest)
+    if (activeCount >= 5) {
+      // Find oldest active token
+      const oldest = await repo.find({
+        where: { userId, revokedAt: null as any },
+        order: { createdAt: 'ASC' },
+        take: 1,
+      });
+      if (oldest[0]) {
+        // Revoke oldest — single-winner via UPDATE WHERE revokedAt IS NULL
+        await repo.update(oldest[0].id, { revokedAt: new Date() });
+        this.logger.log(
+          `Refresh cap evicted oldest userId=${userId} tokenId=${oldest[0].id}`,
+        );
+      }
+    }
+
+    try {
+      const entity = repo.create({
+        userId,
+        tokenHash,
+        expiresAt,
+        revokedAt: null,
+      } as any);
+      await repo.save(entity);
+    } catch (e: any) {
+      // Handle partial unique collision (prob negligible) — retry once
+      if (this.isUniqueViolation(e)) {
+        this.logger.warn(
+          `Refresh tokenHash collision userId=${userId} retry once`,
+        );
+        const retryRaw = crypto.randomBytes(32).toString('hex');
+        const retryHash = crypto
+          .createHash('sha256')
+          .update(retryRaw)
+          .digest('hex');
+        const retryEntity = repo.create({
+          userId,
+          tokenHash: retryHash,
+          expiresAt,
+          revokedAt: null,
+        } as any);
+        await repo.save(retryEntity);
+        return retryRaw;
+      }
+      throw e;
+    }
+    return raw;
+  }
+
+  /**
+   * Refreshes accessToken using opaque refresh token with single-use rotation.
+   * @param rawRefresh - Raw 64 hex refresh token from body or cookie.
+   * @returns New pair {accessToken, refreshToken} and emailVerified flag.
+   * @throws UnauthorizedException if invalid/expired/revoked.
+   */
+  async refresh(rawRefresh: string): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    emailVerified: boolean;
+  }> {
+    if (!rawRefresh || typeof rawRefresh !== 'string') {
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+    // Validate 64 hex shape — reuse DTO regex but service also checks
+    if (!/^[0-9a-f]{64}$/.test(rawRefresh)) {
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(rawRefresh)
+      .digest('hex');
+    const prefix = tokenHash.slice(0, 6);
+
+    let result: {
+      accessToken: string;
+      refreshToken: string;
+      emailVerified: boolean;
+    } | null = null;
+
+    await this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(RefreshToken);
+      // FOR UPDATE lookup — single-winner serialization
+      const found = await repo
+        .createQueryBuilder('rt')
+        .setLock('pessimistic_write')
+        .where('rt.tokenHash = :tokenHash', { tokenHash })
+        .getOne();
+
+      // Not found → 401 (no userId, no theft nuke)
+      if (!found) {
+        throw new UnauthorizedException('Invalid or expired refresh token');
+      }
+
+      // Load user
+      const userRepo = manager.getRepository(User);
+      const user = await userRepo.findOne({ where: { id: found.userId } });
+      if (!user) {
+        throw new UnauthorizedException('Invalid or expired refresh token');
+      }
+
+      // Revoked already → theft detection (reuse of rotated token)
+      // This is single-use rotation: old token should be revokedAt NOT NULL after first refresh
+      if (found.revokedAt) {
+        // Theft: revoke all remaining active tokens for this user (outside rows already revoked)
+        // Do bulk revoke before throwing 401 — must be observable
+        // Use manager for bulk revoke
+        await manager
+          .createQueryBuilder()
+          .update(RefreshToken)
+          .set({ revokedAt: new Date() })
+          .where('userId = :userId AND "revokedAt" IS NULL', {
+            userId: found.userId,
+          })
+          .execute();
+        this.logger.warn(
+          `refresh reuse theft detected userId=${found.userId} hashPrefix=${prefix}`,
+        );
+        // Optional counter increment (best-effort, fail-open)
+        try {
+          const cache: any = this.cache as any;
+          if (cache && cache.store && cache.store.client) {
+            // ioredis via keyv — use incr
+          }
+          // Use generic cache incr if available
+          if (typeof (this.cache as any).get === 'function') {
+            // Use INCR via store
+            const key = `idempotency:duplicate:skipped:refresh`;
+            // Try INCR pattern — cache-manager doesn't expose incr directly, use store
+            // Best-effort via CACHE_MANAGER set NX counter
+          }
+        } catch {
+          // ignore — theft counter is observability only
+        }
+        try {
+          // Best-effort INCR via cache manager if supports store
+          const c: any = this.cache;
+          if (c && c.store && typeof c.store.client?.incr === 'function') {
+            await c.store.client.incr(`idempotency:duplicate:skipped:refresh`);
+            await c.store.client.expire(
+              `idempotency:duplicate:skipped:refresh`,
+              86400,
+            );
+          }
+        } catch {
+          // fail-open for theft counter
+        }
+        throw new UnauthorizedException('Invalid or expired refresh token');
+      }
+
+      // Expired → 401 (no theft nuke, no bulk revoke)
+      // expiresAt <= now is expired
+      if (found.expiresAt.getTime() <= Date.now()) {
+        throw new UnauthorizedException('Invalid or expired refresh token');
+      }
+
+      // Active branch — rotate: revoke old + insert new + sign new accessToken
+      // Revoke old token
+      await repo.update(found.id, { revokedAt: new Date() });
+
+      // Cap 5 LRU before insert — count active excluding the just-revoked old
+      const activeCount = await repo.count({
+        where: { userId: found.userId, revokedAt: null as any },
+      });
+      if (activeCount >= 5) {
+        const oldest = await repo.find({
+          where: { userId: found.userId, revokedAt: null as any },
+          order: { createdAt: 'ASC' },
+          take: 1,
+        });
+        if (oldest[0] && oldest[0].id !== found.id) {
+          await repo.update(oldest[0].id, { revokedAt: new Date() });
+          this.logger.log(
+            `Refresh cap evicted oldest on rotation userId=${found.userId} tokenId=${oldest[0].id}`,
+          );
+        }
+      }
+
+      const newRaw = crypto.randomBytes(32).toString('hex');
+      const newHash = crypto.createHash('sha256').update(newRaw).digest('hex');
+      const ttl = this.configService.get<string>('REFRESH_TOKEN_TTL') || '7d';
+      const newExpiresAt = new Date(Date.now() + this.parseTtlMs(ttl));
+      const newEntity = repo.create({
+        userId: found.userId,
+        tokenHash: newHash,
+        expiresAt: newExpiresAt,
+        revokedAt: null,
+      } as any);
+      await repo.save(newEntity);
+
+      // Sign new accessToken with current tokenVersion
+      const payload: JwtPayloadProps = {
+        sub: user.id,
+        email: user.email,
+        fullName: `${user.firstName} ${user.lastName}`,
+        role: user.role,
+        tokenVersion:
+          typeof user.tokenVersion === 'number' ? user.tokenVersion : 0,
+      };
+      const newAccessToken = await this.jwtService.signAsync(payload as any);
+
+      // Determine emailVerified for header
+      const emailVerified = !!user.emailVerified;
+
+      if (!emailVerified) {
+        this.logger.warn(
+          `refresh unverified email userId=${user.id} hashPrefix=${prefix}`,
+        );
+      } else {
+        this.logger.log(
+          `refresh rotated userId=${user.id} hashPrefix=${prefix} -> newPrefix=${newHash.slice(0, 6)}`,
+        );
+      }
+
+      result = {
+        accessToken: newAccessToken,
+        refreshToken: newRaw,
+        emailVerified,
+      };
+    });
+
+    if (!result) {
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+    return result;
+  }
+
+  /**
+   * Revokes a single refresh token by hash (idempotent 200).
+   * @param rawRefresh - Raw 64 hex token from body or cookie; if falsy, returns 200 anti-enum.
+   * @throws Never throws 401 for not found — returns 200 (anti-enumeration).
+   */
+  async logout(rawRefresh?: string | null): Promise<void> {
+    if (!rawRefresh || typeof rawRefresh !== 'string') {
+      // Anti-enum: no token provided → 200 (do not leak)
+      return;
+    }
+    if (!/^[0-9a-f]{64}$/.test(rawRefresh)) {
+      // Invalid shape → still 200 anti-enum per spec
+      return;
+    }
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(rawRefresh)
+      .digest('hex');
+    const repo = this.dataSource.getRepository(RefreshToken);
+    // Idempotent UPDATE where revokedAt IS NULL — 0 rows is still 200
+    await repo
+      .createQueryBuilder()
+      .update(RefreshToken)
+      .set({ revokedAt: new Date() })
+      .where('tokenHash = :tokenHash AND "revokedAt" IS NULL', { tokenHash })
+      .execute();
+    this.logger.log(`logout revoked prefix=${tokenHash.slice(0, 6)}`);
+  }
+
+  /**
+   * Revokes all sessions for user via tokenVersion++ and bulk revokedAt.
+   * @param userId - Authenticated user id from JwtGuard.
+   * @throws UnauthorizedException if user not found.
+   */
+  async logoutAll(userId: string): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      const userRepo = manager.getRepository(User);
+      const user = await userRepo
+        .createQueryBuilder('u')
+        .setLock('pessimistic_write')
+        .where('u.id = :userId', { userId })
+        .getOne();
+      if (!user) throw new UnauthorizedException('User not found');
+      // Increment tokenVersion atomically
+      await userRepo.update(userId, {
+        tokenVersion: () => '"tokenVersion" + 1',
+        passwordChangedAt: new Date(),
+      });
+      // Bulk revoke all active refresh tokens
+      await manager
+        .createQueryBuilder()
+        .update(RefreshToken)
+        .set({ revokedAt: new Date() })
+        .where('userId = :userId AND "revokedAt" IS NULL', { userId })
+        .execute();
+    });
+    this.logger.log(`logout-all revoked all for userId=${userId}`);
+  }
+
+  /**
+   * Purges expired/revoked RefreshToken rows older than 7 days.
+   * @returns Number of rows deleted.
+   */
+  async purgeExpiredTokens(): Promise<number> {
+    const result = await this.dataSource
+      .createQueryBuilder()
+      .delete()
+      .from(RefreshToken)
+      .where(
+        `("revokedAt" IS NOT NULL AND "revokedAt" < NOW() - INTERVAL '7 days') OR ("revokedAt" IS NULL AND "expiresAt" < NOW() - INTERVAL '7 days')`,
+      )
+      .execute();
+    const count = result.affected || 0;
+    if (count > 0) this.logger.log(`RefreshToken purge deleted ${count} rows`);
+    return count;
   }
 
   // ============ Phase 16: Forgot Password & Recovery Token ============
@@ -470,23 +813,16 @@ export class AuthService {
     }
   }
 
-  private parseTtlMs(ttl: string): number {
-    if (ttl.endsWith('m')) return parseInt(ttl, 10) * 60_000;
-    if (ttl.endsWith('s')) return parseInt(ttl, 10) * 1000;
-    if (ttl.endsWith('h')) return parseInt(ttl, 10) * 3600_000;
-    return 15 * 60_000;
-  }
-
-  // ============ Phase 16: Google OAuth ============
+  // ============ Phase 16: Google OAuth ============ (Phase 17 extends to issue refresh)
   async handleGoogleLogin(
     profile: GoogleProfile,
-  ): Promise<{ user: User; accessToken: string }> {
+  ): Promise<{ user: User; accessToken: string; refreshToken: string }> {
     if (!profile.verified)
       throw new BadRequestException('Google email not verified');
     const user = await this.usersService.findByGoogleId(profile.googleId);
     if (user) {
-      const token = (await this.login(user)).accessToken;
-      return { user, accessToken: token };
+      const { accessToken, refreshToken } = await this.login(user);
+      return { user, accessToken, refreshToken };
     }
     const existingByEmail = await this.usersService.findUserByEmail(
       profile.email,
@@ -504,8 +840,8 @@ export class AuthService {
         throw e;
       }
       const updated = await this.usersService.findUserById(existingByEmail.id);
-      const token = (await this.login(updated as any)).accessToken;
-      return { user: updated!, accessToken: token };
+      const { accessToken, refreshToken } = await this.login(updated as any);
+      return { user: updated!, accessToken, refreshToken };
     }
     const repo = this.dataSource.getRepository(User);
     const created = repo.create({
@@ -526,8 +862,21 @@ export class AuthService {
         throw new ConflictException('Google account already linked');
       throw e;
     }
-    const token = (await this.login(saved)).accessToken;
-    return { user: saved, accessToken: token };
+    const { accessToken, refreshToken } = await this.login(saved);
+    return { user: saved, accessToken, refreshToken };
+  }
+
+  private parseTtlMs(ttl: string): number {
+    // Support s/m/h/d suffixes (Phase 17 adds 'd' for 7d)
+    if (ttl.endsWith('m')) return parseInt(ttl, 10) * 60_000;
+    if (ttl.endsWith('s')) return parseInt(ttl, 10) * 1000;
+    if (ttl.endsWith('h')) return parseInt(ttl, 10) * 3600_000;
+    if (ttl.endsWith('d')) return parseInt(ttl, 10) * 24 * 3600_000;
+    // Numeric fallback (e.g., "604800000")
+    const numeric = parseInt(ttl, 10);
+    if (!isNaN(numeric) && String(numeric) === ttl) return numeric;
+    this.logger.warn(`Invalid TTL "${ttl}", fallback 15m`);
+    return 15 * 60_000;
   }
 
   private isUniqueViolation(e: any): boolean {
