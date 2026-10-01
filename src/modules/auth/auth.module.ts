@@ -11,8 +11,11 @@ import { GoogleStrategy } from './strateges/google.strategy';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PasswordResetToken } from './entities/password-reset-token.entity';
 import { OtpVerification } from './entities/otp-verification.entity';
+import { EmailVerificationToken } from './entities/email-verification-token.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { NoopWhatsAppProvider } from './providers/whatsapp.provider';
+import { NoopEmailProvider } from '../notifications/email.provider';
+import { SmtpEmailProvider } from '../notifications/smtp-email.provider';
 import { RateLimitGuard } from './guards/rate-limit.guard';
 
 @Module({
@@ -22,6 +25,7 @@ import { RateLimitGuard } from './guards/rate-limit.guard';
       PasswordResetToken,
       OtpVerification,
       RefreshToken,
+      EmailVerificationToken,
     ]),
     JwtModule.registerAsync({
       global: true,
@@ -42,8 +46,23 @@ import { RateLimitGuard } from './guards/rate-limit.guard';
     GoogleStrategy,
     RateLimitGuard,
     { provide: 'WHATSAPP_PROVIDER', useClass: NoopWhatsAppProvider },
+    SmtpEmailProvider,
+    NoopEmailProvider,
+    {
+      provide: 'EMAIL_PROVIDER',
+      inject: [ConfigService, SmtpEmailProvider, NoopEmailProvider],
+      useFactory: (
+        config: ConfigService,
+        smtp: SmtpEmailProvider,
+        noop: NoopEmailProvider,
+      ) => {
+        // Same EMAIL_PROVIDER switch as NotificationsModule (smtp in prod, noop in dev/test)
+        const provider = config.get<string>('EMAIL_PROVIDER') ?? 'noop';
+        return provider.toLowerCase() === 'smtp' ? smtp : noop;
+      },
+    },
   ],
   controllers: [AuthController],
-  exports: [AuthService, RateLimitGuard],
+  exports: [AuthService, RateLimitGuard, 'EMAIL_PROVIDER'],
 })
 export class AuthModule {}

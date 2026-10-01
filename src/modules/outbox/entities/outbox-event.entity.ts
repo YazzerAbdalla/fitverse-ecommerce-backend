@@ -14,9 +14,11 @@ import { OutboxStatus } from './outbox-status.enum';
  * Events are inserted inside the same DataSource.transaction as business state (FR-002)
  * and published asynchronously by OutboxPublisher via FOR UPDATE SKIP LOCKED.
  *
- * SENT means the OutboxPublisher successfully published/submitted the persisted
+ * SENT_TO_MQ means the OutboxPublisher successfully published/submitted the persisted
  * event to RabbitMQ (exchange/transport), NOT that a consumer processed it.
- * Consumer processing (email, webhook, etc.) is future and out of scope for Phase 11.
+ * CONSUMED means the NotificationsModule worker received it (dedup passed, manual ACK
+ * after commit); DELIVERED means all resolved channel deliveries accepted it.
+ * SENT is a legacy alias of SENT_TO_MQ kept for rows written before the rename.
  */
 @Entity('outbox_event')
 @Index(['status', 'nextRetryAt', 'createdAt'])
@@ -68,4 +70,7 @@ export class OutboxEvent {
 
   @Column({ type: 'timestamptz', nullable: true })
   sentAt!: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  consumedAt!: Date | null;
 }

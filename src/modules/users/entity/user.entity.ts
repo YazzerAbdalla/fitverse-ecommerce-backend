@@ -17,6 +17,10 @@ export enum AuthProvider {
   Google = 'google',
 }
 
+/**
+ * This entity represents an application user.
+ * It handles identity, credentials, verification flags and notification preferences.
+ */
 @Entity()
 @Unique(['email'])
 @Check(`"provider" IN ('local','google')`)
@@ -61,6 +65,12 @@ export default class User {
 
   @Column({ default: false })
   emailVerified!: boolean;
+
+  @Column({ default: false })
+  marketingOptIn!: boolean;
+
+  @Column({ default: true })
+  emailOptIn!: boolean;
 
   @OneToMany(() => Order, (order) => order.user)
   orders!: Order[];

@@ -6,6 +6,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -18,6 +19,7 @@ import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { ManyPartialProducts } from './types';
 import { PaginationArgs } from './dto/pagination.dto';
 import { InventoryService } from '../inventory/inventory.service';
+import { NotificationService } from '../notifications/notification.service';
 
 /**
  * This service is responsible for product catalog and product-cache (cache-aside).
@@ -36,6 +38,10 @@ export class ProductsService {
     @Inject(forwardRef(() => InventoryService))
     private readonly inventoryService: InventoryService,
     private readonly configService: ConfigService,
+    // Optional to avoid a hard requirement in unit tests and to keep product
+    // creation available when the notification queue is not wired.
+    @Optional()
+    private readonly notificationService?: NotificationService,
   ) {
     // Log TTLs on init (after construction, config available)
     const listTtl = this.getListTtlMs();
@@ -262,6 +268,16 @@ export class ProductsService {
 
     // Invalidate after DB commit (post-save, outside transaction)
     await this.invalidateAllLists();
+
+    // Fire-and-forget fan-out AFTER commit: never inside a transaction, never
+    // blocks product creation (onProductCreated logs instead of throwing).
+    if (this.notificationService) {
+      void this.notificationService.onProductCreated({
+        id: savedProduct.id,
+        name: savedProduct.name,
+        price: savedProduct.price,
+      });
+    }
 
     return savedProduct;
   }

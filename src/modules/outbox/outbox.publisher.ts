@@ -18,7 +18,7 @@ import { OutboxStatus } from './entities/outbox-status.enum';
 /**
  * This publisher is responsible for outbox relay to RabbitMQ.
  * It handles claiming PENDING/lease-expired rows via FOR UPDATE SKIP LOCKED and publishing persisted payloads.
- * SENT means published to RabbitMQ transport, not that consumer processed the event.
+ * SENT_TO_MQ means published to RabbitMQ transport, not that consumer processed the event.
  * Uses processingToken for safe lease ownership so a stale publisher cannot overwrite a reclaimed event.
  */
 @Injectable()
@@ -253,7 +253,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
               .createQueryBuilder()
               .update(OutboxEvent)
               .set({
-                status: OutboxStatus.SENT as any,
+                status: OutboxStatus.SENT_TO_MQ as any,
                 sentAt: new Date() as any,
                 lastError: null as any,
                 processingStartedAt: null as any,
@@ -275,7 +275,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         } catch {
           // Fallback for test mocks that only support getRepository.update
           await this.dataSource.getRepository(OutboxEvent).update(event.id, {
-            status: OutboxStatus.SENT,
+            status: OutboxStatus.SENT_TO_MQ,
             sentAt: new Date(),
             lastError: null,
             processingStartedAt: null,
