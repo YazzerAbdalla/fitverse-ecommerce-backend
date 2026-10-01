@@ -58,3 +58,34 @@
 - FR retention `7d purge` for `EmailVerificationToken` (`DELETE WHERE usedAt< NOW()-7d OR expiresAt< NOW()-7d` nightly) vs `NotificationLog` indefinite kept — resolved via clarification (D2+D7).
 - TTL `24h verify` vs `15m reset` resolved (D2).
 - Provider switch `EMAIL_PROVIDER noop default` resolved (D3).
+
+## Decisions — D9-D12 (2026-10-01 delivery-state + dual-channel)
+
+### D9: Delivery-state model — extend OutboxStatus vs separate Delivery row vs both
+
+- **Decision**: **Both**: extend `OutboxStatus` (`SENT` → `SENT_TO_MQ` + new `CONSUMED` + `DELIVERED`, `FAILED` terminal) for the MQ-leg AND add separate `NotificationDelivery` per `(eventId, channel)` for the user-leg. `OutboxEvent` stays MQ-leg truth (`OutboxModule`); deliveries are user-leg truth (`NotificationsModule`); no cross-repo.
+- **Rationale**: Status-only extension cannot express "system delivered but email failed" per channel; delivery-row-only leaves `OutboxEvent.SENT` ambiguous for operators. Both together answer MQ-accepted vs consumed vs per-channel-sent with PG truth on both legs (constitution I), Redis still only `SET NX` dedup.
+- **Alternatives considered**: Status-only (no delivery table) — rejected: per-channel retry/observability lost. Delivery-row-only (keep `SENT` meaning) — rejected: `SENT` stays ambiguous. Callback `PATCH` from consumer to `OutboxModule` — rejected: breaks module boundaries; consumer updates via its own `DataSource` `FOR UPDATE OutboxEvent` without importing `OutboxService`.
+
+### D10: Notification vs NotificationLog — merge vs keep both
+
+- **Decision**: **Keep both**: `Notification` (inbox, one row per `(eventId,channel)`, `isRead/readAt`) + `NotificationLog` (provider audit, append-only per-send row, existing entity unchanged).
+- **Rationale**: Audit must record retries (many rows per event); inbox must stay one row for history/unread correctness (`@Unique(eventId,channel)` + `orIgnore` on duplicate consume). Merge would either lose retry audit or break unread counts.
+- **Alternatives considered**: Merge into `Notification` with `attempts` — rejected: unread-count and history paging polluted by retry rows. Merge into `NotificationLog` with `isRead` — rejected: `eventId @Unique` audit row is per-send, not per-user-inbox for dual-channel (needs two rows with different channels).
+
+### D11: Realtime transport — WebSocket gateway vs SSE vs polling only
+
+- **Decision**: `@WebSocketGateway({namespace:'notifications'})` with JWT `handleConnection` → room `user:<sub>`, events `notification:new` + `notification:read`; offline users fall back to `GET /notifications` fetch (PG truth, no Redis offline queue).
+- **Rationale**: Reuse NestJS WS (no new infra), matches `SYSTEM` channel semantics (emit-ack → `DELIVERED`, offline → stays `SENT`). SSE rejected: needs separate HTTP stream handling per user; FCM rejected: external keys in V1.
+- **Alternatives considered**: Polling-only (no WS) — rejected: user requirement for realtime. Redis offline queue — rejected: PG history fetch already covers offline without extra truth store.
+
+### D12: Channel pattern — Strategy + Factory vs switch vs per-channel services
+
+- **Decision**: `NotificationChannel` interface + `SystemChannel`/`EmailChannel` + `NotificationChannelFactory.create(channel)` + `NotificationDispatcher.dispatch` (runtime opt-in resolution), all in existing `src/modules/notifications/` (no new top-level module).
+- **Rationale**: Runtime `marketingOptIn/emailOptIn` resolution per event type (`verify/reset` both always; sales gated; order.* email iff `emailOptIn`) needs a single dispatch point; factory makes `sms|push` additive (new strategy class, no caller change). Switch-in-worker rejected: scatters opt-in logic across handlers.
+- **Alternatives considered**: New `src/modules/notification/` singular module (old plan) — rejected: `src/modules/notifications/` already exists with worker/provider/log; reuse it. Per-channel microservices — rejected: modular monolith (constitution II).
+
+- Technical Context had **0** `NEEDS CLARIFICATION` (all decisions derived from `spec.md` clarifications: 5 kickoff + 5 session 2026-09-23 `Allow unverified / 7d purge / ephemeral / 200 verified msg / Redis only`).
+- FR retention `7d purge` for `EmailVerificationToken` (`DELETE WHERE usedAt< NOW()-7d OR expiresAt< NOW()-7d` nightly) vs `NotificationLog` indefinite kept — resolved via clarification (D2+D7).
+- TTL `24h verify` vs `15m reset` resolved (D2).
+- Provider switch `EMAIL_PROVIDER noop default` resolved (D3).

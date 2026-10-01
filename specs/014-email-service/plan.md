@@ -37,6 +37,48 @@ Deliver async email after commit without blocking PostgreSQL transactions or mak
 
 **Gate result**: **PASS** — no violations. Post-design re-check below remains **PASS** (email is PG `FOR UPDATE` + Redis-only dedup/rate-limit after commit, not a new authoritative store).
 
+## Delivery-State Model (2026-10-01: SENT_TO_MQ vs CONSUMED vs DELIVERED)
+
+Answers "was event only accepted by RabbitMQ transport, vs received/consumed by worker (manual ACK), vs actually sent to user via channel". Chosen option: **separate `NotificationDelivery` row per `(eventId, channel)`**, keeping `OutboxEvent` as MQ-leg truth — justified per constitution I (PG truth for both legs, Redis only for `SET NX` dedup) and module boundaries (`OutboxModule` owns `OutboxEvent`; `NotificationsModule` owns `Notification`/`NotificationDelivery`; no cross-repo).
+
+```text
+Publisher (OutboxModule)                     Consumer (NotificationsModule)              Channels
+PENDING ──FOR UPDATE SKIP LOCKED──▶ PROCESSING ──client.emit OK──▶ SENT_TO_MQ ──@EventPattern + SET NX──▶ CONSUMED ──dispatch──▶ DELIVERED
+   │                                     │                          │                         (all resolved deliveries DELIVERED)
+   │                                     └──emit throw──▶ PENDING   └──duplicate eventId──▶ skip (INCR, 0 rows, ACK)
+   │                                         (attempts++, backoff)     (ACK after CONSUMED commit; throw → no ACK → requeue)
+   └──400/409/429──▶ 0 rows                 └──attempts>=5──▶ FAILED ──PATCH /admin/outbox/:id/requeue──▶ PENDING
+                                                      (retained)                              (CONSUMED/DELIVERED never revert)
+Channel leg per (eventId, channel): PENDING → SENT (persisted/emitted) → DELIVERED (WS ack / EmailProvider messageId) → FAILED (after 3, retained per-channel)
+READ (user behavior, not delivery): Notification.isRead false → true via PATCH :id/read | read-all (idempotent 200)
+```
+
+**Who writes each state**: publisher → `PENDING/PROCESSING/SENT_TO_MQ/FAILED` (`processingToken` ownership + token-checked updates unchanged); consumer → `CONSUMED` (`SELECT OutboxEvent FOR UPDATE WHERE id=:eventId`, verify `SENT_TO_MQ`, set `consumedAt`) + upsert `NotificationDelivery PENDING` per `NotificationDispatcher.dispatch` channels; channel strategy → `SENT/DELIVERED/FAILED` on its delivery row. `SENT` renamed `SENT_TO_MQ` via new migration (backward-compat `SENT` alias in code; never edit committed migrations).
+
+**Class layout** (all under existing `src/modules/notifications/`, AGENTS.md §3 JSDoc required):
+
+```text
+src/modules/notifications/
+├── channels/
+│   ├── notification-channel.interface.ts  # NEW — interface NotificationChannel { key:'system'|'email'; send(...): Promise<{messageId?, delivered:boolean}> }
+│   ├── system.channel.ts                   # NEW — SystemChannel: persist Notification PG + WebSocketGateway emit notification:new; offline → stays SENT
+│   ├── email.channel.ts                     # NEW — EmailChannel: wraps EMAIL_PROVIDER send → {messageId, delivered:true}
+│   └── notification-channel.factory.ts      # NEW — NotificationChannelFactory.create(channel): strategy (extensible to sms|push)
+├── notification.dispatcher.ts               # NEW — NotificationDispatcher.dispatch(event, userPrefs): runtime channel resolution (verify/reset both always; sales gated; order.* email iff emailOptIn)
+├── notifications.gateway.ts                 # NEW — @WebSocketGateway({namespace:'notifications'}) JWT handleConnection → room user:<sub>; events notification:new + notification:read
+├── notifications.controller.ts              # NEW — GET /notifications + GET /notifications/unread-count + PATCH :id/read + PATCH read-all (thin, owner-scoped)
+├── entities/
+│   ├── notification.entity.ts               # NEW — Notification (history truth, data-model §3b)
+│   └── notification-delivery.entity.ts      # NEW — NotificationDelivery (per-channel leg, data-model §3c)
+└── notifications.worker.ts                  # MODIFY — CONSUMED update + dispatcher + manual ACK after commit (existing file)
+src/modules/outbox/entities/outbox-status.enum.ts  # MODIFY — SENT_TO_MQ + CONSUMED + DELIVERED (+ SENT alias)
+src/migration/17xxxxxxxxxx-NotificationDeliveryAndHistory.ts  # NEW — enum values + Notification + NotificationDelivery + User.emailOptIn + OutboxEvent.consumedAt
+```
+
+**Migration plan**: one new migration (never edit committed): enum widen (`SENT_TO_MQ`, `CONSUMED`, `DELIVERED`); `ALTER TABLE "user" ADD COLUMN "emailOptIn" boolean NOT NULL DEFAULT true`; `ALTER TABLE outbox_event ADD COLUMN consumedAt`; `CREATE TABLE notification (...)` + `CREATE TABLE notification_delivery (...)` + indexes/`UQ(eventId,channel)`s. `synchronize:false`.
+
+**Config keys** (all via `ConfigService`, never hardcoded): existing `EMAIL_*`/`FRONTEND_URL`/`REDIS_URL`/`RABBITMQ_URL` plus `WS_AUTH=true`, `NOTIFICATION_HISTORY_PAGE_SIZE=20`.
+
 ## Project Structure
 
 ### Documentation (this feature)

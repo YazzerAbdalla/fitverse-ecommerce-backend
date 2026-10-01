@@ -181,6 +181,36 @@ redis-cli keys "notification:send:sales:*" | wc -l
 # POST /admin/products or GraphQL mutation createProduct -> after commit queue.add notification.new_product
 ```
 
+### 5.6 History, unread + WebSocket realtime (US6/US7, 2026-10-01)
+
+```bash
+# History (owner paginated, filters optional):
+curl "http://localhost:3000/notifications?page=1&limit=20" -H "Authorization: Bearer $TOKEN_USER" | jq .
+# 200 { data:[{id, channel, type, title, isRead:false, ...}], meta:{totalItems, ...} }
+curl "http://localhost:3000/notifications?isRead=false&channel=EMAIL" -H "Authorization: Bearer $TOKEN_USER" | jq .
+
+# Unread count → mark read → read-all:
+curl http://localhost:3000/notifications/unread-count -H "Authorization: Bearer $TOKEN_USER"
+# 200 { "unreadCount": 2 }
+NID=$(curl -s "http://localhost:3000/notifications?isRead=false" -H "Authorization: Bearer $TOKEN_USER" | jq -r .data[0].id)
+curl -X PATCH http://localhost:3000/notifications/$NID/read -H "Authorization: Bearer $TOKEN_USER"
+# 200 { id, isRead:true, readAt:"..." } (re-read same id → 200 idempotent)
+curl -X PATCH http://localhost:3000/notifications/read-all -H "Authorization: Bearer $TOKEN_USER"
+# 200 { "updated": 1 }
+# Other user's id → 403; no JWT → 401
+
+# Delivery-state proof (operator):
+psql -h localhost -U postgres -d mini_ecommerce -c "SELECT id, eventType, status, sentAt, consumedAt FROM outbox_event ORDER BY createdAt DESC LIMIT 5;"
+# PENDING → SENT_TO_MQ (publisher) → CONSUMED (worker) → DELIVERED (channels)
+psql -h localhost -U postgres -d mini_ecommerce -c "SELECT eventId, channel, status, attempts FROM notification_delivery ORDER BY eventId LIMIT 10;"
+
+# WebSocket realtime (SYSTEM channel, online path):
+npx wscat -c "ws://localhost:3000/notifications?token=$TOKEN_USER"
+# On dispatch (e.g. trigger sales bulk above) expect within 2s:
+# {"event":"notification:new","data":{"id":"...","type":"sales","title":"Sale -20%","channel":"SYSTEM"}}
+# Offline client simply misses the emit — row stays SENT and appears in next GET /notifications fetch.
+```
+
 ## 6. Rate-limit proofs
 
 ```bash

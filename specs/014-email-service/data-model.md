@@ -44,13 +44,73 @@ tokenVersion      int default 0           -- Phase 16, incremented on password r
 passwordChangedAt timestamptz nullable
 emailVerified     boolean default false   -- Phase 16, already present
 marketingOptIn    boolean NOT NULL DEFAULT false @Column({default:false})  -- NEW Phase 18, GDPR-like opt-in for sales/news
--- existing relations: orders OneToMany, cart OneToOne, refreshTokens OneToMany, passwordResetTokens OneToMany, emailVerificationTokens OneToMany (new)
+emailOptIn        boolean NOT NULL DEFAULT true @Column({default:true})   -- NEW 2026-10-01, email-channel gate (verify/reset bypass)
 ```
 
 - **Migration**: `ALTER TABLE "user" ADD COLUMN "marketingOptIn" boolean NOT NULL DEFAULT false` (no index needed for boolean scan; partial index `WHERE marketingOptIn IS TRUE` future if scale proven). Existing rows default `false` (already verified users stay opt-out until `PATCH`).
-- **Validation**: `RegisterDto` add `marketingOptIn?: boolean @IsOptional @IsBoolean` (whitelist). `UpdatePreferencesDto { marketingOptIn: boolean @IsBoolean @IsNotEmpty }`.
+- **Migration (2026-10-01)**: `ALTER TABLE "user" ADD COLUMN "emailOptIn" boolean NOT NULL DEFAULT true` (email-channel gate; existing rows default `true` so current transactional mail keeps flowing).
+- **Validation**: `RegisterDto` add `marketingOptIn?: boolean @IsOptional @IsBoolean` + `emailOptIn?: boolean @IsOptional @IsBoolean` (whitelist). `UpdatePreferencesDto { marketingOptIn?: boolean @IsOptional @IsBoolean, emailOptIn?: boolean @IsOptional @IsBoolean }` (either-or update).
 - **Indexes**: Existing `email`, `phoneNumber`, `googleId`; no new index on `marketingOptIn`.
-- **Gate**: Bulk `WHERE marketingOptIn=true AND emailVerified=true` for `sales/new_product` fan-out (FR-010/011). `verify/reset` always sent regardless of this flag.
+- **Gate**: Bulk `WHERE marketingOptIn=true AND emailVerified=true` for `sales/new_product` fan-out (FR-010/011). `verify/reset` always sent regardless of this flag. Email-channel resolution additionally requires `emailOptIn=true` except `verify/reset` which bypass both flags.
+
+### 3b. Notification (NEW 2026-10-01, user-leg truth for history — kept separate from NotificationLog audit)
+
+User-visible inbox row. One row per `(eventId, channel)` so a dual-channel event yields two rows (system + email) with independent read state.
+
+```text
+Notification
+------------
+id          uuid PK @PrimaryGeneratedColumn('uuid')
+userId      uuid FK → User.id ON DELETE CASCADE @Index
+eventId     uuid @Index  -- links OutboxEvent.id (no hard FK so FAILED-retained rows survive business deletes)
+channel     enum NotificationChannel {SYSTEM, EMAIL} @Index
+type        varchar @Index  -- 'verify'|'reset'|'sales'|'new_product'|'order.created'|'order.completed'|'order.cancelled'|'reservation.expired'
+title       varchar
+body        text
+data        jsonb  -- {orderId, productId, link, campaignId, ...} PII-minimal
+status      enum NotificationStatus {PENDING, SENT, DELIVERED, FAILED} default PENDING
+isRead      boolean NOT NULL DEFAULT false
+readAt      timestamptz nullable
+sentAt      timestamptz @CreateDateColumn
+deliveredAt timestamptz nullable
+```
+
+- **Indexes**: `IDX_notification_userId`, `IDX_notification_eventId`, `IDX_notification_channel`, `IDX_notification_type`, composite `IDX_notification_userId_createdAt (userId, createdAt DESC)` (history paging), composite `IDX_notification_userId_isRead (userId, isRead)` (unread-count), `@Unique(['eventId','channel'])` (`UQ_notification_eventId_channel` — duplicate consume → `orIgnore`, `0` new rows).
+- **Decision (2026-10-01)**: keep `NotificationLog` (provider send audit, append-only per-send row) AND add `Notification` (inbox, one row per `(eventId,channel)` with read state). Merge rejected: audit must record retries (many rows), inbox must stay one row.
+- **Lifecycle**: consumer upsert `PENDING` → channel send accepted → `SENT` (persisted) → ack/`messageId` → `DELIVERED`; offline system user stays `SENT` until fetch. `isRead/readAt` set only by `PATCH :id/read|read-all` (user behavior, never by worker).
+
+### 3c. NotificationDelivery (NEW 2026-10-01, per-channel delivery leg owned by NotificationsModule)
+
+```text
+NotificationDelivery
+--------------------
+id          uuid PK @PrimaryGeneratedColumn('uuid')
+eventId     uuid @Index  -- links OutboxEvent.id (no hard FK)
+channel     enum NotificationChannel {SYSTEM, EMAIL}
+status      enum NotificationStatus {PENDING, SENT, DELIVERED, FAILED} default PENDING
+attempts    int default 0 CHECK >=0
+messageId   varchar nullable  -- EmailProvider response or WS ack id
+nextRetryAt timestamptz NOT NULL default NOW()
+deliveredAt timestamptz nullable
+```
+
+- **Constraints**: `@Unique(['eventId','channel'])` (`UQ_notification_delivery_eventId_channel`); `@Check('"attempts" >= 0')`.
+- **Lifecycle**: upserted `PENDING` when consumer resolves channels → `SENT` after persist/emit attempt → `DELIVERED` on ack/`messageId` → `FAILED` terminal after `3` channel attempts (retained, per-channel requeue; never rolls back `CONSUMED`).
+
+### 3d. OutboxStatus extension (MQ-leg truth stays in OutboxModule, 2026-10-01)
+
+`OutboxStatus` gains `CONSUMED` + `DELIVERED`; `SENT` is renamed `SENT_TO_MQ` (backward-compat alias kept in code, rename via new migration — never edit committed migrations). New column `consumedAt timestamptz nullable` on `outbox_event`.
+
+```text
+PENDING (business commit, OutboxService INSERT)
+  → PROCESSING (publisher FOR UPDATE SKIP LOCKED claim + processingToken)
+  → SENT_TO_MQ (client.emit resolved = broker accepted; sentAt=NOW(); 0 Notification rows)
+  → CONSUMED (worker @EventPattern + SET NX passed + FOR UPDATE OutboxEvent; consumedAt=NOW(); manual ACK after commit)
+  → DELIVERED (all resolved channel deliveries DELIVERED)
+  → FAILED (terminal retained from any leg; PATCH /admin/outbox/:id/requeue → PENDING attempts=0)
+```
+
+- **Ownership**: publisher writes to `SENT_TO_MQ` only; consumer writes `CONSUMED`/`DELIVERED`. `Notification.isRead/readAt` is NOT a delivery state.
 
 ### 3. NotificationLog (NEW, audit + idempotency observation, not authoritative for business)
 
@@ -83,16 +143,21 @@ sentAt     timestamptz @CreateDateColumn @Index
 ```text
 User 1──* EmailVerificationToken  (userId FK CASCADE)
 User 1──* NotificationLog         (userId FK CASCADE)
+User 1──* Notification            (userId FK CASCADE)
 User 1──* PasswordResetToken      (existing)
 User 1──* RefreshToken            (Phase 17)
 NotificationLog *──? Product (productId SET NULL)
 NotificationLog *──? Order   (orderId SET NULL)
+OutboxEvent 1──* NotificationDelivery (eventId logical link, no FK)
+OutboxEvent 1──* Notification       (eventId logical link, no FK)
 ```
 
 ### Validation Rules (from Requirements)
 
 - `EmailVerificationToken`: `tokenHash` `@IsString @Length(64,64) @Matches(/^[0-9a-f]{64}$/)` on hash (after sha256), `expiresAt @Check > createdAt` enforced DB + service `expiresAt > NOW()` check, `usedAt nullable`, `userId` FK exists.
-- `User.marketingOptIn`: `@IsBoolean` via `RegisterDto` optional + `UpdatePreferencesDto` required.
+- `User.marketingOptIn`: `@IsBoolean` via `RegisterDto` optional + `UpdatePreferencesDto` optional.
+- `User.emailOptIn`: `@IsBoolean` via `RegisterDto` optional + `UpdatePreferencesDto` optional (default `true`).
+- `Notification.channel`: `@IsEnum(['SYSTEM','EMAIL'])`; `Notification.type`: `@IsIn([...8 types])`; `NotificationDelivery` `@Unique(eventId,channel)` enforced DB + `orIgnore` on upsert.
 - `NotificationLog.template`: `@IsIn(['verify','reset','sales','new_product'])` via service validation.
 - `VerifyEmailDto`: `email @IsEmail`, `token @IsString @Length(64,64) @Matches(/^[0-9a-f]{64}$/)`.
 - `ResendVerificationDto`: `email @IsEmail`.
@@ -115,7 +180,15 @@ Inserted (usedAt NULL, expiresAt=now+24h)
 
 **User.marketingOptIn**: `false (default) ↔ true` via `PATCH /users/me/preferences {marketingOptIn}` `FOR UPDATE User` (bidirectional).
 
+**User.emailOptIn**: `true (default) ↔ false` via same `PATCH` (bidirectional, either-or update).
+
 **NotificationLog**: append-only, no transitions.
+
+**OutboxEvent (extended 2026-10-01)**: `PENDING → PROCESSING → SENT_TO_MQ → CONSUMED → DELIVERED`, `FAILED` terminal from any leg (`requeue → PENDING`).
+
+**Notification / NotificationDelivery**: `PENDING → SENT → DELIVERED`, `FAILED` terminal after 3 channel attempts (per-channel requeue, never rolls back `CONSUMED`).
+
+**Notification.isRead**: `false → true` via `PATCH :id/read|read-all` only (user behavior, idempotent re-read `200`).
 
 ### Data Volume / Scale Assumptions
 
