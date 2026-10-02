@@ -121,7 +121,10 @@ export class AuthController {
     @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     const user: Partial<User> = req.user;
+    console.log('🚀 ~ AuthController ~ login ~ user:', user);
     const result = await this.authService.login(user);
+    console.log('🚀 ~ AuthController ~ login ~ result:', result);
+
     // Set HttpOnly refresh cookie for browser clients
     res.cookie(
       this.getRefreshCookieName(),

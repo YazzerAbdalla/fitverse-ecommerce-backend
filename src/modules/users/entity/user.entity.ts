@@ -11,6 +11,7 @@ import {
   Unique,
 } from 'typeorm';
 import { UserRoles } from '../enum/roles';
+import { RefreshToken } from 'src/modules/auth/entities/refresh-token.entity';
 
 export enum AuthProvider {
   Local = 'local',
@@ -77,4 +78,7 @@ export default class User {
 
   @OneToOne(() => Cart, (cart) => cart.user)
   cart!: Cart;
+
+  @OneToMany(() => RefreshToken, (rt) => rt.user)
+  refreshTokens!: RefreshToken[];
 }

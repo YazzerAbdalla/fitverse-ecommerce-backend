@@ -19,7 +19,7 @@ import { VerifyEmailDto } from './dto/verify-email.dto';
 import User, { AuthProvider } from '../users/entity/user.entity';
 import { JwtService } from '@nestjs/jwt';
 import { JwtPayloadProps } from './types';
-import { DataSource } from 'typeorm';
+import { DataSource, IsNull } from 'typeorm';
 import { PasswordResetToken } from './entities/password-reset-token.entity';
 import { EmailVerificationToken } from './entities/email-verification-token.entity';
 import {
@@ -163,13 +163,13 @@ export class AuthService {
     // Enforce cap 5 active LRU — revoke oldest if needed
     // Count active tokens for user
     const activeCount = await repo.count({
-      where: { userId, revokedAt: null as any },
+      where: { userId, revokedAt: IsNull() },
     });
     // If active >=5, revoke oldest active token (FOR UPDATE style — simple UPDATE oldest)
     if (activeCount >= 5) {
       // Find oldest active token
       const oldest = await repo.find({
-        where: { userId, revokedAt: null as any },
+        where: { userId, revokedAt: IsNull() },
         order: { createdAt: 'ASC' },
         take: 1,
       });
@@ -185,10 +185,11 @@ export class AuthService {
     try {
       const entity = repo.create({
         userId,
+        user: { id: userId },
         tokenHash,
         expiresAt,
         revokedAt: null,
-      } as any);
+      });
       await repo.save(entity);
     } catch (e: any) {
       // Handle partial unique collision (prob negligible) — retry once
@@ -206,7 +207,7 @@ export class AuthService {
           tokenHash: retryHash,
           expiresAt,
           revokedAt: null,
-        } as any);
+        });
         await repo.save(retryEntity);
         return retryRaw;
       }
@@ -943,7 +944,6 @@ export class AuthService {
           'Resend cooldown active, try in 60 seconds',
         );
     } catch (e) {
-      if (e?.status === 400) throw e;
       this.logger.warn(`Redis cooldown check fail-open: ${e}`);
     }
     const otp = crypto.randomInt(100000, 999999).toString();

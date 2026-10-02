@@ -13,6 +13,7 @@ import type { Cache } from 'cache-manager';
 import { Request } from 'express';
 import { ConfigService } from '@nestjs/config';
 import { GqlExecutionContext } from '@nestjs/graphql';
+import crypto from 'crypto';
 
 const DEFAULT_LIMITS: Record<string, { max: number; windowMs: number }> = {
   'POST /auth/forgot-password': { max: 5, windowMs: 3600_000 },
@@ -156,7 +157,7 @@ export class RateLimitGuard implements CanActivate {
     } catch (e) {
       if (
         e instanceof HttpException &&
-        e.getStatus() === HttpStatus.TOO_MANY_REQUESTS
+        e.getStatus() === Number(HttpStatus.TOO_MANY_REQUESTS)
       )
         throw e;
       this.logger.warn(`RateLimit Redis fail-open for ${routeKey}: ${e}`);
@@ -260,7 +261,6 @@ export class RateLimitGuard implements CanActivate {
       let hashPrefix: string | null = null;
       if (typeof raw === 'string' && /^[0-9a-f]{64}$/.test(raw)) {
         try {
-          const crypto = require('crypto');
           const h = crypto
             .createHash('sha256')
             .update(raw)
