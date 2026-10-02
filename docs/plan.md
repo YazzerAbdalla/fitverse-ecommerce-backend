@@ -1184,15 +1184,15 @@ Auth refresh is complete when:
 
 ---
 
-# Phase 18 — Email Service (Future)
+# Phase 18 — Email Service
 
-**Status: NOT DONE — planned 2026-09-23 (future, before final testing)**
+**Status: DONE — 2026-10-02** (verify/resend/reset emails, dual-channel dispatch, WS history/unread, delivery states; `specs/014-email-service` 73 tasks, merged `d0d540b`; real-PG E2E proofs deferred to CI with infra up)
 
 **Goal:** Deliver transactional and marketing emails without blocking PostgreSQL transactions or making Redis/RabbitMQ authoritative: **verification email after register**, **password-reset email**, and **notifications for sales / new products** — all async after commit, with provider abstraction, rate limiting, and opt-in preferences.
 
 This phase is **orthogonal** to Phases 7-8 (order) and 9-13 (infra) and extends Phase 16 Auth Upgrades (which added `PasswordResetToken` and `emailVerified` flag but left actual sending as `publish after commit → TODO`). It must be implemented **before** `Phase 14 — Testing` so final `npm run test:e2e` can cover `register → verify-email → login → forgot-password → reset → order` and notification idempotency without flaky `console.log` stubs.
 
-## 18.0 Current Auth Snapshot (what exists, 2026-09-22)
+## 18.0 Pre-Phase Snapshot (what existed, 2026-09-22 — all gaps below are now closed)
 
 ```text
 users.entity.ts    : emailVerified boolean default false, provider local|google, passwordChangedAt, tokenVersion
@@ -1200,10 +1200,10 @@ auth.service.ts    : requestPasswordReset → crypto.randomBytes 32 → sha256 h
 auth.controller.ts : POST /auth/register, POST /auth/login, POST /auth/forgot-password|validate-reset-token|reset-password (real), POST /auth/otp/request|verify → 501 TODO
 migration          : 1755900000000-AuthUpgradesUserAndResetToken (emailVerified, User alterations), 1755900000001-AddOtpVerification (otp_verification), NO EmailVerificationToken, NO EmailProvider abstraction
 infra              : RabbitMQ 4 + BullMQ available (per Phase 11 plan) but not used by auth; Redis 8 for cache/rate-limit only; Swagger at /api
-Gap                : no EmailProvider interface, no VerificationToken persistence, no POST /auth/verify-email|/resend-verification, no email templates, no notification preference, no sales/news broadcast job
+Gap (all closed)   : no EmailProvider interface → added (`EMAIL_PROVIDER` factory); no VerificationToken persistence → `email_verification_token` table; no POST /auth/verify-email|/resend-verification → both shipped; no email templates (V1 simple vars); no notification preference → `marketingOptIn`+`emailOptIn`; no sales/news broadcast job → `notification.sendBulk`
 ```
 
-Manual E2E today (`docs/manual-e2e-test-flow.md:§1.6`) calls `POST /auth/forgot-password` → `200` but **no email is sent** (only `Logger.log` + TODO `publish to RabbitMQ topic auth.password_reset_requested`). Verification after register is not sent either.
+Manual E2E (`docs/manual-e2e-test-flow.md:§1.6`) previously called `POST /auth/forgot-password` → `200` with **no email sent** — now wired: reset email sends after commit via `EmailProvider`.
 
 ## 18.1 User-facing flows
 
@@ -1256,16 +1256,16 @@ Notification fan-out (async after commit):
           ↓
   Event: OrderCompleted | ProductCreated | SalesCampaignCreated {ids, title}
           ↓
-  BullMQ job notification.sendBulk { template: sales|new_product, subject, body, filter: {marketingOptIn: true} }
+  BullMQ job notification.sendBulk { template: sales|new_product, subject, body, filter: {marketingOptIn: true, emailOptIn: true, emailVerified: true} }
           ↓
-  Worker pages Users WHERE marketingOptIn=true (or emailVerified=true) with cursor, for each user:
-    - Idempotency key: notification:send:<template>:<campaignId|productId>:<userId> → Redis SET NX EX 24h (skip duplicate)
-    - EmailProvider.send(to: user.email, subject, template, variables {firstName, productName}) + Audit row NotificationLog
+  Worker (`NotificationBulkProcessor`) pages Users WHERE marketingOptIn=true AND emailOptIn=true AND emailVerified=true with cursor, resolves channels per user via `NotificationDispatcher` (`system` always + `email` iff three-flag gate), for each user:
+    - Idempotency key: notification:send:<template>:<campaignId|productId>:<userId> → Redis SET NX EX 24h (skip duplicate; PG `@Unique(eventId,channel)` backstop)
+    - Channel sends (SystemChannel persist + WS emit; EmailChannel via EmailProvider) + per-channel `NotificationDelivery` rows + audit row NotificationLog
           ↓
-  Audit table NotificationLog {id, userId, template, subject, productId|orderId nullable, sentAt, providerMessageId}
+  Audit table NotificationLog {id, userId, template, subject, productId|orderId nullable, provider, messageId, sentAt} (+ user-leg `Notification` rows with `isRead/readAt` for history)
 ```
 
-Preferences: `User` adds `marketingOptIn boolean default false` (opt-in at register `marketingOptIn` optional DTO field, plus `PATCH /users/me/preferences {marketingOptIn}` later) — required before bulk send to comply with policy. `emailVerified` gate: Phase 18 V1 sends verification and reset regardless of `marketingOptIn`, but sales/news only if `marketingOptIn=true AND emailVerified=true` (document in spec).
+Preferences: `User` adds `marketingOptIn boolean default false` (opt-in at register `marketingOptIn` optional DTO field, plus `PATCH /users/me/preferences {marketingOptIn?, emailOptIn?}`) and `emailOptIn boolean default true` — required before bulk email send. `emailVerified` gate: Phase 18 V1 sends verification and reset on BOTH channels regardless of prefs; sales/news send both iff `marketingOptIn && emailOptIn && emailVerified` else system-only; operational events (`order.*`, `reservation.expired`) send both iff `emailOptIn` else system-only.
 
 ## 18.2 Data model
 
@@ -1274,11 +1274,12 @@ Preferences: `User` adds `marketingOptIn boolean default false` (opt-in at regis
 ```text
 User
   + marketingOptIn: boolean default false  (for sales/news, GDPR opt-in)
+  + emailOptIn: boolean default true       (email-channel gate; verify/reset bypass both flags)
   # emailVerified already exists default false (Phase 16), keep
   # phoneVerified, googleId, provider, tokenVersion already exist
 ```
 
-Migration must: `ALTER TABLE "user" ADD COLUMN "marketingOptIn" boolean DEFAULT false`, index not required (filter on boolean scan is fine for bulk cursor; add partial index WHERE marketingOptIn IS TRUE if scale proven).
+Migration must: `ALTER TABLE "user" ADD COLUMN "marketingOptIn" boolean DEFAULT false` + `ADD COLUMN "emailOptIn" boolean DEFAULT true` (both `IF NOT EXISTS` in `1755900000006`), index not required (filter on boolean scan is fine for bulk cursor; add partial index WHERE marketingOptIn IS TRUE if scale proven).
 
 **New entity `EmailVerificationToken`:**
 
@@ -1296,7 +1297,7 @@ createdAt   timestamptz @CreateDateColumn
 
 Pattern mirrors `PasswordResetToken` (§16.1.2) but `TTL 24h` and separate table to avoid mixing concerns (reuse same hashing `crypto.randomBytes 32 → hex → sha256`).
 
-**Audit table `NotificationLog` (optional but recommended for idempotency and forensics, before Phase 12):**
+**Audit table `NotificationLog` (implemented; table backfilled by `1755900000008-CreateNotificationLog` — entity predated its migration):**
 
 ```text
 NotificationLog
@@ -1314,6 +1315,34 @@ sentAt        timestamptz @CreateDateColumn
 ```
 
 If scale > 10k users, add BullMQ job batching (`notification:batch:1` with `attempts 3`, `backoff exponential`).
+
+**User-leg tables `Notification` + `NotificationDelivery` (US6/US7, delivery-state + history):**
+
+```text
+Notification
+------------
+id          uuid PK
+userId      uuid FK → User.id ON DELETE CASCADE @Index
+eventId     uuid @Index (links OutboxEvent.id, no hard FK)
+channel     enum SYSTEM|EMAIL @Index
+type        varchar (verify|reset|sales|new_product|order.*|reservation.expired) @Index
+title       varchar
+body        text
+data        jsonb
+status      enum PENDING|SENT|DELIVERED|FAILED default PENDING
+isRead      boolean default false @Index(userId,isRead)
+readAt      timestamptz nullable
+sentAt      createdAt-ish @Index(userId,sentAt)
+deliveredAt timestamptz nullable
+-- @Unique(eventId,channel): one inbox row per channel, duplicate consume → orIgnore
+
+NotificationDelivery
+--------------------
+id/eventId/channel (+@Unique(eventId,channel)), status, attempts, messageId,
+nextRetryAt, deliveredAt — per-channel retry (FAILED after 3, never rolls back CONSUMED)
+```
+
+`Notification.isRead/readAt` is user behavior (history/unread), not a delivery state.
 
 **Token generation (same as §17.2):**
 
@@ -1350,13 +1379,13 @@ resendVerification(email: string): Promise<void> // anti-enum, rate-limited, coo
 
 sendPasswordResetEmail: upgrade existing requestPasswordReset — after token insert, publish auth.password_reset_requested with rawToken (already in §16.1.3, now actually consumed by EmailWorker)
 
-NotificationService (new):
+NotificationService (existing `src/modules/notifications/` — reused, no singular sibling):
   sendSalesCampaign(dto:{title, body, productIds?}, actor: Admin): Promise<{jobId}>
     - validate admin, create campaign row? V1: no Campaign table, just enqueue job with title/body
-    - BullMQ add notification.sendBulk {template: 'sales', subject: title, body, productIds}
+    - BullMQ add notification.sendBulk {template: 'sales', subject: title, body, productIds} on queue 'notification'
   onProductCreated(product: Product): void  // after product commit, enqueue new_product
-  onOrderCompleted(order: Order): void      // optional after Order PENDING→COMPLETED (Phase 7), enqueue sales-like notification if marketingOptIn
-  worker: process bulk with pagination, idempotency Redis SET NX EX 24h + NotificationLog insert
+  onOrderCompleted(order: Order): void      // optional — NOT implemented in V1 (hook point reserved)
+  bulk processor: pages three-flag-gated users, per-user SET NX EX 24h + dispatcher channels + Notification/Delivery upserts + NotificationLog insert
 ```
 
 All writes inside `dataSource.transaction` with `EntityManager`; no provider I/O inside tx (publish after commit per `AGENTS.md` async rule).
@@ -1365,7 +1394,7 @@ All writes inside `dataSource.transaction` with `EntityManager`; no provider I/O
 
 | Method | Path | Auth | Body | Success | Errors |
 |--------|------|------|------|---------|--------|
-| POST | `/auth/register` | public | `{firstName,lastName,email,password, marketingOptIn?}` | `201 {message}` + async verification email sent | `400` validation, `400` duplicate email, `429` rate limit |
+| POST | `/auth/register` | public | `{firstName,lastName,email,password, marketingOptIn?, emailOptIn?}` | `201 {message}` + async verification email sent | `400` validation, `400` duplicate email, `429` rate limit |
 | GET | `/auth/verify-email` | public | query `?token=<raw>&email=<email>` | `200 {verified:true}` + `emailVerified` set | `400` invalid/expired/used, `429` rate limit |
 | POST | `/auth/verify-email` | public | `{email,token}` | `200 {verified:true}` | `400` invalid, `429` |
 | POST | `/auth/resend-verification` | public | `{email}` | `200 {message:"If an account exists..."}` anti-enum | `400` validation, `429` cooldown 60s + 3/hour per email |
@@ -1373,9 +1402,11 @@ All writes inside `dataSource.transaction` with `EntityManager`; no provider I/O
 | POST | `/auth/validate-reset-token` | public | `{email,token}` | `200 {valid:true}` | `400` invalid |
 | POST | `/auth/reset-password` | public | `{email,token,newPassword}` | `200 {message}` | `400` invalid/expired/used |
 | POST | `/admin/notifications/sales` | `JwtGuard @Auth(Admin)` | `{title, body, productIds?}` | `202 {jobId}` bulk enqueued | `401`, `403`, `429` |
-| PATCH | `/users/me/preferences` | `JwtGuard` | `{marketingOptIn: boolean}` | `200 {marketingOptIn}` | `401`, `400` |
+| POST | `/admin/notifications/test-email` | `JwtGuard @Auth(Admin)` | `{to, subject?, body?}` | `200 {to, provider, messageId, delivered}` config probe (bypasses outbox/dedup/history) | `401`, `403`, `429`, `500` SMTP failure |
+| GET | `/notifications` (+ `unread-count`, `PATCH :id/read`, `PATCH read-all`) | `JwtGuard` | query `?page,limit,isRead,channel,type` | `200 {data, meta}` owner history / `{unreadCount}` / read receipts | `401`, `403` non-owner, history routes unthrottled V1 (gap) |
+| PATCH | `/users/me/preferences` | `JwtGuard` | `{marketingOptIn?, emailOptIn?}` either-or | `200 {marketingOptIn, emailOptIn}` | `401`, `400` |
 
-DTOs: `VerifyEmailDto` (`@IsEmail`, `@IsString` token 64 hex), `ResendVerificationDto` (`@IsEmail`), `CreateSalesNotificationDto` (`@IsString title 1-200`, `@IsString body`), `UpdatePreferencesDto` (`@IsBoolean`). All `@ApiProperty`, global `ValidationPipe`.
+DTOs: `VerifyEmailDto` (`@IsEmail`, `@IsString` token 64 hex), `ResendVerificationDto` (`@IsEmail`), `CreateSalesNotificationDto` (`@IsString title 1-200`, `@IsString body`), `TestEmailDto` (`@IsEmail to`, optional subject/body), `UpdatePreferencesDto` (both `@IsOptional @IsBoolean`), `NotificationHistoryQueryDto` (page/limit/isRead/channel/type). All `@ApiProperty`, global `ValidationPipe`.
 
 Swagger: `@ApiOperation` per route, `GET /auth/verify-email` documented as `verify via link`.
 
@@ -1385,23 +1416,25 @@ Reuse pattern from WhatsApp OTP (§16.2.1) for testability:
 
 ```text
 interface EmailProvider {
-  send(to: string, subject: string, template: 'verify'|'reset'|'sales'|'new_product', vars: Record<string, any>): Promise<{messageId: string}>;
+  send(to: string, subject: string, template: 'verify'|'reset'|'sales'|'new_product'|'test', vars: Record<string, any>): Promise<{messageId: string}>;
 }
 Implementations: SmtpEmailProvider (nodemailer + SMTP_HOST/PORT), SesEmailProvider, SendGridEmailProvider, NoopEmailProvider (dev/test — logs to Logger)
-Config: EMAIL_PROVIDER=smtp|ses|sendgrid|noop, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM="Mini E-Commerce <noreply@example.com>", EMAIL_VERIFICATION_TTL=24h, EMAIL_RESET_TTL=15m (reuse)
+Config: EMAIL_PROVIDER=smtp|resend|ses|sendgrid|noop (`smtp`+`resend` select nodemailer; `resend` targets Resend SMTP relay), SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM="Mini E-Commerce <noreply@example.com>", EMAIL_VERIFICATION_TTL=24h, EMAIL_RESET_TTL=15m (reuse)
 ```
 
 `AuthModule` imports `CacheModule` (rate-limit) + `TypeOrmModule.forFeature([EmailVerificationToken, NotificationLog])` + provider injection `EMAIL_PROVIDER`.
 
 ## 18.6 Security / constraints
 
-* [ ] `tokenHash` sha256, never store/log raw token (Logger hashed prefix only)
-* [ ] Expiry enforced DB `CHECK expiresAt > createdAt` + service `expiresAt > now`; single-use `usedAt` → second use `400`
-* [ ] Rate limit `resend-verification` per IP `5/hour` + per email `3/hour`, cooldown `60s` per email via Redis `SET NX EX` fail-open; `verify-email` `10/hour` per IP
-* [ ] Verification token TTL `24h` (vs reset `15m`), password rules `MinLength 8` + `newPassword !== email`
-* [ ] `marketingOptIn` required for sales/news bulk (check `User.marketingOptIn && User.emailVerified`), not for verify/reset (always sent)
-* [ ] Bulk idempotency: `notification:send:<template>:<campaignId|productId>:<userId>` Redis `SET NX EX 24h` before `EmailProvider.send`, plus `NotificationLog` unique guard
-* [ ] Async after commit only — `EmailWorker` failures logged not rolled back, BullMQ `attempts 3` + `backoff exponential` for transient SMTP 5xx
+* [x] `tokenHash` sha256, never store/log raw token (Logger hashed prefix only)
+* [x] Expiry enforced DB `CHECK expiresAt > createdAt` + service `expiresAt > now`; single-use `usedAt` → second use `400`
+* [x] Rate limit `resend-verification` per IP `5/hour` + per email `3/hour`, cooldown `60s` per email via Redis `SET NX EX` fail-open; `verify-email` `10/hour` per IP
+* [x] Verification token TTL `24h` (vs reset `15m`), password rules `MinLength 8` + `newPassword !== email`
+* [x] `marketingOptIn` required for sales/news bulk (check `User.marketingOptIn && User.emailVerified`), not for verify/reset (always sent)
+* [x] Bulk idempotency: `notification:send:<template>:<campaignId|productId>:<userId>` Redis `SET NX EX 24h` before `EmailProvider.send`, plus `NotificationLog` unique guard
+* [x] Async after commit only — `EmailWorker` failures logged not rolled back, BullMQ `attempts 3` + `backoff exponential` for transient SMTP 5xx
+
+> As-built amendments (2026-10-01/02, see `specs/014-email-service` US6/US7): prefs are two flags (`marketingOptIn` default false + `emailOptIn` default true); sales/news require all three (`marketingOptIn && emailOptIn && emailVerified`), operational events require `emailOptIn`, `verify/reset` bypass both; dedup is Redis-primary with PG `@Unique(eventId,channel)` backstop; `POST /admin/notifications/test-email` (Admin) probes SMTP config; history routes unthrottled V1 (documented gap).
 
 ## 18.7 Configuration (`.env` additions, `ConfigService`)
 
@@ -1424,41 +1457,46 @@ REFRESH_TOKEN_TTL=7d
 RESET_TOKEN_TTL=15m
 ```
 
+> As-built: `EMAIL_PROVIDER` also accepts `resend` (same nodemailer transport, Resend SMTP relay); plus `WS_AUTH=true`, `NOTIFICATION_HISTORY_PAGE_SIZE=20`.
+
 All via `ConfigService`; never hardcode.
 
-## 18.8 Implementation Plan (Spec Kit tasks, before Testing)
+## 18.8 Implementation Plan (Spec Kit tasks — executed 2026-10-01/02, `specs/014-email-service/tasks.md` 70/73)
 
 ```text
-1. Spec: /speckit.specify email-service (verify after register + reset + sales/news) → clarify Q&A (24h vs 15m, resend anti-enum, opt-in gate, provider, bulk batch size)
-2. Design: data-model.md (EmailVerificationToken, User.marketingOptIn, NotificationLog), research.md (nodemailer vs SES vs SendGrid, queue choice RabbitMQ vs BullMQ for each template)
-3. Contract: OpenAPI for GET|POST /auth/verify-email, POST /auth/resend-verification, POST /admin/notifications/sales, PATCH /users/me/preferences
-4. Migration 1: User.marketingOptIn + EmailVerificationToken (hash, expiresAt, usedAt, indexes) + NotificationLog (optional)
-5. Provider: EmailProvider interface + Smtp/Noop/Ses impl + EMAIL_PROVIDER switch + SMTP_* config + Logger
-6. Service: AuthService.requestEmailVerification/verifyEmail/resendVerification (FOR UPDATE, hash, 24h, usedAt) + NotificationService.sendSales/onProductCreated with BullMQ bulk
-7. Controller: GET|POST /auth/verify-email (public), POST /auth/resend-verification (RateLimitGuard), POST /admin/notifications/sales (Admin), PATCH /users/me/preferences (JwtGuard)
-8. Hook: AuthService.register after-commit → requestEmailVerification (fire-and-forget), forgot-password after-commit → publish already done now actually consumed
-9. Worker: EmailWorker @Processor (concurrency 5) for verify/reset/sales templates, idempotency Redis SET NX, NotificationLog insert, Set-Cookie not needed
-10. Unit tests: register creates hashed verify token 24h, verify valid→emailVerified true, expired 400, used 400, resend invalidates priors + cooldown 60s, sales bulk respects marketingOptIn + emailVerified
-11. Integration tests: real PG FOR UPDATE single-winner verify with same token → one 200 one 400, bulk sales 100 users paginated batch, DB constraints partial unique not needed
-12. E2E: register→receive rawToken via test hook → GET /auth/verify-email → GET /users/me (emailVerified true) → forgot-password → reset → login; admin sales → verify NotificationLog per user + Redis dedup
-13. Docs: docs/architecture/modules.md, docs/decisions/ADR-email-service.md, Swagger, Postman, docs/manual-e2e-test-flow.md §1 updated (200 verify)
+1. Spec: /speckit.specify email-service (verify after register + reset + sales/news) → clarify Q&A (24h vs 15m, resend anti-enum, opt-in gate, provider, bulk batch size) [x]
+2. Design: data-model.md (EmailVerificationToken, User.marketingOptIn, NotificationLog), research.md (nodemailer vs SES vs SendGrid, queue choice RabbitMQ vs BullMQ for each template) [x] (+ US6/US7 delivery-state + Strategy/Factory design 2026-10-01)
+3. Contract: OpenAPI for GET|POST /auth/verify-email, POST /auth/resend-verification, POST /admin/notifications/sales, PATCH /users/me/preferences (+ test-email, history, WS) [x]
+4. Migration 1: User.marketingOptIn + EmailVerificationToken (hash, expiresAt, usedAt, indexes) + NotificationLog (optional) [x → applied as 0006 (+0007 FK fix, 0008 notification_log backfill, 0009 refresh_token rename)]
+5. Provider: EmailProvider interface + Smtp/Noop/Ses impl + EMAIL_PROVIDER switch + SMTP_* config + Logger [x] (smtp|resend → nodemailer)
+6. Service: AuthService.requestEmailVerification/verifyEmail/resendVerification (FOR UPDATE, hash, 24h, usedAt) + NotificationService.sendSales/onProductCreated with BullMQ bulk [x]
+7. Controller: GET|POST /auth/verify-email (public), POST /auth/resend-verification (RateLimitGuard), POST /admin/notifications/sales (Admin), PATCH /users/me/preferences (JwtGuard) [x]
+8. Hook: AuthService.register after-commit → requestEmailVerification (fire-and-forget), forgot-password after-commit → publish already done now actually consumed [x]
+9. Worker: EmailWorker @Processor (concurrency 5) for verify/reset/sales templates, idempotency Redis SET NX, NotificationLog insert, Set-Cookie not needed [x → NotificationWorker RMQ consume + NotificationBulkProcessor BullMQ fan-out + WS gateway]
+10. Unit tests: register creates hashed verify token 24h, verify valid→emailVerified true, expired 400, used 400, resend invalidates priors + cooldown 60s, sales bulk respects marketingOptIn + emailVerified [x — 79 new unit PASS]
+11. Integration tests: real PG FOR UPDATE single-winner verify with same token → one 200 one 400, bulk sales 100 users paginated batch, DB constraints partial unique not needed [~ deferred: specs skip cleanly without PG; infra up 2026-10-02, proofs pending]
+12. E2E: register→receive rawToken via test hook → GET /auth/verify-email → GET /users/me (emailVerified true) → forgot-password → reset → login; admin sales → verify NotificationLog per user + Redis dedup [~ deferred, same as 11]
+13. Docs: docs/architecture/modules.md, docs/decisions/ADR-email-service.md, Swagger, Postman, docs/manual-e2e-test-flow.md §1 updated (200 verify) [x]
 ```
 
-## 18.9 Testing (must cover)
+## 18.9 Testing (unit PASS 2026-10-01/02; integration/E2E deferred to CI with infra up)
 
-**Unit (mock repos, mock Redis/EmailProvider):**
-* [ ] register: creates hashed verify token 24h + emits event, verify valid → emailVerified true, expired → 400, used → 400, wrong hash → 400, resend invalidates priors
-* [ ] sales: marketingOptIn false → skipped, emailVerified false → skipped, bulk 100 users paginated batch + Redis dedup 24h
-* [ ] reset: existing reset flow still 200 anti-enum, but now also asserts EmailProvider.send called with reset template
+**Unit (mock repos, mock Redis/EmailProvider) — PASS (79 new):**
+* [x] register: creates hashed verify token 24h + emits event, verify valid → emailVerified true, expired → 400, used → 400, wrong hash → 400, resend invalidates priors
+* [x] dispatcher: `verify/reset → both` regardless of flags; sales gated on three flags; factory `sms → 400`
+* [x] history: paginated list, unread-count, owner read vs `403`, idempotent re-read, read-all counts
+* [x] sales: three-flag gate, bulk enqueue `202`, bulk processor skips via `SET NX`
+* [x] reset: existing reset flow still 200 anti-enum, now also asserts `EmailProvider.send` called with reset template
+* [x] delivery-state: `SENT_TO_MQ → CONSUMED` with `consumedAt`, duplicate skips, per-channel `DELIVERED/FAILED`
 
-**Integration (real PostgreSQL, real Redis when available):**
-* [ ] DB constraints: EmailVerificationToken hash insert, User.marketingOptIn default false, NotificationLog FKs
+**Integration (real PostgreSQL, real Redis when available) — specs written, skip cleanly without PG:**
+* [ ] DB constraints: `EmailVerificationToken` hash insert, `User.marketingOptIn/emailOptIn` defaults, `Notification`/`Delivery` uniques, `NotificationLog` table (backfilled 0008)
 * [ ] Transaction: concurrent `POST /auth/verify-email` with same token → one 200 one 400
-* [ ] Bulk sales: 25 users marketingOptIn true → 25 NotificationLog, 5 users false → 0, Redis dedup prevents double send on retry
+* [ ] Bulk sales: 25 users gated → `Notification` rows for eligible only, replay → `0` new, Redis dedup prevents double send on retry
 
-**E2E (supertest):**
-* [ ] `POST /auth/register` → capture rawToken via AuthService.lastVerificationToken (test hook) → `GET /auth/verify-email?token=&email=` → `200 {verified:true}` → `GET /users/me` → `emailVerified true` → `POST /auth/resend-verification` with same email → second token new
-* [ ] `POST /admin/notifications/sales` as Admin with 10 users (5 opt-in) → `202` → worker sends 5 emails (Noop captures), 5 skipped, `GET /admin/notifications/logs` 5 rows
+**E2E (supertest) — specs written, pending infra run:**
+* [ ] `POST /auth/register` → capture rawToken via `AuthService.lastVerificationToken` (test hook) → `GET /auth/verify-email?token=&email=` → `200 {verified:true}` → `GET /users/me` → `emailVerified true` → `POST /auth/resend-verification` with same email → second token new
+* [ ] `POST /admin/notifications/sales` as Admin with 10 users → `202` → worker sends to eligible only, `GET /notifications` history + unread flow
 
 ## 18.10 Exit Criteria
 
@@ -2816,7 +2854,7 @@ Deferred to Phase 16.x / Phase 17:
 
 [ ] Refresh token (Future, Phase 17 before Testing) — POST /auth/refresh rotation + POST /auth/logout(-all), opaque sha256 hashed RefreshToken (userId FK, tokenHash @Index, expiresAt 7d, revokedAt), tokenVersion revocation, theft detection revoke-all, HttpOnly cookie + body, RateLimitGuard — see Phase 17 spec
 
-[ ] Email service (Future, Phase 18 before Testing) — verification email after register (GET|POST /auth/verify-email, POST /auth/resend-verification, EmailVerificationToken hash 24h, usedAt), password-reset email upgrade (actual sending), notifications for sales/new products (POST /admin/notifications/sales, PATCH /users/me/preferences marketingOptIn, BullMQ bulk + Redis dedup + NotificationLog, EmailProvider smtp/ses/noop) — see Phase 18 spec
+[x] Email service — DONE 2026-10-02 (Phase 18, merged `d0d540b` — verify/resend/reset emails, dual-channel dispatch, WS history/unread, delivery states; `specs/014-email-service` 73 tasks, unit PASS, real-PG E2E deferred)
 
 [ ] Payment (Stripe Test Mode, New Payment Module) (Future, Phase 19 before Testing) — separate payment.module (stripe npm test mode), Payment {orderId @Unique FK, userId FK, amount, currency, status PENDING|SUCCEEDED|FAILED|CANCELLED, stripePaymentIntentId @Unique, stripeEventId, provider}, POST /payments/intent (orderId) → pi_xxx clientSecret, POST /payments/webhook (rawBody + Stripe-Signature verify, idempotent evt.id, amount check, transactional Order PENDING→COMPLETED/FAILED + Reservation + stock), POST /payments/:id/confirm-test (test card 4242 vs 0002) — see Phase 19 spec
 
@@ -2913,7 +2951,7 @@ Phase 17
 Refresh Token (Future) — POST /auth/refresh rotation, logout, tokenVersion revocation
         ↓
 Phase 18
-Email Service (Future) — verify after register, reset email, sales/news notifications (BullMQ bulk)
+Email Service — DONE 2026-10-02 (verify + reset + sales/news + history/unread + delivery states)
         ↓
 Phase 19
 Payment (Stripe Test Mode, New Payment Module) — separate payment.module, Payment 1:1 Order, PaymentIntent pi_xxx, webhook signature + idempotent evt.id, test cards 4242/0002
@@ -2994,36 +3032,33 @@ Order Integration
     ↓
 DONE — 2026-09-21 (checkout-only, atomic Order+Reservation+Inventory, historical price, concurrency single-winner)
     ↓
+Order Completion, Auth, Infra, Refresh Token, Email Service
+    ↓
+DONE — 2026-09-22 → 2026-10-02 (Phase 7 sale, Phases 10/12, Phase 17 refresh rotation, Phase 18 email + notifications merged `d0d540b`)
+    ↓
 >>> CURRENT TARGET <<<
     ↓
-Order Completion (Phase 7)
+Order Cancellation (Phase 8) / Payment (Phase 19) / Dashboard (Phase 20)
     ↓
-Async infrastructure
+Testing (Phase 14)
     ↓
-Reliability
-    ↓
-Testing
-    ↓
-Documentation
+Documentation (Phase 15)
 ```
 
 ## Next Manual Task
 
-The next task should be:
+Phases 1–7, 10, 12, 17, 18 are done and merged to `master`. Open tracks
+(maintainer picks the order — roadmap order is Payment → Dashboard → Testing):
 
-**Phase 5 — Reservation Expiration / Cleanup**
+* **Phase 8 — Order Cancellation**: define the state machine first (statuses,
+  per-status inventory effect, refund behavior), then implement. Exit bar:
+  no double-release / double-return.
+* **Phase 19 — Payment (Stripe test mode)**: separate `payment` module,
+  `PaymentIntent + webhook` flow; keeps PostgreSQL authoritative.
+* **Phase 20 — Dashboard, RBAC & Metrics**: separate `dashboard` module,
+  role hierarchy + 5 metrics.
+* **Phase 14 — Testing**: full E2E incl. real-PG proofs deferred from Phase 18
+  (`register → verify → forgot → reset → checkout`, bulk gate/dedup replay).
 
-Start with:
-
-```text
-1. Design expiration scanner query (status=RESERVED AND expiresAt<=NOW()) using existing composite index (status,expiresAt)
-2. Decide job infra (BullMQ vs scheduler) per `docs/plan.md` §5.4 + `research.md` D3 (worker enforces expiresAt, manual expire immediate)
-3. Implement cleanup transaction (lock reservation FOR UPDATE → verify RESERVED → lock sorted inventories → reserved-=qty → status=EXPIRED)
-4. Handle race with concurrent complete/cancel (single-winner via FOR UPDATE, loser 409)
-5. Add unit + integration tests (real PG, time-based expiration, concurrent worker vs complete)
-6. Verify no double-release on reprocessing (idempotent EXPIRED→EXPIRED 409)
-```
-
-Do not implement Order integration yet (Phases 6-8) before expiration is stable.
-
-The purpose of the next phase is to automatically release expired inventory via a background worker, complementing the manual admin expire completed in Phase 4.
+Do not implement future phases prematurely; each follows Spec Kit
+(specify → clarify → plan → tasks → implement → verify).
