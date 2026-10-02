@@ -30,6 +30,7 @@ describe('OutboxPublisher max retries', () => {
               addOrderBy: jest.fn().mockReturnThis(),
               limit: jest.fn().mockReturnThis(),
               setLock: jest.fn().mockReturnThis(),
+              setOnLocked: jest.fn().mockReturnThis(),
               getMany: jest.fn().mockResolvedValue([event]),
             }),
           }),

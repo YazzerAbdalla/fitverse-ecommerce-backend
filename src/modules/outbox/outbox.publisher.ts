@@ -195,7 +195,9 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         .orderBy('e.createdAt', 'ASC')
         .addOrderBy('e.id', 'ASC')
         .limit(lim)
-        .setLock('pessimistic_write', undefined, { skipLocked: true } as any);
+        .setLock('pessimistic_write')
+        // SKIP LOCKED lives on setOnLocked in this TypeORM version (setLock's 3rd arg is lockTables: string[])
+        .setOnLocked('skip_locked');
 
       const rows = await qb.getMany();
       if (rows.length === 0) {

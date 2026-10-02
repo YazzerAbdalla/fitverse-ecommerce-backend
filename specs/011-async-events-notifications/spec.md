@@ -88,7 +88,7 @@ A background `OutboxPublisher` (BullMQ repeat or `setInterval` poll, shared `RED
 
 **Why this priority**: Core of outbox. Wrong claim (no `SKIP LOCKED`, no lease) would duplicate or stall; wrong retry would lose events.
 
-**Independent Test**: Unit test `OutboxPublisher.publishBatch` with mocked `DataSource`/`OutboxRepo` (`qb.setLock('pessimistic_write', undefined, {skipLocked:true})`) + mocked `ClientProxy` → assert `claim` sets `PROCESSING`, `emit` called with `payload.eventId == outbox.id`, then `SENT` on success, and `attempts=1 nextRetryAt≈NOW()+1s` on `throwError`, `FAILED` when `attempts>=max` (retain row). Simulate crash: insert `PROCESSING` with `processingStartedAt=NOW()-2*lease`, second publisher reclaims it. Concurrency: two publishers `publishBatch` concurrently with 5 pending events → each claims disjoint set (`skipLocked`).
+**Independent Test**: Unit test `OutboxPublisher.publishBatch` with mocked `DataSource`/`OutboxRepo` (`qb.setLock('pessimistic_write').setOnLocked('skip_locked')`) + mocked `ClientProxy` → assert `claim` sets `PROCESSING`, `emit` called with `payload.eventId == outbox.id`, then `SENT` on success, and `attempts=1 nextRetryAt≈NOW()+1s` on `throwError`, `FAILED` when `attempts>=max` (retain row). Simulate crash: insert `PROCESSING` with `processingStartedAt=NOW()-2*lease`, second publisher reclaims it. Concurrency: two publishers `publishBatch` concurrently with 5 pending events → each claims disjoint set (`skipLocked`).
 
 **Acceptance Scenarios**:
 1. **Given** 3 `PENDING` outbox rows, **When** `OutboxPublisher.poll()` claims batch `100`, **Then** `SELECT` uses `FOR UPDATE SKIP LOCKED`, 3 rows become `PROCESSING`, `client.emit` called 3× with `eventType` as pattern and body `{eventId, eventType, version, occurredAt, correlationId, payload}`, then 3 become `SENT` with `sentAt`.
@@ -133,7 +133,7 @@ An operator / CI runs `npm run test -- --runInBand`, `npm run build`, inspects S
 - Payload size / PII: outbox `payload JSONB` contains `version:1, correlationId, eventId, eventType, occurredAt` + `orderId,userId,total,items,reservationId` only; no `email`, `Authorization`, secrets; `Logger` logs `eventId correlationId` prefix only.
 - Duplicate `order.created` for same checkout (idempotent retry `POST` with same `correlationId` but different `orderId`? V1 no dedup on `correlationId`; each `orderId` gets its own outbox row — `correlationId` is tracing, not dedup key).
 - `OutboxEvent` `FAILED` after `maxAttempts` → retained `30d` (configurable `OUTBOX_RETENTION_DAYS`), not auto-deleted; ops can manually `requeue` by resetting `status=PENDING attempts=0 nextRetryAt=NOW()`.
-- `FOR UPDATE SKIP LOCKED` not available on some DB? PostgreSQL 17 supports it — required; publisher uses `QueryBuilder.setLock('pessimistic_write', undefined, {skipLocked:true})`.
+- `FOR UPDATE SKIP LOCKED` not available on some DB? PostgreSQL 17 supports it — required; publisher uses `QueryBuilder.setLock('pessimistic_write').setOnLocked('skip_locked')`.
 - `Payload` JSONB mutability: publisher never reconstructs from current DB; it publishes stored `payload` byte-equal, preserving `occurredAt` and `eventId`.
 
 ---
@@ -286,7 +286,7 @@ An operator / CI runs `npm run test -- --runInBand`, `npm run build`, inspects S
 
 - **SC-003 (Completion & expiration atomicity)**: `POST /order/:id/complete` `PENDING→COMPLETED` inserts `order.completed` `PENDING` in same commit; publisher eventually `SENT`. Expiration batch with 2 `RESERVED` (one with `Order PENDING`) inserts `reservation.expired x2` + `order.cancelled x1` **atomically** with the `RESERVED→EXPIRED` / `PENDING→CANCELLED` state changes; second tick with same ids inserts zero new rows.
 
-- **SC-004 (Claim & concurrency)**: `OutboxPublisher.publishBatch(100)` with 10 `PENDING` claims via `SELECT ... FOR UPDATE SKIP LOCKED ORDER BY createdAt ASC LIMIT 100` and sets `PROCESSING` with `processingStartedAt`; two publishers running concurrently claim disjoint sets (spy `qb.setLock('pessimistic_write', undefined, {skipLocked:true})` called, `SELECT count()` disjoint).
+- **SC-004 (Claim & concurrency)**: `OutboxPublisher.publishBatch(100)` with 10 `PENDING` claims via `SELECT ... FOR UPDATE SKIP LOCKED ORDER BY createdAt ASC LIMIT 100` and sets `PROCESSING` with `processingStartedAt`; two publishers running concurrently claim disjoint sets (spy `qb.setLock('pessimistic_write').setOnLocked('skip_locked')` called, `SELECT count()` disjoint).
 
 - **SC-005 (Retry & lease)**: Failed publish increments `attempts` and sets `nextRetryAt = NOW()+base*2^(attempts-1)` (1s,2s,4s,8s,16s up to cap) and keeps `status PENDING` until `attempts>=5` then `status FAILED` retained (not deleted) with `lastError`. A `PROCESSING` row with `processingStartedAt < NOW()-30s` is reclaimable by next poll (lease expiry).
 

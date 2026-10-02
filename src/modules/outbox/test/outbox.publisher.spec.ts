@@ -38,6 +38,7 @@ describe('OutboxPublisher publishBatch — claim PROCESSING → SENT', () => {
         addOrderBy: jest.fn().mockReturnThis(),
         limit: jest.fn().mockReturnThis(),
         setLock: jest.fn().mockReturnThis(),
+        setOnLocked: jest.fn().mockReturnThis(),
         getMany: jest.fn().mockResolvedValue([mockEvent]),
       })),
       createQueryBuilderUpdate: jest.fn(),
@@ -70,6 +71,7 @@ describe('OutboxPublisher publishBatch — claim PROCESSING → SENT', () => {
         addOrderBy: jest.fn().mockReturnThis(),
         limit: jest.fn().mockReturnThis(),
         setLock: jest.fn().mockReturnThis(),
+        setOnLocked: jest.fn().mockReturnThis(),
         getMany: jest.fn().mockResolvedValue([]),
         update: jest.fn(),
       })),
@@ -113,10 +115,11 @@ describe('OutboxPublisher publishBatch — claim PROCESSING → SENT', () => {
           orderBy: jest.fn().mockReturnThis(),
           addOrderBy: jest.fn().mockReturnThis(),
           limit: jest.fn().mockReturnThis(),
-          setLock: jest
+          setLock: jest.fn().mockReturnThis(),
+          setOnLocked: jest
             .fn()
-            .mockImplementation((mode: any, _?: any, opts?: any) => {
-              expect(opts?.skipLocked).toBe(true);
+            .mockImplementation((mode: any) => {
+              expect(mode).toBe('skip_locked');
               return qb;
             }),
           getMany: jest.fn().mockResolvedValue([event]),

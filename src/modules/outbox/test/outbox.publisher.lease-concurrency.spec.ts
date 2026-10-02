@@ -32,6 +32,7 @@ describe('OutboxPublisher lease and concurrency', () => {
               addOrderBy: jest.fn().mockReturnThis(),
               limit: jest.fn().mockReturnThis(),
               setLock: jest.fn().mockReturnThis(),
+              setOnLocked: jest.fn().mockReturnThis(),
               getMany: jest.fn().mockResolvedValue([expiredEvent]),
             }),
           }),
@@ -68,14 +69,19 @@ describe('OutboxPublisher lease and concurrency', () => {
               limit: jest.fn().mockReturnThis(),
               setLock: jest
                 .fn()
-                .mockImplementation((_mode: any, _alias?: any, opts?: any) => {
-                  if (opts?.skipLocked === true) skipLockedUsed = true;
+                .mockImplementation(() => {
                   return {
                     where: jest.fn().mockReturnThis(),
                     orderBy: jest.fn().mockReturnThis(),
                     addOrderBy: jest.fn().mockReturnThis(),
                     limit: jest.fn().mockReturnThis(),
                     setLock: jest.fn().mockReturnThis(),
+                    setOnLocked: jest.fn().mockImplementation((mode: any) => {
+                      if (mode === 'skip_locked') skipLockedUsed = true;
+                      return {
+                        getMany: jest.fn().mockResolvedValue([]),
+                      };
+                    }),
                     getMany: jest.fn().mockResolvedValue([]),
                   } as any;
                 }),

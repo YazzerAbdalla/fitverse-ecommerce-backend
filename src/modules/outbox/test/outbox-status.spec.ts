@@ -40,6 +40,7 @@ describe('OutboxStatus delivery-state machine (T058 US6)', () => {
           addOrderBy: jest.fn().mockReturnThis(),
           limit: jest.fn().mockReturnThis(),
           setLock: jest.fn().mockReturnThis(),
+          setOnLocked: jest.fn().mockReturnThis(),
           getMany: jest.fn().mockResolvedValue([event]),
         };
         return qb;
