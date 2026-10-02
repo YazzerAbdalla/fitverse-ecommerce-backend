@@ -996,7 +996,7 @@ The database enforces important business invariants and common access paths are 
 
 This phase is **orthogonal** to Phases 7-8 (order) and 9-13 (infra). It extends Phase 16 Auth Upgrades (which shipped `tokenVersion` stateless revocation and `JWT_EXPIRES_IN=15m` in `005-auth-upgrades`) but was deliberately deferred from Phase 16 V1 (password-only login) because `POST /auth/login` already works for manual E2E. It must be implemented **before** `Phase 14 — Testing` in the roadmap so final `npm run test:e2e` can cover `register → login → refresh → cart → checkout → complete` without 401 flakes.
 
-## 17.0 Current Auth Snapshot (what exists, 2026-09-22)
+## 17.0 Pre-Phase Snapshot (what existed, 2026-09-22 — all gaps below are now closed)
 
 ```text
 auth.controller.ts : POST /auth/register, POST /auth/login (LocalAuthGuard → AuthService.login → JwtService.sign {sub,email,fullName,role,tokenVersion} 15m), POST /auth/forgot-password|validate-reset-token|reset-password, POST /auth/otp/request|verify → 501 TODO, GET /auth/google|/google/callback
@@ -1005,7 +1005,7 @@ users.entity.ts    : id uuid, email @Unique, password nullable, phoneNumber/@Ind
 guards             : LocalAuthGuard, JwtGuard (passport-jwt validates tokenVersion === user.tokenVersion else 401), RolesGuard via @Auth, RateLimitGuard (Redis, 5-10/hour, fail-open)
 config             : JWT_SECRET, JWT_EXPIRES_IN=15m, RESET_TOKEN_TTL=15m, OTP_TTL=5m
 migration          : 1755900000000-AuthUpgradesUserAndResetToken (tokenVersion + phone/google/provider + password nullable)
-Gap                : no RefreshToken persistence, no POST /auth/refresh, no POST /auth/logout, no refresh rotation, no HttpOnly cookie vs Authorization: Bearer refresh header decision
+Gap (all closed)      : `RefreshToken` persistence added (`email_verification_token`-style opaque `sha256`, migration `1755900000005` + FK fix `0007` + lowercase rename `0009`); `POST /auth/refresh` rotation shipped; `POST /auth/logout(-all)` shipped; HttpOnly cookie + body dual transport decided
 ```
 
 Manual E2E (`docs/manual-e2e-test-flow.md:§1.5`) now expects `POST /auth/refresh` → `200` (was `404` before Phase 17, now rotated pair `200` + `Set-Cookie`).
@@ -1130,35 +1130,35 @@ RESET_TOKEN_TTL=15m
 
 All read via `ConfigService`; never hardcode.
 
-## 17.7 Implementation Plan (Spec Kit tasks, before Testing)
+## 17.7 Implementation Plan (Spec Kit tasks — executed 2026-09-23, `specs/013-refresh-token` 36 tasks)
 
 ```text
-1. Spec: /speckit.specify refresh-token (login + refresh + logout + rotation) → clarify Q&A (body vs cookie, theft detection, logoutAll scope, TTLs)
-2. Design: data-model.md (RefreshToken entity, User.tokenVersion reuse), research.md (opaque vs JWT jti, rotation vs reuse, cookie vs header)
-3. Contract: OpenAPI for POST /auth/refresh, POST /auth/logout(-all) + updated POST /auth/login response
-4. Migration: RefreshToken entity + repo + indexes (userId, tokenHash, expiresAt) + partial unique (synchronize:false)
-5. Service: AuthService.login extension (create RefreshToken), refresh, logout, logoutAll with FOR UPDATE + revocation
-6. Controller: POST /auth/refresh (public, RateLimitGuard), POST /auth/logout(-all) (JwtGuard), Set-Cookie handling, Swagger
-7. Unit tests: login creates hashed refresh +7d, refresh rotation single-use → new pair + old revoked, second use 401, expired 401, revoked 401, logout idempotent 200, logoutAll increments tokenVersion + revokes all
-8. Integration tests: real PG transaction, concurrent refresh with same token → one 200 one 401 theft→revoke all, DB constraints partial unique
-9. E2E: register→login→GET /order → wait 15m or mock exp → POST /auth/refresh → GET /order with new accessToken 200 → POST /auth/logout → refresh again 401 → GET /order still 200 until access exp
-10. Docs: docs/architecture/modules.md, docs/decisions/ADR-refresh-token.md, Swagger, Postman, docs/manual-e2e-test-flow.md §1.5 updated (200 not 404)
+1. Spec: /speckit.specify refresh-token (login + refresh + logout + rotation) → clarify Q&A (body vs cookie, theft detection, logoutAll scope, TTLs) [x]
+2. Design: data-model.md (RefreshToken entity, User.tokenVersion reuse), research.md (opaque vs JWT jti, rotation vs reuse, cookie vs header) [x]
+3. Contract: OpenAPI for POST /auth/refresh, POST /auth/logout(-all) + updated POST /auth/login response [x]
+4. Migration: RefreshToken entity + repo + indexes (userId, tokenHash, expiresAt) + partial unique (synchronize:false) [x → applied as 0005 (+0007 `"User"`→`"user"` FK fix, +0009 `"RefreshToken"`→`refresh_token` rename — entity resolves snake_case)]
+5. Service: AuthService.login extension (create RefreshToken), refresh, logout, logoutAll with FOR UPDATE + revocation [x]
+6. Controller: POST /auth/refresh (public, RateLimitGuard), POST /auth/logout(-all) (JwtGuard), Set-Cookie handling, Swagger [x]
+7. Unit tests: login creates hashed refresh +7d, refresh rotation single-use → new pair + old revoked, second use 401, expired 401, revoked 401, logout idempotent 200, logoutAll increments tokenVersion + revokes all [x]
+8. Integration tests: real PG transaction, concurrent refresh with same token → one 200 one 401 theft→revoke all, DB constraints partial unique [x]
+9. E2E: register→login→GET /order → wait 15m or mock exp → POST /auth/refresh → GET /order with new accessToken 200 → POST /auth/logout → refresh again 401 → GET /order still 200 until access exp [~ deferred with Phase 14 E2E]
+10. Docs: docs/architecture/modules.md, docs/decisions/ADR-refresh-token.md, Swagger, Postman, docs/manual-e2e-test-flow.md §1.5 updated (200 not 404) [x]
 ```
 
-## 17.8 Testing (must cover)
+## 17.8 Testing (unit PASS 2026-09-23; E2E deferred with Phase 14)
 
 **Unit (mock repos, mock Redis):**
-* [ ] login: creates hashed refresh `expiresAt=now+7d`, returns rawRefresh 64 hex, stores hash
-* [ ] refresh: valid → new pair + old revoked, expired → 401, revoked → 401, reused rotated → 401 + revoke all
-* [ ] logout: valid → revoked, second logout same token → 200 idempotent
-* [ ] logoutAll: increments tokenVersion, revokes all RefreshToken for user
+* [x] login: creates hashed refresh `expiresAt=now+7d`, returns rawRefresh 64 hex, stores hash
+* [x] refresh: valid → new pair + old revoked, expired → 401, revoked → 401, reused rotated → 401 + revoke all
+* [x] logout: valid → revoked, second logout same token → 200 idempotent
+* [x] logoutAll: increments tokenVersion, revokes all RefreshToken for user
 
 **Integration (real PostgreSQL, real Redis when available):**
-* [ ] DB constraints: duplicate tokenHash partial unique not violated on rotation (new row, old revoked), expired check
-* [ ] Transaction: concurrent `POST /auth/refresh` with same token → one 200 + rotation, one 401 + theft revoke, no double-issue
-* [ ] Rate limit: exceed → 429, Redis down → still succeeds with log
+* [x] DB constraints: duplicate tokenHash partial unique not violated on rotation (new row, old revoked), expired check
+* [x] Transaction: concurrent `POST /auth/refresh` with same token → one 200 + rotation, one 401 + theft revoke, no double-issue
+* [x] Rate limit: exceed → 429, Redis down → still succeeds with log
 
-**E2E (supertest):**
+**E2E (supertest) — deferred with Phase 14:**
 * [ ] `POST /auth/register` → `POST /auth/login` → `GET /order` with accessToken 200 → `POST /auth/refresh` with refreshToken → `GET /order` with new access 200 → `POST /auth/logout` → `POST /auth/refresh` with old refresh 401
 * [ ] `POST /auth/reset-password` → `POST /auth/refresh` with old refresh 401 (tokenVersion mismatch)
 
@@ -2852,7 +2852,7 @@ Deferred to Phase 16.x / Phase 17:
 [ ]   User alterations (googleId, phoneNumber, provider, password nullable, partial uniques, tokenVersion)
 [ ]   Rate limiting on auth endpoints (Redis, fail-open, full headers) — OTP limits TODO until WhatsApp re-enable
 
-[ ] Refresh token (Future, Phase 17 before Testing) — POST /auth/refresh rotation + POST /auth/logout(-all), opaque sha256 hashed RefreshToken (userId FK, tokenHash @Index, expiresAt 7d, revokedAt), tokenVersion revocation, theft detection revoke-all, HttpOnly cookie + body, RateLimitGuard — see Phase 17 spec
+[x] Refresh token — DONE 2026-09-23 (Phase 17, `specs/013-refresh-token` 36 tasks — rotation, logout(-all), theft revoke-all, dual transport; E2E deferred with Phase 14)
 
 [x] Email service — DONE 2026-10-02 (Phase 18, merged `d0d540b` — verify/resend/reset emails, dual-channel dispatch, WS history/unread, delivery states; `specs/014-email-service` 73 tasks, unit PASS, real-PG E2E deferred)
 
@@ -2948,7 +2948,7 @@ Refresh token + Email + Payment + Dashboard (future, before final testing — se
 
 ```text
 Phase 17
-Refresh Token (Future) — POST /auth/refresh rotation, logout, tokenVersion revocation
+Refresh Token — DONE 2026-09-23 (rotation, logout, theft revoke-all)
         ↓
 Phase 18
 Email Service — DONE 2026-10-02 (verify + reset + sales/news + history/unread + delivery states)
