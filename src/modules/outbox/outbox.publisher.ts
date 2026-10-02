@@ -25,6 +25,8 @@ import { OutboxStatus } from './entities/outbox-status.enum';
 export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OutboxPublisher.name);
   private interval: NodeJS.Timeout | null = null;
+  // Guards the transport-missing notice so a missing broker doesn't spam one log line per poll
+  private transportSkipLogged = false;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -62,6 +64,15 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       (this.interval as any).unref();
     }
     this.logger.log(`outbox publisher polling every ${intervalMs}ms`);
+    // Surface missing transport once at startup instead of once per poll
+    this.logTransportSkip(
+      !this.configService.get<string>('RABBITMQ_URL'),
+      'RABBITMQ_URL not set, outbox rows will stay PENDING until a broker is configured',
+    );
+    this.logTransportSkip(
+      !this.client,
+      'NOTIFICATION_SERVICE not available, skipping publish',
+    );
   }
 
   /**
@@ -119,6 +130,23 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Logs a transport-missing skip once (warn) and at debug afterwards.
+   * Prevents one log line per poll when no broker is configured.
+   * @param missing - Whether the transport is currently unavailable.
+   * @param message - Message describing the skip reason.
+   */
+  private logTransportSkip(missing: boolean, message: string): void {
+    if (!missing) return;
+    // First occurrence warns so the misconfiguration stays visible; later polls debug only
+    if (!this.transportSkipLogged) {
+      this.logger.warn(`outbox ${message}`);
+      this.transportSkipLogged = true;
+      return;
+    }
+    this.logger.debug(`outbox ${message}`);
+  }
+
+  /**
    * Polls and publishes a batch of pending outbox events.
    * @param limit - Optional batch size override.
    * @returns Count of claimed/sent/failed.
@@ -133,12 +161,18 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
 
     const rabbitUrl = this.configService.get<string>('RABBITMQ_URL');
     if (!rabbitUrl) {
-      this.logger.log('RABBITMQ_URL not set, skipping publish');
+      this.logTransportSkip(
+        true,
+        'RABBITMQ_URL not set, skipping publish',
+      );
       return { claimed: 0, sent: 0, failed: 0, retried: 0 };
     }
 
     if (!this.client) {
-      this.logger.log('NOTIFICATION_SERVICE not available, skipping publish');
+      this.logTransportSkip(
+        true,
+        'NOTIFICATION_SERVICE not available, skipping publish',
+      );
       return { claimed: 0, sent: 0, failed: 0, retried: 0 };
     }
 
