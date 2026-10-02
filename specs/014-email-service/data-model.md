@@ -128,7 +128,8 @@ messageId  varchar nullable -- provider response e.g., 'noop-<uuid>' or Smtp <ms
 sentAt     timestamptz @CreateDateColumn @Index
 ```
 
-- **Indexes**: `IDX_notification_log_userId`, `IDX_notification_log_template`, `IDX_notification_log_productId`, `IDX_notification_log_orderId`, composite `IDX_notification_log_userId_sentAt`, `IDX_notification_log_template_sentAt`.
+- **Indexes**: `IDX_notification_log_userId`, `IDX_notification_log_template`, `IDX_notification_log_productId`, `IDX_notification_log_orderId`, `IDX_notification_log_eventId`, composite `IDX_notification_log_userId_sentAt`, `IDX_notification_log_template_sentAt`.
+- **Dedup role**: `eventId @Unique` doubles as PG backstop for consume dedup (`orIgnore` on duplicate consume → `0` new rows; see research D8). `NotificationLog` was missing from every migration until backfilled by `1755900000008-CreateNotificationLog` (entity predated its table).
 - **Writes**: Inside `NotificationWorker`/`EmailWorker` **after** `EmailProvider.send` succeeds, via `EntityManager.save` per batch (never inside `verifyEmail FOR UPDATE`). `provider` logs `hashPrefix` only for `verify/reset` if needed.
 - **Constraints**: FK `ON DELETE CASCADE` for `userId`, `ON DELETE SET NULL` for `productId/orderId` (product deleted → log remains `productId NULL`); no `@Unique(userId, template, campaignId)` V1 because dedup is Redis-only (clarification); replay without Redis may insert second `NotificationLog` row but `SET NX` primary avoids second `send` when Redis healthy.
 - **Retention**: Indefinite (audit), no purge V1. Scale >10k users uses BullMQ batching `EMAIL_SALES_BATCH_SIZE 500`.
@@ -156,9 +157,9 @@ OutboxEvent 1──* Notification       (eventId logical link, no FK)
 
 - `EmailVerificationToken`: `tokenHash` `@IsString @Length(64,64) @Matches(/^[0-9a-f]{64}$/)` on hash (after sha256), `expiresAt @Check > createdAt` enforced DB + service `expiresAt > NOW()` check, `usedAt nullable`, `userId` FK exists.
 - `User.marketingOptIn`: `@IsBoolean` via `RegisterDto` optional + `UpdatePreferencesDto` optional.
-- `User.emailOptIn`: `@IsBoolean` via `RegisterDto` optional + `UpdatePreferencesDto` optional (default `true`).
+- `User.emailOptIn`: `@IsBoolean` via `RegisterDto` optional + `UpdatePreferencesDto` optional (default `true`); either-or update (at least one flag per `PATCH`).
 - `Notification.channel`: `@IsEnum(['SYSTEM','EMAIL'])`; `Notification.type`: `@IsIn([...8 types])`; `NotificationDelivery` `@Unique(eventId,channel)` enforced DB + `orIgnore` on upsert.
-- `NotificationLog.template`: `@IsIn(['verify','reset','sales','new_product'])` via service validation.
+- `NotificationLog.template`: `@IsIn(['verify','reset','sales','new_product','test'])` via service validation (`test` = admin config probe, bypasses history).
 - `VerifyEmailDto`: `email @IsEmail`, `token @IsString @Length(64,64) @Matches(/^[0-9a-f]{64}$/)`.
 - `ResendVerificationDto`: `email @IsEmail`.
 - `CreateSalesNotificationDto`: `title @IsString @Length(1,200) @IsNotEmpty`, `body @IsString @IsNotEmpty`, `productIds?: @IsOptional @IsUUID('4', {each:true})`.

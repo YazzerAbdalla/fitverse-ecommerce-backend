@@ -46,11 +46,26 @@
 - **Rationale**: Plan §18.2 explicitly says `V1: no Campaign table, just enqueue job with title/body`; adding a table would be extra migration + `Admin` list/history UI not required for SC-004 `10 users 5 gate`. Future `campaign` table can be added without breaking `NotificationLog` dedup key `campaignId`.
 - **Alternatives considered**: Persistent `sales_campaign {id,title,body,createdBy,createdAt}` — rejected: not needed for E2E `202→worker NotificationLog` proof, defer to Dashboard Phase 20.
 
-### D8: Bulk idempotency — Redis-only SET NX 24h vs Redis+DB UNIQUE fallback
+### D8: Bulk idempotency — Redis-primary with PG unique backstop (amended post-implementation)
 
-- **Decision**: **Redis-only** `SET NX notification:send:<template>:<campaignId|productId>:<userId> EX 86400` before `EmailProvider.send` (clarification 2026-09-23 **Redis only**). When `CACHE_MANAGER` `throw ECONNREFUSED` → `Logger.warn Redis fail-open for notification dedup` + allow send (duplicate on retry tolerated, logged, no DB `@Unique` fallback). `NotificationLog` has no `@Unique(userId,template,campaignId)` — replay can insert duplicate `NotificationLog` row but `SET NX` primary prevents duplicate `send` when Redis healthy.
-- **Rationale**: Redis-only matches plan §18.6 bulk idempotency `notification:send:* SET NX 24h`; DB unique fallback would require composite partial index + catch `23505` handling `0` `send` — rejected for V1 simplicity; fail-open tolerating one duplicate on `ECONNREFUSED` is acceptable per `Edge Cases` (bulk per-user failure does not abort pagination, retry can re-send that user).
-- **Alternatives considered**: Redis + `NotificationLog @Unique` — rejected: adds constraint complexity and would `500` on retry without Redis. Redis-only is simpler and already satisfies SC-004 `replay same campaignId → 0 new` when Redis healthy.
+- **Decision**: **Redis `SET NX notification:send:<template>:<campaignId|productId>:<userId> EX 86400` primary** before sends; PG `@Unique(eventId,channel)` (`Notification`/`NotificationDelivery`, `orIgnore`) + `NotificationLog.eventId @Unique` as backstop. When `CACHE_MANAGER` `throw ECONNREFUSED` → `Logger.warn Redis fail-open` + treat as first; a replay then inserts `0` new rows, only a duplicate provider call is possible (tolerated, logged — same Phase 12 semantics).
+- **Rationale**: Original "Redis-only" (clarification 2026-09-23) predated the delivery-state tables; once `(eventId,channel)` uniqueness existed in PG, using it as backstop was free correctness. Fail-open still favors availability over strict dedup.
+- **Alternatives considered**: Pure Redis-only (no DB unique) — kept as the *primary* path; pure DB-guard without Redis — rejected: `SET NX` avoids the send attempt entirely instead of merely skipping the row insert.
+
+### D13: Provider value `resend` — separate transport vs SMTP alias
+
+- **Decision**: `EMAIL_PROVIDER=smtp|resend` both select the nodemailer SMTP transport (`resend` targets Resend's SMTP relay `smtp.resend.com`); anything else → `Noop`. Applied in both `AuthModule` and `NotificationsModule` factories.
+- **Rationale**: `.env` already standardized on `EMAIL_PROVIDER=resend` with Resend SMTP creds; the factory only recognized `smtp`, silently Nooping real sends. Separate Resend-API transport rejected: SMTP relay needs no new SDK.
+
+### D14: RMQ client visibility — @Global MessagingModule vs per-module import
+
+- **Decision**: New `src/modules/messaging/messaging.module.ts` (`@Global`, registers + re-exports the single `NOTIFICATION_SERVICE` RMQ client); `AppModule` imports it instead of a local-only `ClientsModule` block.
+- **Rationale**: Nest DI scoping made the AppModule-local registration invisible to `OutboxModule`/`AuthModule` (`@Optional()` → `undefined` → silent skip every poll). Per-module `registerAsync` rejected: duplicate broker connections. Verified: publisher connects, `ClientProxy Successfully connected to RMQ broker`.
+
+### D15: SKIP LOCKED on typeorm 1.1 — setOnLocked vs setLock options
+
+- **Decision**: Claim uses `.setLock('pessimistic_write').setOnLocked('skip_locked')`. The `setLock(mode, undefined, {skipLocked:true})` form from older docs crashes (`lockTables.join is not a function`) because v1.1's third arg is `lockTables?: string[]`.
+- **Rationale**: Found at runtime (poll loop `START TRANSACTION → ROLLBACK` every second); unit mocks updated to the new chain shape. Spec text corrected everywhere.
 
 ## Resolved NEEDS CLARIFICATION
 

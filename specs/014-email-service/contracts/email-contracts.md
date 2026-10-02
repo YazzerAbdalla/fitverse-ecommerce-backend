@@ -105,11 +105,11 @@ Content-Type: application/json
 - **Auth**: `@Auth(Admin)` `JwtGuard + RolesGuard` (spec FR-010: Admin only V1, not CoAdmin/ContentManager)
 - **RateLimit**: `10/h per admin user` (`rl:POST /admin/notifications/sales:user:<sub>` `INCR+EXPIRE 3600` outermost before `JwtGuard`, `0 BullMQ add` on `429`, fail-open `Logger.warn`)
 - **Body**: `CreateSalesNotificationDto {title: string @IsString @Length(1,200) @IsNotEmpty, body: string @IsString @IsNotEmpty, productIds?: string[] @IsOptional @IsUUID('4', {each:true}) }`
-- **Handler**: Validate `Admin`, `productIds` existence if provided (`400`/`404` if nonexistent, no job enqueued), then `BullMQ queue.add('notification.sendBulk', {campaignId: uuid(), template:'sales', subject:title, body, productIds}, {jobId: campaignId, attempts:3, backoff:{type:'exponential', delay:1000}})` ephemeral (no `sales_campaign` table V1 per clarification) → worker `NotificationWorker @Processor('notification') concurrency 5` pages `Users WHERE marketingOptIn=true AND emailVerified=true ORDER BY id LIMIT EMAIL_SALES_BATCH_SIZE 500` cursor, for each user `Redis SET NX notification:send:sales:<campaignId>:<userId> EX 86400` Redis-only → `0` skip duplicate, `1` → `EmailProvider.send(to:user.email, subject:title, template:'sales', vars:{firstName, productName})` + `INSERT NotificationLog {userId, template:'sales', subject:title, productId|orderId nullable, provider, messageId, sentAt}` per batch (`EntityManager`), `Logger.log campaignId hashPrefix`.
+- **Handler**: Validate `Admin`, `productIds` existence if provided (`400`/`404` if nonexistent, no job enqueued), then `BullMQ queue.add('notification.sendBulk', {campaignId: uuid(), template:'sales', subject:title, body, productIds}, {jobId: campaignId, attempts:3, backoff:{type:'exponential', delay:1000}})` ephemeral (no `sales_campaign` table V1 per clarification) → `NotificationBulkProcessor @Processor('notification')` pages `Users WHERE marketingOptIn=true AND emailOptIn=true AND emailVerified=true ORDER BY id LIMIT EMAIL_SALES_BATCH_SIZE 500` cursor, resolves channels per user via `NotificationDispatcher` (`system` always + `email` iff three-flag gate), for each user `Redis SET NX notification:send:sales:<campaignId>:<userId> EX 86400` (Redis-primary, PG `@Unique(eventId,channel)` backstop) → `0` skip duplicate, `1` → channel sends + upsert `Notification`/`NotificationDelivery` + `INSERT NotificationLog {userId, template:'sales', subject:title, productId|orderId nullable, provider, messageId, sentAt}` per batch (`EntityManager`), `Logger.log campaignId hashPrefix`.
 - **Success**: `202 {jobId: string (campaignId), message:"Bulk notification enqueued"}` (Swagger `202`)
 - **Errors**: `401` unauth, `403` forbidden (non-Admin), `400` validation (`title 1-200`), `404` `productId` not found, `429` rate-limit
 - **Swagger**: `@ApiBearerAuth @ApiOperation(summary:'Enqueue sales bulk') @ApiResponse 202 @ApiResponse 401 @ApiResponse 403 @ApiResponse 429`
-- **Idempotency**: `SET NX 24h` Redis-only; replay `same campaignId` job (manual retry) → `0` new sends `NotificationLog still same count`; new `campaignId` with same `title` → new send (intended).
+- **Idempotency**: `SET NX 24h` Redis-primary + PG `@Unique(eventId,channel)` backstop; replay `same campaignId` job (manual retry) → `0` new sends/rows; new `campaignId` with same `title` → new send (intended).
 
 **Example**
 
@@ -128,17 +128,17 @@ Content-Type: application/json
 
 - **PATCH /users/me/preferences**
   - **Auth**: `JwtGuard @Auth()` any role
-  - **Body**: `UpdatePreferencesDto {marketingOptIn: boolean @IsBoolean @IsNotEmpty}`
-  - **Handler**: inside `dataSource.transaction` `SELECT User WHERE id=:currentUser.sub FOR UPDATE` → `UPDATE marketingOptIn=:dto.marketingOptIn` save, return `200 {marketingOptIn: boolean}`; `GET /users/me` already returns `User` extended to include `marketingOptIn` + `emailVerified`.
-  - **Success**: `200 {marketingOptIn: true|false}`
-  - **Errors**: `401` unauth, `400` validation, `500`
+  - **Body**: `UpdatePreferencesDto {marketingOptIn?: boolean @IsOptional @IsBoolean, emailOptIn?: boolean @IsOptional @IsBoolean}` (either-or, at least one flag)
+  - **Handler**: inside `dataSource.transaction` `SELECT User WHERE id=:currentUser.sub FOR UPDATE` → apply provided flags, save, return `200 {marketingOptIn, emailOptIn}`; `GET /users/me` returns `User` including `marketingOptIn` + `emailOptIn` + `emailVerified`.
+  - **Success**: `200 {marketingOptIn: true|false, emailOptIn: true|false}`
+  - **Errors**: `401` unauth, `400` validation (no flag provided / wrong types), `500`
 
 - **GET /users/me** (existing + extended)
   - **Auth**: `JwtGuard`
-  - **Success**: `200 {id, firstName, lastName, email, role, marketingOptIn, emailVerified, ...}` without password
+  - **Success**: `200 {id, firstName, lastName, email, role, marketingOptIn, emailOptIn, emailVerified, ...}` without password
   - **Errors**: `401`
 
-- **RegisterDto extension** (no new route): `POST /auth/register` now accepts optional `marketingOptIn?: boolean @IsOptional @IsBoolean` (default `false` if omitted) stored directly on `User`.
+- **RegisterDto extension** (no new route): `POST /auth/register` now accepts optional `marketingOptIn?: boolean @IsOptional @IsBoolean` (default `false` if omitted) and `emailOptIn?: boolean @IsOptional @IsBoolean` (default `true`) stored directly on `User`.
 
 **Example**
 
@@ -148,7 +148,7 @@ Authorization: Bearer <JWT>
 Content-Type: application/json
 
 { "marketingOptIn": true }
-// 200 { "marketingOptIn": true }
+// 200 { "marketingOptIn": true, "emailOptIn": true }
 ```
 
 ---
@@ -156,7 +156,7 @@ Content-Type: application/json
 ## 7. product.created internal hook (no REST, but contract for worker)
 
 - **Trigger**: `ProductsService.create` (GraphQL `createProduct` Admin) after `DataSource.transaction` commit → `notificationService.onProductCreated(product)` fire-and-forget outside transaction `queue.add('notification.new_product', {productId: product.id, name, price})`
-- **Worker**: Same `NotificationWorker` handling `notification.new_product` pages opted-in verified users, `SET NX notification:send:new_product:<productId>:<userId> EX 86400` per user → `EmailProvider.send template:'new_product' vars:{productName:name}` + `NotificationLog template:'new_product' productId`, dedup same as sales.
+- **Worker**: `NotificationBulkProcessor` handling `notification.new_product` pages three-flag-gated users, `SET NX notification:send:new_product:<productId>:<userId> EX 86400` per user → channel sends (`template:'new_product'` `vars:{productName:name}`) + `Notification`/`Delivery` upserts + `NotificationLog template:'new_product' productId`, dedup same as sales.
 
 ---
 
@@ -187,6 +187,37 @@ X-RateLimit-Remaining: 0
 class VerifyEmailDto { @IsEmail() email: string; @IsString() @Length(64,64) @Matches(/^[0-9a-f]{64}$/) token: string; }
 class ResendVerificationDto { @IsEmail() email: string; }
 class CreateSalesNotificationDto { @IsString() @Length(1,200) title: string; @IsString() body: string; @IsOptional() @IsUUID('4', {each:true}) productIds?: string[]; }
-class UpdatePreferencesDto { @IsBoolean() marketingOptIn: boolean; }
-class UserRegisterDto extended { ... existing firstName/lastName/email/password + @IsOptional() @IsBoolean() marketingOptIn?: boolean; }
+class TestEmailDto { @IsEmail() to: string; @IsOptional() @IsString() @MaxLength(200) subject?: string; @IsOptional() @IsString() @MaxLength(2000) body?: string; }
+class UpdatePreferencesDto { @IsOptional() @IsBoolean() marketingOptIn?: boolean; @IsOptional() @IsBoolean() emailOptIn?: boolean; }
+class UserRegisterDto extended { ... existing firstName/lastName/email/password + @IsOptional() @IsBoolean() marketingOptIn?: boolean + @IsOptional() @IsBoolean() emailOptIn?: boolean; }
+class NotificationHistoryQueryDto { @IsOptional() page?: number; @IsOptional() limit?: number; @IsOptional() isRead?: boolean; @IsOptional() channel?: 'SYSTEM'|'EMAIL'; @IsOptional() type?: string; @IsOptional() userId?: string (Admin only); }
 ```
+
+---
+
+## 10. POST /admin/notifications/test-email (SMTP config probe)
+
+- **Auth**: `@Auth(Admin)` `JwtGuard + RolesGuard`
+- **RateLimit**: `10/h per admin user` (`rl:POST /admin/notifications/test-email:user:<sub>`)
+- **Body**: `TestEmailDto {to @IsEmail, subject? @MaxLength(200), body? @MaxLength(2000)}`
+- **Handler**: `EmailChannel.send({to, subject ?? 'Mini E-Commerce SMTP test', template:'test', vars:{body}})` directly (bypasses outbox/dedup/history — config probe, not a business notification) → `200 {to, provider, messageId, delivered}` where `provider` echoes `EMAIL_PROVIDER` so `noop` vs real SMTP is unambiguous.
+- **Success**: `200 {to, provider: 'smtp'|'resend'|'noop', messageId, delivered:true}`
+- **Errors**: `401`, `403` (non-Admin), `400` validation, `429`, `500` (SMTP transport failure, e.g. bad creds — surfaces, never swallowed)
+
+**Example**
+
+```http
+POST /admin/notifications/test-email HTTP/1.1
+Authorization: Bearer <Admin JWT>
+Content-Type: application/json
+
+{ "to": "you@example.com", "subject": "SMTP test" }
+// 200 { "to":"you@example.com", "provider":"resend", "messageId":"<...>", "delivered":true }
+```
+
+---
+
+## 11. History + WebSocket realtime (US6/US7)
+
+- **REST** (all `@Auth()`, owner-scoped): `GET /notifications?page=&limit=&isRead=&channel=&type=` → `200 {data, meta}` (`createdAt DESC`, `Admin` may `?userId=`); `GET /notifications/unread-count` → `200 {unreadCount}`; `PATCH /notifications/:id/read` → `200 {id, isRead:true, readAt}` (idempotent, `403` non-owner); `PATCH /notifications/read-all` → `200 {updated:n}`. History routes carry no strict `RateLimitGuard` bucket in V1 (documented gap — PG-indexed reads mitigate abuse; throttle with dashboard phase).
+- **WS** (`src/modules/notifications/notifications.gateway.ts`, `@WebSocketGateway({namespace:'notifications', cors:true})`): connect with `Authorization: Bearer <accessToken>` (handshake `auth`/query/header) → server verifies JWT → joins room `user:<sub>`; `SystemChannel` emits `notification:new {id, type, title, body, channel, eventId, createdAt}` to the room; client ack drives `DELIVERED`, offline stays `SENT` until fetch. `wscat -c "ws://localhost:3000/notifications?token=<JWT>"`.
