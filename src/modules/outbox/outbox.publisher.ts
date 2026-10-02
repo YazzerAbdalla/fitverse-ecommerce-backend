@@ -60,8 +60,8 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       );
     }, intervalMs);
     // Allow process to exit even if interval remains
-    if (this.interval && typeof (this.interval as any).unref === 'function') {
-      (this.interval as any).unref();
+    if (this.interval && typeof this.interval.unref === 'function') {
+      this.interval.unref();
     }
     this.logger.log(`outbox publisher polling every ${intervalMs}ms`);
     // Surface missing transport once at startup instead of once per poll
@@ -161,10 +161,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
 
     const rabbitUrl = this.configService.get<string>('RABBITMQ_URL');
     if (!rabbitUrl) {
-      this.logTransportSkip(
-        true,
-        'RABBITMQ_URL not set, skipping publish',
-      );
+      this.logTransportSkip(true, 'RABBITMQ_URL not set, skipping publish');
       return { claimed: 0, sent: 0, failed: 0, retried: 0 };
     }
 
@@ -209,14 +206,14 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       const ids = rows.map((r) => r.id);
       const claimToken = randomUUID();
       // Support both repo.update (simple) and queryBuilder (mock compatibility)
-      if (typeof (repo as any).update === 'function') {
-        await (repo as any).update(ids as any, {
-          status: OutboxStatus.PROCESSING as any,
-          processingStartedAt: new Date() as any,
-          processingToken: claimToken as any,
+      if (typeof repo.update === 'function') {
+        await repo.update(ids, {
+          status: OutboxStatus.PROCESSING,
+          processingStartedAt: new Date(),
+          processingToken: claimToken,
         });
-      } else if (typeof (repo as any).createQueryBuilder === 'function') {
-        const qb: any = (repo as any).createQueryBuilder();
+      } else if (typeof repo.createQueryBuilder === 'function') {
+        const qb = repo.createQueryBuilder();
         if (qb && typeof qb.update === 'function') {
           await qb
             .update(OutboxEvent)
@@ -236,7 +233,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       claimedEvents = rows.map((r) => {
         r.status = OutboxStatus.PROCESSING;
         r.processingStartedAt = new Date();
-        (r as any).processingToken = claimToken;
+        r.processingToken = claimToken;
         return r;
       });
 
@@ -259,19 +256,15 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         // client.emit returns Observable; await via lastValueFrom for ACK (RabbitMQ accept)
         const obs = this.client.emit(event.eventType, payload);
         if (
-          (obs && typeof (obs as any).toPromise === 'function') ||
+          (obs && typeof obs.toPromise === 'function') ||
           typeof lastValueFrom === 'function'
         ) {
           // Use lastValueFrom if available, else subscribe callback
-          try {
-            await lastValueFrom(obs as any);
-          } catch (e: any) {
-            // If lastValueFrom throws, treat as failure
-            throw e;
-          }
-        } else if (obs && typeof (obs as any).subscribe === 'function') {
+
+          await lastValueFrom(obs);
+        } else if (obs && typeof obs.subscribe === 'function') {
           await new Promise<void>((resolve, reject) => {
-            (obs as any).subscribe({
+            obs.subscribe({
               next: () => resolve(),
               error: (err: any) => reject(err),
               complete: () => resolve(),
@@ -282,25 +275,23 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         // Success: mark SENT only if still owned by this publisher (token check) — prevents A overwriting B after lease reclaim
         let sentAffected = 1;
         try {
-          if (
-            typeof (this.dataSource as any).createQueryBuilder === 'function'
-          ) {
-            const res = await (this.dataSource as any)
+          if (typeof this.dataSource.createQueryBuilder === 'function') {
+            const res = await this.dataSource
               .createQueryBuilder()
               .update(OutboxEvent)
               .set({
-                status: OutboxStatus.SENT_TO_MQ as any,
-                sentAt: new Date() as any,
-                lastError: null as any,
-                processingStartedAt: null as any,
-                processingToken: null as any,
+                status: OutboxStatus.SENT_TO_MQ,
+                sentAt: new Date(),
+                lastError: null,
+                processingStartedAt: null,
+                processingToken: null,
               })
               .where(
                 'id = :id AND status = :status AND processingToken = :token',
                 {
                   id: event.id,
                   status: OutboxStatus.PROCESSING,
-                  token: (event as any).processingToken,
+                  token: event.processingToken,
                 },
               )
               .execute();
@@ -339,28 +330,24 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         // Failure: mark PENDING/FAILED only if still owned (token check) — prevents late A overwriting B
         let failAffected = 1;
         try {
-          if (
-            typeof (this.dataSource as any).createQueryBuilder === 'function'
-          ) {
-            const res = await (this.dataSource as any)
+          if (typeof this.dataSource.createQueryBuilder === 'function') {
+            const res = await this.dataSource
               .createQueryBuilder()
               .update(OutboxEvent)
               .set({
-                attempts: nextAttempts as any,
-                lastError: msg as any,
-                nextRetryAt: nextRetryAt as any,
-                status: (willFail
-                  ? OutboxStatus.FAILED
-                  : OutboxStatus.PENDING) as any,
-                processingStartedAt: null as any,
-                processingToken: null as any,
+                attempts: nextAttempts,
+                lastError: msg,
+                nextRetryAt: nextRetryAt,
+                status: willFail ? OutboxStatus.FAILED : OutboxStatus.PENDING,
+                processingStartedAt: null,
+                processingToken: null,
               })
               .where(
                 'id = :id AND status = :status AND processingToken = :token',
                 {
                   id: event.id,
                   status: OutboxStatus.PROCESSING,
-                  token: (event as any).processingToken,
+                  token: event.processingToken,
                 },
               )
               .execute();
