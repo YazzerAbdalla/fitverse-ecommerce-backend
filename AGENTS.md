@@ -19,7 +19,7 @@ For additional context about technologies to be used, project structure,
 
 shell commands, and other important information, read the current plan
 
-at `specs/014-email-service/plan.md` (Phase 18 — Email Service).
+at `specs/015-auth-user-refactor/plan.md` (RP-AUTH — Auth + Users Refactor).
 
 <!-- SPECKIT END -->
 
