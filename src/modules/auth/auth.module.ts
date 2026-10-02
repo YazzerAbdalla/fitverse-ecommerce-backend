@@ -56,9 +56,11 @@ import { RateLimitGuard } from './guards/rate-limit.guard';
         smtp: SmtpEmailProvider,
         noop: NoopEmailProvider,
       ) => {
-        // Same EMAIL_PROVIDER switch as NotificationsModule (smtp in prod, noop in dev/test)
+        // Same EMAIL_PROVIDER switch as NotificationsModule (smtp/resend in prod, noop in dev/test)
         const provider = config.get<string>('EMAIL_PROVIDER') ?? 'noop';
-        return provider.toLowerCase() === 'smtp' ? smtp : noop;
+        return ['smtp', 'resend'].includes(provider.toLowerCase())
+          ? smtp
+          : noop;
       },
     },
   ],

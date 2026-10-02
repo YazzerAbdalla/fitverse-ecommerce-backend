@@ -11,6 +11,8 @@ describe('NotificationsController history (T061 US7)', () => {
   let repo: any;
   let dataSource: any;
   let notificationService: any;
+  let emailChannel: any;
+  let configService: any;
 
   const owner = { sub: 'user-1', role: UserRoles.User, fullName: 'User One' };
   const other = { sub: 'user-2', role: UserRoles.User, fullName: 'User Two' };
@@ -31,7 +33,14 @@ describe('NotificationsController history (T061 US7)', () => {
       ),
     };
     notificationService = { sendSalesCampaign: jest.fn() };
-    controller = new NotificationsController(notificationService, dataSource);
+    emailChannel = { send: jest.fn() };
+    configService = { get: jest.fn(() => 'noop') };
+    controller = new NotificationsController(
+      notificationService,
+      emailChannel,
+      configService,
+      dataSource,
+    );
   });
 
   it('GET /notifications returns paginated data + meta', async () => {
@@ -133,5 +142,28 @@ describe('NotificationsController history (T061 US7)', () => {
       controller.listHistory({ userId: 'user-9' } as any, other as any),
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(repo.findAndCount).not.toHaveBeenCalled();
+  });
+
+  it('POST test-email delegates to EmailChannel and echoes provider', async () => {
+    emailChannel.send.mockResolvedValue({
+      messageId: 'noop-123',
+      delivered: true,
+    });
+    configService.get.mockReturnValue('resend');
+
+    const result = await controller.sendTestEmail({ to: 'you@example.com' });
+
+    expect(result).toEqual({
+      to: 'you@example.com',
+      provider: 'resend',
+      messageId: 'noop-123',
+      delivered: true,
+    });
+    expect(emailChannel.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'you@example.com',
+        template: 'test',
+      }),
+    );
   });
 });

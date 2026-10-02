@@ -55,9 +55,12 @@ import { NotificationsController } from './notifications.controller';
         smtp: SmtpEmailProvider,
         noop: NoopEmailProvider,
       ) => {
-        // EMAIL_PROVIDER switch is config-driven (smtp in prod, noop in dev/test) — never hardcoded
+        // EMAIL_PROVIDER switch is config-driven (smtp/resend in prod, noop in dev/test) — never hardcoded
         const provider = config.get<string>('EMAIL_PROVIDER') ?? 'noop';
-        return provider.toLowerCase() === 'smtp' ? smtp : noop;
+        // 'resend' uses Resend's SMTP relay via the same nodemailer transport
+        return ['smtp', 'resend'].includes(provider.toLowerCase())
+          ? smtp
+          : noop;
       },
     },
   ],

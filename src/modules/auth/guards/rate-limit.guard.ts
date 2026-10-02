@@ -46,6 +46,7 @@ const DEFAULT_LIMITS: Record<string, { max: number; windowMs: number }> = {
   'POST /auth/resend-verification': { max: 5, windowMs: 3600_000 },
   'POST /auth/resend-verification:email': { max: 3, windowMs: 3600_000 },
   'POST /admin/notifications/sales': { max: 10, windowMs: 3600_000 },
+  'POST /admin/notifications/test-email': { max: 10, windowMs: 3600_000 },
 };
 
 /**
@@ -393,6 +394,7 @@ export class RateLimitGuard implements CanActivate {
       'DELETE /cart/:cartItemId',
       'products:mutation',
       'POST /admin/notifications/sales',
+      'POST /admin/notifications/test-email',
     ]);
 
     if (perUserRoutes.has(routeKey)) {

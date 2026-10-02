@@ -12,6 +12,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -21,6 +22,8 @@ import { RateLimitGuard } from '../auth/guards/rate-limit.guard';
 import { UserRoles } from '../users/enum/roles';
 import { CreateSalesNotificationDto } from './dto/create-sales-notification.dto';
 import { NotificationHistoryQueryDto } from './dto/notification-history-query.dto';
+import { TestEmailDto } from './dto/test-email.dto';
+import { EmailChannel } from './channels/email.channel';
 import { NotificationService } from './notification.service';
 import { Notification } from './entities/notification.entity';
 
@@ -32,6 +35,8 @@ import { Notification } from './entities/notification.entity';
 export class NotificationsController {
   constructor(
     private readonly notificationService: NotificationService,
+    private readonly emailChannel: EmailChannel,
+    private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
@@ -68,8 +73,50 @@ export class NotificationsController {
     return { jobId, message: 'Bulk notification enqueued' };
   }
 
-  // ---- History routes ----
+  // ---- Config probe routes ----
 
+  /**
+   * Sends a one-off test email to verify SMTP/provider configuration.
+   * Bypasses outbox/dedup/history — it is a config probe, not a business notification.
+   * @param dto - Recipient plus optional subject/body.
+   * @returns Provider accept result including the active provider name.
+   */
+  @Post('admin/notifications/test-email')
+  @UseGuards(RateLimitGuard)
+  @Auth(UserRoles.Admin)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({ summary: 'Send test email (SMTP config probe)' })
+  @ApiResponse({ status: 200, description: 'Provider accepted the message' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden — Admin only' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
+  async sendTestEmail(@Body() dto: TestEmailDto): Promise<{
+    to: string;
+    provider: string;
+    messageId?: string;
+    delivered: boolean;
+  }> {
+    // Active provider is echoed so noop vs real SMTP is unambiguous in the response
+    const provider = this.configService.get<string>('EMAIL_PROVIDER') ?? 'noop';
+    const result = await this.emailChannel.send({
+      to: dto.to,
+      userId: 'admin-probe',
+      subject: dto.subject ?? 'Mini E-Commerce SMTP test',
+      template: 'test',
+      vars: { body: dto.body ?? 'SMTP configuration probe' },
+    });
+    return {
+      to: dto.to,
+      provider,
+      messageId: result.messageId,
+      delivered: result.delivered,
+    };
+  }
+
+  // ---- History routes ----
   /**
    * Lists the caller's notification history (owner paginated, newest first).
    * @param query - Pagination + optional isRead/channel/type filters (+ Admin-only userId scope).
