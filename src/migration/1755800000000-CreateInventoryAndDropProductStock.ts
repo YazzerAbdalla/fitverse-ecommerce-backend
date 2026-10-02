@@ -1,4 +1,4 @@
-import { MigrationInterface, QueryRunner } from 'typeorm';
+import type { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class CreateInventoryAndDropProductStock1755800000000 implements MigrationInterface {
   name = 'CreateInventoryAndDropProductStock1755800000000';

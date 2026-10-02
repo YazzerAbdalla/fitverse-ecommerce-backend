@@ -1,4 +1,4 @@
-import { MigrationInterface, QueryRunner } from 'typeorm';
+import type { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
  * This migration is responsible for Phase 18 email/delivery-state persistence (specs/014-email-service T008+T065).

@@ -1,4 +1,4 @@
-import { MigrationInterface, QueryRunner } from 'typeorm';
+import type { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class CreateReservationAndReservationItem1755850000000 implements MigrationInterface {
   name = 'CreateReservationAndReservationItem1755850000000';
