@@ -1475,6 +1475,8 @@ Email service is complete when:
 [x] Unit 15+ and integration 7+ and E2E 2 flows PASS, including concurrent verify same token → single winner
 ```
 
+> **Delivery-state note (2026-10-01, `specs/014-email-service` US6/US7)**: `SENT` is renamed `SENT_TO_MQ` (broker accepted). The worker writes `CONSUMED` (received + dedup passed + manual `ACK`) and per-channel `NotificationDelivery (eventId, channel)` rows move `PENDING → SENT → DELIVERED → FAILED`; `Notification.isRead/readAt` tracks READ separately. Dispatch reuses the existing `NotificationsModule` via `Strategy + Factory` with two V1 channels — `SYSTEM` (WebSocket realtime, offline stays `SENT`) and `EMAIL` — resolved at runtime (`verify/reset` always both; otherwise both if opted-in else system-only). History: `GET /notifications` + `unread-count` + `PATCH :id/read` + `read-all`. See `specs/014-email-service/spec.md` (FR-016–FR-021, SC-009/SC-010), `plan.md` (Delivery-State Model), `data-model.md` (§3b–§3d).
+
 ## 18.11 Out of Scope (this phase)
 
 * Unsubscribe via List-Unsubscribe header + signed token (future, keep PATCH preferences as V1 opt-out).

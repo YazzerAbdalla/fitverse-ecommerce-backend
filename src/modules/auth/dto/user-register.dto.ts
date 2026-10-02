@@ -1,6 +1,17 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEmail, IsNotEmpty, MaxLength, MinLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsEmail,
+  IsNotEmpty,
+  IsOptional,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
+/**
+ * This DTO validates user registration input.
+ * It handles optional notification opt-in flags stored directly on User.
+ */
 export class UserRegisterDto {
   @IsNotEmpty()
   @MaxLength(30)
@@ -20,4 +31,14 @@ export class UserRegisterDto {
   @MinLength(4)
   @ApiProperty({ example: 'Yasser@123' })
   password!: string;
+
+  @IsOptional()
+  @IsBoolean()
+  @ApiProperty({ example: false, required: false, default: false })
+  marketingOptIn?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  @ApiProperty({ example: true, required: false, default: true })
+  emailOptIn?: boolean;
 }

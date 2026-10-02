@@ -11,12 +11,17 @@ import {
   Unique,
 } from 'typeorm';
 import { UserRoles } from '../enum/roles';
+import { RefreshToken } from 'src/modules/auth/entities/refresh-token.entity';
 
 export enum AuthProvider {
   Local = 'local',
   Google = 'google',
 }
 
+/**
+ * This entity represents an application user.
+ * It handles identity, credentials, verification flags and notification preferences.
+ */
 @Entity()
 @Unique(['email'])
 @Check(`"provider" IN ('local','google')`)
@@ -62,9 +67,18 @@ export default class User {
   @Column({ default: false })
   emailVerified!: boolean;
 
+  @Column({ default: false })
+  marketingOptIn!: boolean;
+
+  @Column({ default: true })
+  emailOptIn!: boolean;
+
   @OneToMany(() => Order, (order) => order.user)
   orders!: Order[];
 
   @OneToOne(() => Cart, (cart) => cart.user)
   cart!: Cart;
+
+  @OneToMany(() => RefreshToken, (rt) => rt.user)
+  refreshTokens!: RefreshToken[];
 }

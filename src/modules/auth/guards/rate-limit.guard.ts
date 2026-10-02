@@ -13,6 +13,7 @@ import type { Cache } from 'cache-manager';
 import { Request } from 'express';
 import { ConfigService } from '@nestjs/config';
 import { GqlExecutionContext } from '@nestjs/graphql';
+import crypto from 'crypto';
 
 const DEFAULT_LIMITS: Record<string, { max: number; windowMs: number }> = {
   'POST /auth/forgot-password': { max: 5, windowMs: 3600_000 },
@@ -40,14 +41,24 @@ const DEFAULT_LIMITS: Record<string, { max: number; windowMs: number }> = {
   'DELETE /cart': { max: 60, windowMs: 3600_000 },
   'DELETE /cart/:cartItemId': { max: 60, windowMs: 3600_000 },
   'products:mutation': { max: 30, windowMs: 3600_000 },
+  // Phase 18 — Email Service (specs/014-email-service FR-009, T017)
+  'GET /auth/verify-email': { max: 10, windowMs: 3600_000 },
+  'POST /auth/verify-email': { max: 10, windowMs: 3600_000 },
+  'POST /auth/resend-verification': { max: 5, windowMs: 3600_000 },
+  'POST /auth/resend-verification:email': { max: 3, windowMs: 3600_000 },
+  'POST /admin/notifications/sales': { max: 10, windowMs: 3600_000 },
+  'POST /admin/notifications/test-email': { max: 10, windowMs: 3600_000 },
 };
 
 /**
  * This guard is responsible for distributed per-route rate limiting (Redis shared, fail-open).
  * It handles IP and per-email/phone/user buckets via the shared CACHE_MANAGER (createKeyv REDIS_URL),
- * enforces fixed-window quotas (auth 5-20/h, checkout/complete 10/h/user, cart 60/h/user, product 30/h/admin),
+ * enforces fixed-window quotas (auth 5-20/h, checkout/complete 10/h/user, cart 60/h/user, product 30/h/admin,
+ * verify-email 10/h/IP, resend-verification 5/h/IP + 3/h/email, sales 10/h/user),
  * applies outermost before JwtGuard/DataSource.transaction so throttling never holds inventory FOR UPDATE,
  * and fails open on Redis errors (warn + allow).
+ * Note: resend-verification 60s per-email cooldown (resend:cooldown:<email> SET NX EX 60) is enforced
+ * in AuthService.resendVerification, not in this guard — the guard handles the two hourly rate buckets only.
  */
 @Injectable()
 export class RateLimitGuard implements CanActivate {
@@ -86,8 +97,20 @@ export class RateLimitGuard implements CanActivate {
       'REFRESH_HASH_RL_MAX',
       DEFAULT_LIMITS['POST /auth/refresh:hash'].max,
     );
+    const verifyMax = this.getConfigMax(
+      'VERIFY_EMAIL_RL_MAX',
+      DEFAULT_LIMITS['GET /auth/verify-email'].max,
+    );
+    const resendMax = this.getConfigMax(
+      'RESEND_VERIFICATION_RL_MAX',
+      DEFAULT_LIMITS['POST /auth/resend-verification'].max,
+    );
+    const salesMax = this.getConfigMax(
+      'SALES_NOTIFICATION_RL_MAX',
+      DEFAULT_LIMITS['POST /admin/notifications/sales'].max,
+    );
     this.logger.log(
-      `RateLimit guards: auth 5-20/h (refresh ${refreshMax}/h + hash ${refreshHashMax}/h, logout 20/h, logout-all 10/h), checkout ${checkoutMax}/h/user (win ${checkoutWin}ms), cart ${cartMax}/h/user, product ${prodMax}/h/admin (REDIS_URL ${redisUrl ? 'set, distributed' : 'unset, in-memory'})`,
+      `RateLimit guards: auth 5-20/h (refresh ${refreshMax}/h + hash ${refreshHashMax}/h, logout 20/h, logout-all 10/h), checkout ${checkoutMax}/h/user (win ${checkoutWin}ms), cart ${cartMax}/h/user, product ${prodMax}/h/admin, verify ${verifyMax}/h/IP, resend ${resendMax}/h/IP, sales ${salesMax}/h/user (REDIS_URL ${redisUrl ? 'set, distributed' : 'unset, in-memory'})`,
     );
   }
 
@@ -134,7 +157,7 @@ export class RateLimitGuard implements CanActivate {
     } catch (e) {
       if (
         e instanceof HttpException &&
-        e.getStatus() === HttpStatus.TOO_MANY_REQUESTS
+        e.getStatus() === Number(HttpStatus.TOO_MANY_REQUESTS)
       )
         throw e;
       this.logger.warn(`RateLimit Redis fail-open for ${routeKey}: ${e}`);
@@ -238,7 +261,6 @@ export class RateLimitGuard implements CanActivate {
       let hashPrefix: string | null = null;
       if (typeof raw === 'string' && /^[0-9a-f]{64}$/.test(raw)) {
         try {
-          const crypto = require('crypto');
           const h = crypto
             .createHash('sha256')
             .update(raw)
@@ -330,8 +352,36 @@ export class RateLimitGuard implements CanActivate {
       buckets.push(makeBucket(ipKey, 'ip', ip, ipMax, ipWin));
       return buckets;
     }
+    if (routeKey === 'POST /auth/resend-verification') {
+      const buckets: any[] = [];
+      const ip = this.extractIp(req);
+      const ipMax = this.getEffectiveMax(
+        routeKey,
+        DEFAULT_LIMITS[routeKey].max,
+      );
+      const ipWin = this.getEffectiveWindow(
+        routeKey,
+        DEFAULT_LIMITS[routeKey].windowMs,
+      );
+      buckets.push(makeBucket(routeKey, 'ip', ip, ipMax, ipWin));
+      // Per-email bucket only when body.email present (dual-bucket: either 429 before FOR UPDATE)
+      if (req.body?.email) {
+        const email = String(req.body.email).toLowerCase();
+        const emailKey = 'POST /auth/resend-verification:email';
+        const emailMax = this.getEffectiveMax(
+          emailKey,
+          DEFAULT_LIMITS[emailKey].max,
+        );
+        const emailWin = this.getEffectiveWindow(
+          emailKey,
+          DEFAULT_LIMITS[emailKey].windowMs,
+        );
+        buckets.push(makeBucket(emailKey, 'email', email, emailMax, emailWin));
+      }
+      return buckets;
+    }
 
-    // Order / Cart / Product per-user logic
+    // Order / Cart / Product / Sales per-user logic
     const perUserRoutes = new Set([
       'POST /order/checkout',
       'POST /order',
@@ -343,6 +393,8 @@ export class RateLimitGuard implements CanActivate {
       'DELETE /cart',
       'DELETE /cart/:cartItemId',
       'products:mutation',
+      'POST /admin/notifications/sales',
+      'POST /admin/notifications/test-email',
     ]);
 
     if (perUserRoutes.has(routeKey)) {
@@ -458,6 +510,12 @@ export class RateLimitGuard implements CanActivate {
       'POST /auth/refresh:hash': 'REFRESH_HASH_RL_MAX',
       'POST /auth/logout': 'LOGOUT_RL_MAX',
       'POST /auth/logout-all': 'LOGOUT_ALL_RL_MAX',
+      'GET /auth/verify-email': 'VERIFY_EMAIL_RL_MAX',
+      'POST /auth/verify-email': 'VERIFY_EMAIL_RL_MAX',
+      'POST /auth/resend-verification': 'RESEND_VERIFICATION_RL_MAX',
+      'POST /auth/resend-verification:email':
+        'RESEND_VERIFICATION_EMAIL_RL_MAX',
+      'POST /admin/notifications/sales': 'SALES_NOTIFICATION_RL_MAX',
     };
     const envKey = envMap[routeKey];
     if (!envKey) return fallback;
@@ -486,6 +544,12 @@ export class RateLimitGuard implements CanActivate {
       'POST /auth/refresh:hash': 'REFRESH_HASH_RL_WINDOW_MS',
       'POST /auth/logout': 'LOGOUT_RL_WINDOW_MS',
       'POST /auth/logout-all': 'LOGOUT_ALL_RL_WINDOW_MS',
+      'GET /auth/verify-email': 'VERIFY_EMAIL_RL_WINDOW_MS',
+      'POST /auth/verify-email': 'VERIFY_EMAIL_RL_WINDOW_MS',
+      'POST /auth/resend-verification': 'RESEND_VERIFICATION_RL_WINDOW_MS',
+      'POST /auth/resend-verification:email':
+        'RESEND_VERIFICATION_EMAIL_RL_WINDOW_MS',
+      'POST /admin/notifications/sales': 'SALES_NOTIFICATION_RL_WINDOW_MS',
     };
     const envKey = envMap[routeKey];
     if (!envKey) return fallback;

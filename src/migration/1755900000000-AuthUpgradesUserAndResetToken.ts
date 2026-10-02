@@ -1,4 +1,4 @@
-import { MigrationInterface, QueryRunner } from 'typeorm';
+import type { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class AuthUpgradesUserAndResetToken1755900000000 implements MigrationInterface {
   name = 'AuthUpgradesUserAndResetToken1755900000000';

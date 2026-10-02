@@ -5,6 +5,7 @@ import {
   HttpException,
   HttpStatus,
   Post,
+  Query,
   Req,
   Request,
   Res,
@@ -30,6 +31,8 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RateLimitGuard } from './guards/rate-limit.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { RefreshTokenDto, LogoutDto } from './dto/refresh-token.dto';
+import { VerifyEmailDto } from './dto/verify-email.dto';
+import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { ConfigService } from '@nestjs/config';
 import { Auth } from './decorators/auth.decorator';
 
@@ -118,7 +121,10 @@ export class AuthController {
     @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     const user: Partial<User> = req.user;
+    console.log('🚀 ~ AuthController ~ login ~ user:', user);
     const result = await this.authService.login(user);
+    console.log('🚀 ~ AuthController ~ login ~ result:', result);
+
     // Set HttpOnly refresh cookie for browser clients
     res.cookie(
       this.getRefreshCookieName(),
@@ -162,6 +168,44 @@ export class AuthController {
   async resetPassword(@Body() dto: ResetPasswordDto) {
     await this.authService.resetPassword(dto);
     return { message: 'Password reset successful.' };
+  }
+
+  @Get('/verify-email')
+  @UseGuards(RateLimitGuard)
+  @ApiOperation({ summary: 'Verify email via link' })
+  @ApiResponse({ status: 200, description: 'Email verified' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired token' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
+  async verifyEmailGet(@Query() dto: VerifyEmailDto) {
+    return await this.authService.verifyEmail(dto);
+  }
+
+  @Post('/verify-email')
+  @UseGuards(RateLimitGuard)
+  @ApiOperation({ summary: 'Verify email via body' })
+  @ApiResponse({ status: 200, description: 'Email verified' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired token' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 3600',
+  })
+  async verifyEmailPost(@Body() dto: VerifyEmailDto) {
+    return await this.authService.verifyEmail(dto);
+  }
+
+  @Post('/resend-verification')
+  @UseGuards(RateLimitGuard)
+  @ApiOperation({ summary: 'Resend verification email (anti-enumeration)' })
+  @ApiResponse({ status: 200, description: 'Anti-enum message' })
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests — Retry-After: 60 or 3600',
+  })
+  async resendVerification(@Body() dto: ResendVerificationDto) {
+    return await this.authService.resendVerification(dto.email);
   }
 
   // TODO (Future) — WhatsApp OTP deferred per 2026-09-16, password-only login in V1

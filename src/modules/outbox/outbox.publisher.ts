@@ -18,13 +18,15 @@ import { OutboxStatus } from './entities/outbox-status.enum';
 /**
  * This publisher is responsible for outbox relay to RabbitMQ.
  * It handles claiming PENDING/lease-expired rows via FOR UPDATE SKIP LOCKED and publishing persisted payloads.
- * SENT means published to RabbitMQ transport, not that consumer processed the event.
+ * SENT_TO_MQ means published to RabbitMQ transport, not that consumer processed the event.
  * Uses processingToken for safe lease ownership so a stale publisher cannot overwrite a reclaimed event.
  */
 @Injectable()
 export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OutboxPublisher.name);
   private interval: NodeJS.Timeout | null = null;
+  // Guards the transport-missing notice so a missing broker doesn't spam one log line per poll
+  private transportSkipLogged = false;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -58,10 +60,19 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       );
     }, intervalMs);
     // Allow process to exit even if interval remains
-    if (this.interval && typeof (this.interval as any).unref === 'function') {
-      (this.interval as any).unref();
+    if (this.interval && typeof this.interval.unref === 'function') {
+      this.interval.unref();
     }
     this.logger.log(`outbox publisher polling every ${intervalMs}ms`);
+    // Surface missing transport once at startup instead of once per poll
+    this.logTransportSkip(
+      !this.configService.get<string>('RABBITMQ_URL'),
+      'RABBITMQ_URL not set, outbox rows will stay PENDING until a broker is configured',
+    );
+    this.logTransportSkip(
+      !this.client,
+      'NOTIFICATION_SERVICE not available, skipping publish',
+    );
   }
 
   /**
@@ -119,6 +130,23 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Logs a transport-missing skip once (warn) and at debug afterwards.
+   * Prevents one log line per poll when no broker is configured.
+   * @param missing - Whether the transport is currently unavailable.
+   * @param message - Message describing the skip reason.
+   */
+  private logTransportSkip(missing: boolean, message: string): void {
+    if (!missing) return;
+    // First occurrence warns so the misconfiguration stays visible; later polls debug only
+    if (!this.transportSkipLogged) {
+      this.logger.warn(`outbox ${message}`);
+      this.transportSkipLogged = true;
+      return;
+    }
+    this.logger.debug(`outbox ${message}`);
+  }
+
+  /**
    * Polls and publishes a batch of pending outbox events.
    * @param limit - Optional batch size override.
    * @returns Count of claimed/sent/failed.
@@ -133,12 +161,15 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
 
     const rabbitUrl = this.configService.get<string>('RABBITMQ_URL');
     if (!rabbitUrl) {
-      this.logger.log('RABBITMQ_URL not set, skipping publish');
+      this.logTransportSkip(true, 'RABBITMQ_URL not set, skipping publish');
       return { claimed: 0, sent: 0, failed: 0, retried: 0 };
     }
 
     if (!this.client) {
-      this.logger.log('NOTIFICATION_SERVICE not available, skipping publish');
+      this.logTransportSkip(
+        true,
+        'NOTIFICATION_SERVICE not available, skipping publish',
+      );
       return { claimed: 0, sent: 0, failed: 0, retried: 0 };
     }
 
@@ -161,7 +192,9 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         .orderBy('e.createdAt', 'ASC')
         .addOrderBy('e.id', 'ASC')
         .limit(lim)
-        .setLock('pessimistic_write', undefined, { skipLocked: true } as any);
+        .setLock('pessimistic_write')
+        // SKIP LOCKED lives on setOnLocked in this TypeORM version (setLock's 3rd arg is lockTables: string[])
+        .setOnLocked('skip_locked');
 
       const rows = await qb.getMany();
       if (rows.length === 0) {
@@ -173,14 +206,14 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       const ids = rows.map((r) => r.id);
       const claimToken = randomUUID();
       // Support both repo.update (simple) and queryBuilder (mock compatibility)
-      if (typeof (repo as any).update === 'function') {
-        await (repo as any).update(ids as any, {
-          status: OutboxStatus.PROCESSING as any,
-          processingStartedAt: new Date() as any,
-          processingToken: claimToken as any,
+      if (typeof repo.update === 'function') {
+        await repo.update(ids, {
+          status: OutboxStatus.PROCESSING,
+          processingStartedAt: new Date(),
+          processingToken: claimToken,
         });
-      } else if (typeof (repo as any).createQueryBuilder === 'function') {
-        const qb: any = (repo as any).createQueryBuilder();
+      } else if (typeof repo.createQueryBuilder === 'function') {
+        const qb = repo.createQueryBuilder();
         if (qb && typeof qb.update === 'function') {
           await qb
             .update(OutboxEvent)
@@ -200,7 +233,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       claimedEvents = rows.map((r) => {
         r.status = OutboxStatus.PROCESSING;
         r.processingStartedAt = new Date();
-        (r as any).processingToken = claimToken;
+        r.processingToken = claimToken;
         return r;
       });
 
@@ -223,19 +256,15 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         // client.emit returns Observable; await via lastValueFrom for ACK (RabbitMQ accept)
         const obs = this.client.emit(event.eventType, payload);
         if (
-          (obs && typeof (obs as any).toPromise === 'function') ||
+          (obs && typeof obs.toPromise === 'function') ||
           typeof lastValueFrom === 'function'
         ) {
           // Use lastValueFrom if available, else subscribe callback
-          try {
-            await lastValueFrom(obs as any);
-          } catch (e: any) {
-            // If lastValueFrom throws, treat as failure
-            throw e;
-          }
-        } else if (obs && typeof (obs as any).subscribe === 'function') {
+
+          await lastValueFrom(obs);
+        } else if (obs && typeof obs.subscribe === 'function') {
           await new Promise<void>((resolve, reject) => {
-            (obs as any).subscribe({
+            obs.subscribe({
               next: () => resolve(),
               error: (err: any) => reject(err),
               complete: () => resolve(),
@@ -246,25 +275,23 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         // Success: mark SENT only if still owned by this publisher (token check) — prevents A overwriting B after lease reclaim
         let sentAffected = 1;
         try {
-          if (
-            typeof (this.dataSource as any).createQueryBuilder === 'function'
-          ) {
-            const res = await (this.dataSource as any)
+          if (typeof this.dataSource.createQueryBuilder === 'function') {
+            const res = await this.dataSource
               .createQueryBuilder()
               .update(OutboxEvent)
               .set({
-                status: OutboxStatus.SENT as any,
-                sentAt: new Date() as any,
-                lastError: null as any,
-                processingStartedAt: null as any,
-                processingToken: null as any,
+                status: OutboxStatus.SENT_TO_MQ,
+                sentAt: new Date(),
+                lastError: null,
+                processingStartedAt: null,
+                processingToken: null,
               })
               .where(
                 'id = :id AND status = :status AND processingToken = :token',
                 {
                   id: event.id,
                   status: OutboxStatus.PROCESSING,
-                  token: (event as any).processingToken,
+                  token: event.processingToken,
                 },
               )
               .execute();
@@ -275,7 +302,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         } catch {
           // Fallback for test mocks that only support getRepository.update
           await this.dataSource.getRepository(OutboxEvent).update(event.id, {
-            status: OutboxStatus.SENT,
+            status: OutboxStatus.SENT_TO_MQ,
             sentAt: new Date(),
             lastError: null,
             processingStartedAt: null,
@@ -303,28 +330,24 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
         // Failure: mark PENDING/FAILED only if still owned (token check) — prevents late A overwriting B
         let failAffected = 1;
         try {
-          if (
-            typeof (this.dataSource as any).createQueryBuilder === 'function'
-          ) {
-            const res = await (this.dataSource as any)
+          if (typeof this.dataSource.createQueryBuilder === 'function') {
+            const res = await this.dataSource
               .createQueryBuilder()
               .update(OutboxEvent)
               .set({
-                attempts: nextAttempts as any,
-                lastError: msg as any,
-                nextRetryAt: nextRetryAt as any,
-                status: (willFail
-                  ? OutboxStatus.FAILED
-                  : OutboxStatus.PENDING) as any,
-                processingStartedAt: null as any,
-                processingToken: null as any,
+                attempts: nextAttempts,
+                lastError: msg,
+                nextRetryAt: nextRetryAt,
+                status: willFail ? OutboxStatus.FAILED : OutboxStatus.PENDING,
+                processingStartedAt: null,
+                processingToken: null,
               })
               .where(
                 'id = :id AND status = :status AND processingToken = :token',
                 {
                   id: event.id,
                   status: OutboxStatus.PROCESSING,
-                  token: (event as any).processingToken,
+                  token: event.processingToken,
                 },
               )
               .execute();

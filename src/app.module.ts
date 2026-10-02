@@ -5,7 +5,6 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GraphQLModule } from '@nestjs/graphql';
 import { BullModule } from '@nestjs/bullmq';
-import { ClientsModule, Transport } from '@nestjs/microservices';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { join } from 'path';
 import { AppController } from './app.controller';
@@ -21,6 +20,7 @@ import { ReservationModule } from './modules/reservation/reservation.module';
 import { UsersModule } from './modules/users/users.module';
 import { OutboxModule } from './modules/outbox/outbox.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { MessagingModule } from './modules/messaging/messaging.module';
 
 @Module({
   imports: [
@@ -59,26 +59,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
         };
       },
     }),
-    ClientsModule.registerAsync([
-      {
-        name: 'NOTIFICATION_SERVICE',
-        imports: [ConfigModule], // Import ConfigModule here
-        useFactory: (configService: ConfigService) => ({
-          transport: Transport.RMQ,
-          options: {
-            urls: [configService.get<string>('RABBITMQ_URL')!], // Read from .env
-            queue: configService.get<string>(
-              'RABBITMQ_QUEUE',
-              'notification_queue',
-            ),
-            queueOptions: {
-              durable: true,
-            },
-          },
-        }),
-        inject: [ConfigService], // Inject ConfigService
-      },
-    ]),
+    MessagingModule,
     GraphQLModule.forRoot<ApolloDriverConfig>({
       driver: ApolloDriver,
       autoSchemaFile: join(process.cwd(), 'src/schema.gql'),

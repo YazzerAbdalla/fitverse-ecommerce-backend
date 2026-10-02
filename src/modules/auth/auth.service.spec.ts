@@ -506,4 +506,313 @@ describe('AuthService', () => {
       ).rejects.toThrow(BadRequestException);
     });
   });
+
+  // ===================== T019: requestEmailVerification fire-and-forget (US1) =====================
+  describe('requestEmailVerification (T019 US1)', () => {
+    const user = {
+      id: 'user-1',
+      email: 'alice@example.com',
+      emailVerified: false,
+    } as any;
+
+    beforeEach(() => {
+      mockUserRepo.findOne = jest.fn();
+      mockTokenRepo.findOne.mockReset?.();
+      mockQueryBuilder.execute.mockClear();
+      mockTokenRepo.create.mockClear();
+      mockTokenRepo.save.mockClear();
+      dataSource.transaction.mockClear();
+      cacheManager.get.mockResolvedValue(undefined);
+      cacheManager.set.mockResolvedValue(undefined);
+      // EMAIL_VERIFICATION_TTL 24h for US1 (shared mock defaults to 15m for reset)
+      configService.get.mockImplementation((key: string) =>
+        key === 'EMAIL_VERIFICATION_TTL' ? '24h' : '15m',
+      );
+    });
+
+    it('not found → void anti-enum, 0 transaction', async () => {
+      usersService.findUserByEmail.mockResolvedValue(null);
+      await expect(
+        service.requestEmailVerification('nobody@example.com'),
+      ).resolves.toBeUndefined();
+      expect(logger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('nobody@example.com'),
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('emailVerified true → void, 0 transaction, 0 insert', async () => {
+      usersService.findUserByEmail.mockResolvedValue({
+        ...user,
+        emailVerified: true,
+      });
+      await expect(
+        service.requestEmailVerification(user.email),
+      ).resolves.toBeUndefined();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('emailVerified false → UPDATE priors + INSERT 24h sha256 + emit once, EmailProvider.send not called directly', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      const before = Date.now();
+      await service.requestEmailVerification(user.email);
+      const after = Date.now();
+
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      // invalidate priors via UPDATE usedAt
+      expect(mockQueryBuilder.update).toHaveBeenCalled();
+      expect(mockQueryBuilder.set).toHaveBeenCalledWith(
+        expect.objectContaining({ usedAt: expect.any(Date) }),
+      );
+      // INSERT new token
+      expect(mockTokenRepo.create).toHaveBeenCalledTimes(1);
+      expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
+      const created = mockTokenRepo.create.mock.calls[0][0];
+      expect(created.userId).toBe(user.id);
+      expect(created.tokenHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(created.usedAt).toBeNull();
+      // expiresAt ~24h
+      const ttl = 24 * 3600 * 1000;
+      expect(created.expiresAt.getTime()).toBeGreaterThanOrEqual(
+        before + ttl - 5000,
+      );
+      expect(created.expiresAt.getTime()).toBeLessThanOrEqual(
+        after + ttl + 5000,
+      );
+      // test hook captures raw, hash matches sha256(raw)
+      const raw = service.lastVerificationToken!;
+      expect(raw).toMatch(/^[a-f0-9]{64}$/);
+      expect(created.tokenHash).toBe(
+        crypto.createHash('sha256').update(raw).digest('hex'),
+      );
+      // emit after commit exactly once; service never calls EmailProvider.send directly
+      expect(emitSpy).toHaveBeenCalledTimes(1);
+      expect(emitSpy).toHaveBeenCalledWith(
+        'email.verification_requested',
+        expect.objectContaining({ userId: user.id, email: user.email }),
+      );
+      expect((service as any).emailProvider).toBeUndefined();
+      emitSpy.mockRestore();
+    });
+  });
+
+  // ===================== T020: verifyEmail FOR UPDATE (US1) =====================
+  describe('verifyEmail (T020 US1)', () => {
+    const user = {
+      id: 'user-1',
+      email: 'alice@example.com',
+      emailVerified: false,
+    } as any;
+    const raw = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const future = new Date(Date.now() + 10 * 60 * 1000);
+    const past = new Date(Date.now() - 60 * 1000);
+
+    beforeEach(() => {
+      mockUserRepo.findOne = jest.fn().mockResolvedValue({ ...user });
+      mockUserRepo.update.mockClear();
+      mockTokenRepo.update = jest.fn(async () => ({ affected: 1 }));
+      mockQueryBuilder.setLock.mockClear();
+      mockQueryBuilder.where.mockClear();
+      mockQueryBuilder.getOne.mockReset();
+      dataSource.transaction.mockClear();
+    });
+
+    function mockVerifyRow(row: any) {
+      // service uses manager.getRepository(EmailVerificationToken).findOne({where, lock}) OR QB; support both
+      mockTokenRepo.findOne = jest.fn().mockResolvedValue(row);
+      mockQueryBuilder.getOne.mockResolvedValue(row);
+    }
+
+    it('valid → 200 usedAt NOW + emailVerified true', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      const row = {
+        id: 'tok-1',
+        tokenHash,
+        userId: user.id,
+        expiresAt: future,
+        usedAt: null,
+      };
+      mockVerifyRow(row);
+      const res = await service.verifyEmail({ email: user.email, token: raw });
+      expect(res).toEqual({ verified: true, emailVerified: true });
+      // FOR UPDATE used (either findOne lock or QB setLock)
+      const usedForUpdate =
+        mockQueryBuilder.setLock.mock.calls.some(
+          (c: any[]) => c[0] === 'pessimistic_write',
+        ) ||
+        (mockTokenRepo.findOne.mock.calls.some((c: any[]) =>
+          JSON.stringify(c[0] ?? {}).includes('pessimistic_write'),
+        ) as boolean);
+      expect(usedForUpdate).toBe(true);
+    });
+
+    it('usedAt NOT NULL → 400', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      mockVerifyRow({
+        id: 'tok-1',
+        tokenHash,
+        userId: user.id,
+        expiresAt: future,
+        usedAt: new Date(),
+      });
+      await expect(
+        service.verifyEmail({ email: user.email, token: raw }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('expiresAt <= NOW → 400', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      mockVerifyRow({
+        id: 'tok-1',
+        tokenHash,
+        userId: user.id,
+        expiresAt: past,
+        usedAt: null,
+      });
+      await expect(
+        service.verifyEmail({ email: user.email, token: raw }),
+      ).rejects.toThrow('Invalid or expired verification token');
+    });
+
+    it('unknown email → 400 (no 404 leak)', async () => {
+      usersService.findUserByEmail.mockResolvedValue(null);
+      await expect(
+        service.verifyEmail({ email: 'nobody@example.com', token: raw }),
+      ).rejects.toThrow(BadRequestException);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('logs hashPrefix only, never raw', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      mockVerifyRow({
+        id: 'tok-1',
+        tokenHash,
+        userId: user.id,
+        expiresAt: future,
+        usedAt: null,
+      });
+      await service.verifyEmail({ email: user.email, token: raw });
+      const allLogs = [
+        ...logger.log.mock.calls,
+        ...logger.debug.mock.calls,
+        ...logger.warn.mock.calls,
+        ...logger.error.mock.calls,
+      ]
+        .map((c) => String(c[0] ?? ''))
+        .join('\n');
+      expect(allLogs).not.toContain(raw);
+    });
+  });
+
+  // ===================== T027: resendVerification anti-enum/cooldown (US2) =====================
+  describe('resendVerification (T027 US2)', () => {
+    const user = {
+      id: 'user-1',
+      email: 'alice@example.com',
+      emailVerified: false,
+    } as any;
+
+    beforeEach(() => {
+      dataSource.transaction.mockClear();
+      mockTokenRepo.create.mockClear();
+      mockTokenRepo.save.mockClear();
+      cacheManager.get.mockReset();
+      cacheManager.set.mockReset();
+      cacheManager.get.mockResolvedValue(undefined);
+      cacheManager.set.mockResolvedValue(undefined);
+      configService.get.mockImplementation((key: string) =>
+        key === 'EMAIL_VERIFICATION_TTL' ? '24h' : '15m',
+      );
+    });
+
+    it('cooldown key exists → 429, 0 transaction', async () => {
+      cacheManager.get.mockResolvedValue('1');
+      await expect(service.resendVerification(user.email)).rejects.toThrow(
+        expect.objectContaining({ status: 429 }),
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('not found → 200 anti-enum, 0 insert', async () => {
+      usersService.findUserByEmail.mockResolvedValue(null);
+      const res = await service.resendVerification('nobody@example.com');
+      expect(res).toEqual({
+        message: 'If an account exists, a verification email has been sent.',
+      });
+      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('verified true → 200 distinct, 0 insert', async () => {
+      usersService.findUserByEmail.mockResolvedValue({
+        ...user,
+        emailVerified: true,
+      });
+      const res = await service.resendVerification(user.email);
+      expect(res).toEqual({ message: 'Email already verified' });
+      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('unverified → UPDATE priors + INSERT 24h + emit + cooldown set', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      const res = await service.resendVerification(user.email);
+      expect(res).toEqual({
+        message: 'If an account exists, a verification email has been sent.',
+      });
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
+      const created = mockTokenRepo.create.mock.calls[0][0];
+      expect(created.tokenHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(emitSpy).toHaveBeenCalledTimes(1);
+      expect(emitSpy).toHaveBeenCalledWith(
+        'email.verification_requested',
+        expect.objectContaining({ userId: user.id }),
+      );
+      // cooldown SET NX EX 60 recorded via cache.set
+      expect(cacheManager.set).toHaveBeenCalledWith(
+        expect.stringContaining('resend:cooldown:'),
+        expect.anything(),
+        expect.any(Number),
+      );
+      emitSpy.mockRestore();
+    });
+  });
+
+  // ===================== T032: forgotPassword wired emit (US3) =====================
+  describe('forgotPassword wired emit (T032 US3)', () => {
+    const user = { id: 'user-1', email: 'alice@example.com' } as any;
+
+    beforeEach(() => {
+      dataSource.transaction.mockClear();
+      mockTokenRepo.create.mockClear();
+      mockTokenRepo.save.mockClear();
+    });
+
+    it('existing user → INSERT 15m + emit auth.password_reset_requested once', async () => {
+      usersService.findUserByEmail.mockResolvedValue(user);
+      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      await service.requestPasswordReset(user.email);
+      expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
+      expect(emitSpy).toHaveBeenCalledTimes(1);
+      expect(emitSpy).toHaveBeenCalledWith(
+        'auth.password_reset_requested',
+        expect.objectContaining({ userId: user.id, email: user.email }),
+      );
+      emitSpy.mockRestore();
+    });
+
+    it('unknown email → 0 insert + 0 emit', async () => {
+      usersService.findUserByEmail.mockResolvedValue(null);
+      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      await service.requestPasswordReset('nobody@example.com');
+      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+      expect(emitSpy).not.toHaveBeenCalled();
+      emitSpy.mockRestore();
+    });
+  });
 });

@@ -1,17 +1,31 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
-import { EventPattern, Payload } from '@nestjs/microservices';
+import { ConfigService } from '@nestjs/config';
+import { Ctx, EventPattern, Payload, RmqContext } from '@nestjs/microservices';
 import { InjectDataSource } from '@nestjs/typeorm';
+import { createHash, randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { EMAIL_PROVIDER } from './email.provider';
 import type { EmailProvider } from './email.provider';
 import { NotificationLog } from './entities/notification-log.entity';
+import { Notification } from './entities/notification.entity';
+import { NotificationDelivery } from './entities/notification-delivery.entity';
+import { NotificationChannel } from './entities/notification-channel.enum';
+import { NotificationStatus } from './entities/notification-status.enum';
+import { OutboxEvent } from '../outbox/entities/outbox-event.entity';
+import { OutboxStatus } from '../outbox/entities/outbox-status.enum';
+import User from '../users/entity/user.entity';
+import { NotificationDispatcher } from './notification.dispatcher';
+import type { DispatchChannel } from './notification.dispatcher';
+import { NotificationChannelFactory } from './channels/notification-channel.factory';
+import { NotificationsGateway } from './notifications.gateway';
 
 /**
- * This worker is responsible for notification delivery domain (Phase 12 idempotency).
- * It handles at-least-once domain events (order.* / reservation.expired) with Redis dedup and log+counter observability.
+ * This worker is responsible for notification delivery domain (Phase 12 idempotency + Phase 18 US6/US7 delivery-state).
+ * It handles at-least-once domain events (order.* / reservation.expired / email.verify / auth.reset) with Redis dedup and log+counter observability.
  * It enforces idempotency via eventId dedup key before any EmailProvider side-effect and tolerates duplicate delivery.
+ * It writes CONSUMED on OutboxEvent plus per-channel NotificationDelivery rows, then manual ACKs only after commit.
  */
 @Injectable()
 export class NotificationWorker {
@@ -28,6 +42,14 @@ export class NotificationWorker {
     @Optional()
     @InjectDataSource()
     private readonly dataSource?: DataSource,
+    @Optional()
+    private readonly dispatcher?: NotificationDispatcher,
+    @Optional()
+    private readonly channelFactory?: NotificationChannelFactory,
+    @Optional()
+    private readonly configService?: ConfigService,
+    @Optional()
+    private readonly gateway?: NotificationsGateway,
   ) {}
 
   /**
@@ -35,7 +57,7 @@ export class NotificationWorker {
    * @param key - Dedup key (notification:processed:<eventId> or notification:send:<template>:<campaign>:<userId>).
    * @returns True if first acquisition (should proceed), false if duplicate (should skip).
    */
-  private async tryAcquireDedupKey(key: string): Promise<boolean> {
+  async tryAcquireDedupKey(key: string): Promise<boolean> {
     // Dedup guard BEFORE EmailProvider.send — V1 uses eventId key for all single events
     let first: any;
     try {
@@ -246,189 +268,849 @@ export class NotificationWorker {
   }
 
   /**
-   * Handles order.created events with idempotency guard before email send.
-   * @param data - Event envelope/payload containing eventId, version, correlationId, orderId, userId.
-   * @returns Void — ACK is handled by framework; duplicate returns early with incrementCounter.
+   * Checks whether a string is a valid UUID (outbox/notification linkage guard).
+   * @param value - Candidate event id.
+   * @returns True when the value parses as UUID.
    */
-  @EventPattern('order.created')
-  async handleOrderCreated(@Payload() data: any): Promise<void> {
-    const { eventId, correlationId, payload, aggregateId, userId, template } =
-      this.extractEnvelope(data);
-    // Idempotent guard BEFORE EmailProvider.send
-    const key = `notification:processed:${eventId}`;
+  private isUuid(value: string): boolean {
+    // Strict uuid check avoids PG invalid-input errors on the uuid-typed eventId columns
+    return (
+      typeof value === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        value,
+      )
+    );
+  }
+
+  /**
+   * Maps a lowercase dispatch channel key to the PG enum value.
+   * @param channel - Dispatch channel ('system' | 'email').
+   * @returns NotificationChannel enum member.
+   */
+  private toChannelEnum(channel: DispatchChannel): NotificationChannel {
+    // Normalized input is lowercase; PG enum is uppercase
+    return channel === 'email'
+      ? NotificationChannel.EMAIL
+      : NotificationChannel.SYSTEM;
+  }
+
+  /**
+   * Acknowledges the RMQ message only after the CONSUMED commit (at-least-once).
+   * @param context - Optional RmqContext (absent in unit tests).
+   * @returns Void.
+   */
+  private ack(context?: RmqContext): void {
+    // Same manual-ACK pattern as EventVerificationConsumer: ACK after processing, never on throw
+    try {
+      const channel = context?.getChannelRef();
+      const originalMsg = context?.getMessage();
+      if (channel && originalMsg) channel.ack(originalMsg);
+    } catch (e: any) {
+      this.logger.warn(`ack failed: ${e?.message}`);
+    }
+  }
+
+  /**
+   * Marks an OutboxEvent CONSUMED inside a FOR UPDATE transaction (fail-open).
+   * @param eventId - OutboxEvent id (payload.eventId, must be uuid).
+   * @returns True when the row was transitioned or already consumed; false when skipped.
+   */
+  private async markConsumed(eventId: string): Promise<boolean> {
+    // Outbox row may not exist for old direct-emit events — fail-open skips PG without blocking delivery
+    if (!this.dataSource || !this.isUuid(eventId)) return true;
+    try {
+      let transitioned = true;
+      await this.dataSource.transaction(async (manager) => {
+        const repo = manager.getRepository(OutboxEvent);
+        // FOR UPDATE serializes concurrent duplicate consumes of the same eventId
+        const row = await repo
+          .createQueryBuilder('e')
+          .setLock('pessimistic_write')
+          .where('e.id = :id', { id: eventId })
+          .getOne();
+        if (!row) return;
+        // Only SENT_TO_MQ (or legacy SENT) advances; terminal/failed rows are left untouched
+        if (
+          row.status !== OutboxStatus.SENT_TO_MQ &&
+          row.status !== OutboxStatus.SENT
+        ) {
+          transitioned = false;
+          return;
+        }
+        row.status = OutboxStatus.CONSUMED;
+        row.consumedAt = new Date();
+        await repo.save(row);
+      });
+      return transitioned;
+    } catch (e: any) {
+      this.logger.warn(
+        `markConsumed fail-open eventId=${eventId}: ${e?.message}`,
+      );
+      return true;
+    }
+  }
+
+  /**
+   * Resolves the recipient contact + preference snapshot for dispatch gating.
+   * @param userId - Recipient user id (may be null for legacy payloads).
+   * @param fallbackEmail - Email carried in the event payload (verify/reset always carry it).
+   * @returns Contact email plus dispatcher prefs (fail-open defaults when the user row is missing).
+   */
+  private async resolveUserContact(
+    userId: string | null,
+    fallbackEmail?: string,
+  ): Promise<{
+    email: string | null;
+    prefs: {
+      marketingOptIn?: boolean;
+      emailOptIn?: boolean;
+      emailVerified?: boolean;
+    };
+  }> {
+    // verify/reset carry the real address in the payload; order events resolve via the User row
+    const defaults = {
+      email: fallbackEmail ?? null,
+      prefs: { marketingOptIn: false, emailOptIn: true, emailVerified: false },
+    };
+    if (!this.dataSource || !userId) return defaults;
+    try {
+      const repo = this.dataSource.getRepository(User);
+      const user = await repo.findOne({ where: { id: userId } });
+      if (!user) {
+        // Fail-open skip signal: caller logs and skips EMAIL but still persists SYSTEM when userId known
+        return defaults;
+      }
+      return {
+        email: user.email ?? fallbackEmail ?? null,
+        prefs: {
+          marketingOptIn: user.marketingOptIn,
+          emailOptIn: user.emailOptIn,
+          emailVerified: user.emailVerified,
+        },
+      };
+    } catch (e: any) {
+      this.logger.warn(
+        `resolveUserContact fail-open userId=${userId}: ${e?.message}`,
+      );
+      return defaults;
+    }
+  }
+
+  /**
+   * Upserts a PENDING delivery leg per resolved channel (duplicate consume → 0 new rows).
+   * @param eventId - OutboxEvent id (uuid).
+   * @param channels - Resolved dispatch channels.
+   * @returns Void.
+   */
+  private async upsertDeliveriesPending(
+    eventId: string,
+    channels: DispatchChannel[],
+  ): Promise<void> {
+    if (!this.dataSource) return;
+    try {
+      const repo = this.dataSource.getRepository(NotificationDelivery);
+      for (const channel of channels) {
+        // Unique guard on (eventId, channel) makes replay idempotent at the PG layer too
+        await repo
+          .createQueryBuilder()
+          .insert()
+          .into(NotificationDelivery)
+          .values({
+            eventId,
+            channel: this.toChannelEnum(channel),
+            status: NotificationStatus.PENDING,
+            attempts: 0,
+            nextRetryAt: new Date(),
+          })
+          .orIgnore()
+          .execute();
+      }
+    } catch (e: any) {
+      this.logger.warn(
+        `upsertDeliveries fail-open eventId=${eventId}: ${e?.message}`,
+      );
+    }
+  }
+
+  /**
+   * Finalizes one channel leg after send (T072: DELIVERED vs attempts/backoff/FAILED).
+   * @param eventId - OutboxEvent id.
+   * @param channel - Dispatch channel just attempted.
+   * @param ok - True when the channel accepted the payload.
+   * @param messageId - Provider/WS message id on success.
+   * @returns Void.
+   */
+  private async finalizeDelivery(
+    eventId: string,
+    channel: DispatchChannel,
+    ok: boolean,
+    messageId?: string | null,
+  ): Promise<void> {
+    if (!this.dataSource) return;
+    try {
+      const deliveryRepo = this.dataSource.getRepository(NotificationDelivery);
+      const enumChannel = this.toChannelEnum(channel);
+      if (ok) {
+        await deliveryRepo.update(
+          { eventId, channel: enumChannel },
+          {
+            status: NotificationStatus.DELIVERED,
+            messageId: messageId ?? null,
+            deliveredAt: new Date(),
+          },
+        );
+      } else {
+        // attempts++ with exponential backoff 1s·2^n capped at 60s; FAILED terminal after 3
+        const existing = await deliveryRepo.findOne({
+          where: { eventId, channel: enumChannel },
+        });
+        const attempts = (existing?.attempts ?? 0) + 1;
+        const backoffMs = Math.min(60000, 1000 * Math.pow(2, attempts - 1));
+        await deliveryRepo.update(
+          { eventId, channel: enumChannel },
+          {
+            status:
+              attempts >= 3
+                ? NotificationStatus.FAILED
+                : NotificationStatus.SENT,
+            attempts,
+            nextRetryAt: new Date(Date.now() + backoffMs),
+          },
+        );
+      }
+      // Mirror the leg outcome onto the user-visible Notification row (best-effort, never throws)
+      try {
+        const notifRepo = this.dataSource.getRepository(Notification);
+        await notifRepo.update(
+          { eventId, channel: enumChannel },
+          ok
+            ? {
+                status: NotificationStatus.DELIVERED,
+                deliveredAt: new Date(),
+              }
+            : { status: NotificationStatus.SENT },
+        );
+      } catch {
+        // Notification row may not exist yet for legacy paths — channel already persisted its own copy
+      }
+    } catch (e: any) {
+      this.logger.warn(
+        `finalizeDelivery fail-open eventId=${eventId} channel=${channel}: ${e?.message}`,
+      );
+    }
+  }
+
+  /**
+   * Marks the OutboxEvent DELIVERED when every resolved leg is DELIVERED (best-effort).
+   * @param eventId - OutboxEvent id.
+   * @returns Void.
+   */
+  private async maybeMarkOutboxDelivered(eventId: string): Promise<void> {
+    if (!this.dataSource || !this.isUuid(eventId)) return;
+    try {
+      const deliveryRepo = this.dataSource.getRepository(NotificationDelivery);
+      const legs = await deliveryRepo.find({ where: { eventId } });
+      // All legs DELIVERED (and at least one) → MQ-leg row advances; otherwise it stays CONSUMED
+      if (
+        legs.length > 0 &&
+        legs.every((l) => l.status === NotificationStatus.DELIVERED)
+      ) {
+        await this.dataSource
+          .getRepository(OutboxEvent)
+          .update(eventId, { status: OutboxStatus.DELIVERED });
+      }
+    } catch (e: any) {
+      this.logger.warn(
+        `maybeMarkDelivered fail-open eventId=${eventId}: ${e?.message}`,
+      );
+    }
+  }
+
+  /**
+   * Shared domain-event pipeline: dedup → CONSUMED → dispatch → per-channel send → ACK.
+   * @param opts - Event identity (eventId, eventType, userId), copy, and RMQ context.
+   * @returns Void — duplicate returns early with counter + ACK; throw path never ACKs.
+   */
+  private async processDomainEvent(opts: {
+    eventId: string;
+    eventType: string;
+    userId: string | null;
+    email?: string | null;
+    title: string;
+    body: string;
+    template: string;
+    vars: Record<string, unknown>;
+    aggregateId?: string | null;
+    context?: RmqContext;
+  }): Promise<void> {
+    const key = `notification:processed:${opts.eventId}`;
     const isFirst = await this.tryAcquireDedupKey(key);
     if (!isFirst) {
-      // Already processed — log + counter + return without side-effect
-      this.logger.log(`notification duplicate eventId=${eventId} skipped`);
+      this.logger.log(`notification duplicate eventId=${opts.eventId} skipped`);
       await this.incrementCounter();
+      this.ack(opts.context);
       return;
     }
-    // No Inventory/Order/Reservation mutation — only Logger + email
     this.logger.log(
-      `notification received order.created eventId=${eventId} correlationId=${correlationId} orderId=${aggregateId ?? (payload.orderId as string) ?? 'unknown'}`,
+      `notification received ${opts.eventType} eventId=${opts.eventId} userId=${opts.userId ?? 'unknown'}`,
     );
-    // Only if first → EmailProvider.send → then NotificationLog save
-    if (this.emailProvider) {
-      try {
-        const to = (payload.userId as string)
-          ? `${payload.userId}@example.com`
-          : 'unknown@example.com';
-        // Available stock calculation not needed — notification only
-        const result = await this.emailProvider.send(
-          to,
-          'Order Created',
-          template,
-          payload,
-        );
-        await this.saveNotificationLog({
-          userId: (userId as string) ?? 'unknown',
-          template,
-          aggregateId: aggregateId ?? null,
-          eventId,
-          provider: 'noop',
-          messageId: result?.messageId ?? null,
-        });
-      } catch (e: any) {
-        this.logger.warn(`email send failed eventId=${eventId}: ${e?.message}`);
+    try {
+      // Consumer-side CONSUMED write (only for uuid outbox ids; legacy 'unknown' skips PG)
+      await this.markConsumed(opts.eventId);
+      const contact = await this.resolveUserContact(
+        opts.userId,
+        opts.email ?? undefined,
+      );
+      // Runtime channel resolution from current prefs (verify/reset bypass gates inside dispatcher)
+      const dispatchType = opts.eventType.toLowerCase().includes('order')
+        ? opts.eventType
+        : opts.eventType;
+      const channels: DispatchChannel[] = this.dispatcher
+        ? this.dispatcher.dispatch(
+            {
+              eventId: opts.eventId,
+              type: dispatchType,
+              userId: opts.userId ?? 'unknown',
+            },
+            contact.prefs,
+          )
+        : ['system', 'email'];
+      // Non-uuid eventIds (legacy direct emits) skip PG delivery rows but still send best-effort email
+      if (!this.isUuid(opts.eventId)) {
+        await this.sendLegacyEmail(opts, contact.email);
+        this.ack(opts.context);
+        return;
       }
+      await this.upsertDeliveriesPending(opts.eventId, channels);
+      let firstMessageId: string | null = null;
+      for (const channel of channels) {
+        // SYSTEM persists its own row; EMAIL needs a user-visible row too — upsert PENDING first
+        if (channel === 'email') {
+          await this.upsertNotificationRow(opts, channel);
+        }
+        try {
+          const result = await this.sendViaChannel(
+            channel,
+            opts,
+            contact.email,
+          );
+          if (result.messageId && !firstMessageId)
+            firstMessageId = result.messageId;
+          await this.finalizeDelivery(
+            opts.eventId,
+            channel,
+            true,
+            result.messageId,
+          );
+          if (channel === 'system') {
+            // Realtime emit after persist (offline stays SENT until history fetch)
+            this.gateway?.broadcastToUser(opts.userId ?? 'unknown', {
+              type: opts.eventType,
+              title: opts.title,
+              body: opts.body,
+              channel: 'system',
+              eventId: opts.eventId,
+            });
+          }
+        } catch (e: any) {
+          this.logger.warn(
+            `channel send failed eventId=${opts.eventId} channel=${channel}: ${e?.message}`,
+          );
+          await this.finalizeDelivery(opts.eventId, channel, false);
+        }
+      }
+      await this.maybeMarkOutboxDelivered(opts.eventId);
+      await this.saveNotificationLog({
+        userId: opts.userId ?? 'unknown',
+        template: opts.template,
+        aggregateId: opts.aggregateId ?? null,
+        eventId: opts.eventId,
+        provider: this.configService?.get<string>('EMAIL_PROVIDER') ?? 'noop',
+        messageId: firstMessageId,
+      });
+      this.processedFallback.add(opts.eventId);
+      // Manual ACK only after the CONSUMED commit + channel legs settle
+      this.ack(opts.context);
+    } catch (e: any) {
+      this.logger.error(
+        `${opts.eventType} processing failed eventId=${opts.eventId}: ${e?.message}`,
+        e?.stack,
+      );
+      // No ACK — RabbitMQ requeues per queue config
     }
-    // In-memory fallback for tests without Redis persistence
-    this.processedFallback.add(eventId);
+  }
+
+  /**
+   * Upserts a PENDING user-visible Notification row for channels that do not persist themselves.
+   * @param opts - Event identity + copy.
+   * @param channel - Dispatch channel ('email' — system persists its own row).
+   * @returns Void.
+   */
+  private async upsertNotificationRow(
+    opts: {
+      eventId: string;
+      eventType: string;
+      userId: string | null;
+      title: string;
+      body: string;
+      vars: Record<string, unknown>;
+    },
+    channel: DispatchChannel,
+  ): Promise<void> {
+    if (!this.dataSource || !this.isUuid(opts.eventId) || !opts.userId) return;
+    try {
+      const repo = this.dataSource.getRepository(Notification);
+      await repo
+        .createQueryBuilder()
+        .insert()
+        .into(Notification)
+        .values({
+          userId: opts.userId,
+          eventId: opts.eventId,
+          channel: this.toChannelEnum(channel),
+          type: opts.eventType,
+          title: opts.title,
+          body: opts.body,
+          data: opts.vars ?? {},
+          status: NotificationStatus.PENDING,
+          isRead: false,
+        } as any)
+        .orIgnore()
+        .execute();
+    } catch (e: any) {
+      this.logger.warn(
+        `upsertNotification fail-open eventId=${opts.eventId}: ${e?.message}`,
+      );
+    }
+  }
+
+  /**
+   * Sends via the resolved channel strategy (factory) with real-email lookup.
+   * @param channel - Dispatch channel.
+   * @param opts - Event identity + copy.
+   * @param email - Resolved recipient address (may be null → EMAIL send throws → attempts++ path).
+   * @returns Provider result {messageId, delivered}.
+   * @throws Rethrows channel errors so the caller records attempts/backoff.
+   */
+  private async sendViaChannel(
+    channel: DispatchChannel,
+    opts: {
+      userId: string | null;
+      title: string;
+      template: string;
+      vars: Record<string, unknown>;
+      eventId: string;
+      eventType: string;
+      body: string;
+    },
+    email: string | null,
+  ): Promise<{ messageId?: string; delivered: boolean }> {
+    if (!this.channelFactory) {
+      throw new Error('Channel factory not configured');
+    }
+    const strategy = this.channelFactory.create(channel);
+    return strategy.send({
+      to: email ?? undefined,
+      userId: opts.userId ?? 'unknown',
+      subject: opts.title,
+      template: opts.template,
+      vars: opts.vars,
+      eventId: opts.eventId,
+      type: opts.eventType,
+      title: opts.title,
+      body: opts.body,
+    });
+  }
+
+  /**
+   * Legacy best-effort email path for non-uuid eventIds (pre-outbox direct emits).
+   * @param opts - Event identity + copy.
+   * @param email - Resolved recipient address.
+   * @returns Void.
+   */
+  private async sendLegacyEmail(
+    opts: {
+      title: string;
+      template: string;
+      vars: Record<string, unknown>;
+      eventId: string;
+      userId: string | null;
+      aggregateId?: string | null;
+    },
+    email: string | null,
+  ): Promise<void> {
+    if (!this.emailProvider || !email) return;
+    try {
+      const result = await this.emailProvider.send(
+        email,
+        opts.title,
+        opts.template,
+        opts.vars,
+      );
+      await this.saveNotificationLog({
+        userId: opts.userId ?? 'unknown',
+        template: opts.template,
+        aggregateId: opts.aggregateId ?? null,
+        eventId: opts.eventId,
+        provider: this.configService?.get<string>('EMAIL_PROVIDER') ?? 'noop',
+        messageId: result?.messageId ?? null,
+      });
+    } catch (e: any) {
+      this.logger.warn(
+        `email send failed eventId=${opts.eventId}: ${e?.message}`,
+      );
+    }
+    this.processedFallback.add(opts.eventId);
+  }
+
+  /**
+   * Handles order.created events with idempotency guard before email send.
+   * @param data - Event envelope/payload containing eventId, version, correlationId, orderId, userId.
+   * @param context - RmqContext for manual acknowledgement after CONSUMED commit.
+   * @returns Void — duplicate returns early with incrementCounter + ACK.
+   */
+  @EventPattern('order.created')
+  async handleOrderCreated(
+    @Payload() data: any,
+    @Ctx() context?: RmqContext,
+  ): Promise<void> {
+    const { eventId, eventType, payload, aggregateId, userId, template } =
+      this.extractEnvelope(data);
+    await this.processDomainEvent({
+      eventId,
+      eventType: eventType === 'unknown' ? 'order.created' : eventType,
+      userId,
+      title: 'Order Created',
+      body: `Order ${aggregateId ?? 'unknown'} created`,
+      template,
+      vars: payload,
+      aggregateId,
+      context,
+    });
   }
 
   /**
    * Handles order.completed events with idempotency guard.
    * @param data - Event payload.
+   * @param context - RmqContext for manual acknowledgement after CONSUMED commit.
    * @returns Void.
    */
   @EventPattern('order.completed')
-  async handleOrderCompleted(@Payload() data: any): Promise<void> {
-    const { eventId, correlationId, payload, aggregateId, userId, template } =
+  async handleOrderCompleted(
+    @Payload() data: any,
+    @Ctx() context?: RmqContext,
+  ): Promise<void> {
+    const { eventId, eventType, payload, aggregateId, userId, template } =
       this.extractEnvelope(data);
-    const key = `notification:processed:${eventId}`;
-    const isFirst = await this.tryAcquireDedupKey(key);
-    if (!isFirst) {
-      this.logger.log(`notification duplicate eventId=${eventId} skipped`);
-      await this.incrementCounter();
-      return;
-    }
-    this.logger.log(
-      `notification received order.completed eventId=${eventId} correlationId=${correlationId} orderId=${aggregateId ?? 'unknown'}`,
-    );
-    if (this.emailProvider) {
-      try {
-        const to = (payload.userId as string)
-          ? `${payload.userId}@example.com`
-          : 'unknown@example.com';
-        const result = await this.emailProvider.send(
-          to,
-          'Order Completed',
-          template,
-          payload,
-        );
-        await this.saveNotificationLog({
-          userId: (userId as string) ?? 'unknown',
-          template,
-          aggregateId: aggregateId ?? null,
-          eventId,
-          provider: 'noop',
-          messageId: result?.messageId ?? null,
-        });
-      } catch (e: any) {
-        this.logger.warn(`email send failed eventId=${eventId}: ${e?.message}`);
-      }
-    }
-    this.processedFallback.add(eventId);
+    await this.processDomainEvent({
+      eventId,
+      eventType: eventType === 'unknown' ? 'order.completed' : eventType,
+      userId,
+      title: 'Order Completed',
+      body: `Order ${aggregateId ?? 'unknown'} completed`,
+      template,
+      vars: payload,
+      aggregateId,
+      context,
+    });
   }
 
   /**
    * Handles order.cancelled events with idempotency guard.
    * @param data - Event payload.
+   * @param context - RmqContext for manual acknowledgement after CONSUMED commit.
    * @returns Void.
    */
   @EventPattern('order.cancelled')
-  async handleOrderCancelled(@Payload() data: any): Promise<void> {
-    const { eventId, correlationId, payload, aggregateId, userId, template } =
+  async handleOrderCancelled(
+    @Payload() data: any,
+    @Ctx() context?: RmqContext,
+  ): Promise<void> {
+    const { eventId, eventType, payload, aggregateId, userId, template } =
       this.extractEnvelope(data);
-    const key = `notification:processed:${eventId}`;
-    const isFirst = await this.tryAcquireDedupKey(key);
-    if (!isFirst) {
-      this.logger.log(`notification duplicate eventId=${eventId} skipped`);
-      await this.incrementCounter();
-      return;
-    }
-    this.logger.log(
-      `notification received order.cancelled eventId=${eventId} correlationId=${correlationId} orderId=${aggregateId ?? 'unknown'}`,
-    );
-    if (this.emailProvider) {
-      try {
-        const to = (payload.userId as string)
-          ? `${payload.userId}@example.com`
-          : 'unknown@example.com';
-        const result = await this.emailProvider.send(
-          to,
-          'Order Cancelled',
-          template,
-          payload,
-        );
-        await this.saveNotificationLog({
-          userId: (userId as string) ?? 'unknown',
-          template,
-          aggregateId: aggregateId ?? null,
-          eventId,
-          provider: 'noop',
-          messageId: result?.messageId ?? null,
-        });
-      } catch (e: any) {
-        this.logger.warn(`email send failed eventId=${eventId}: ${e?.message}`);
-      }
-    }
-    this.processedFallback.add(eventId);
+    await this.processDomainEvent({
+      eventId,
+      eventType: eventType === 'unknown' ? 'order.cancelled' : eventType,
+      userId,
+      title: 'Order Cancelled',
+      body: `Order ${aggregateId ?? 'unknown'} cancelled`,
+      template,
+      vars: payload,
+      aggregateId,
+      context,
+    });
   }
 
   /**
    * Handles reservation.expired events with idempotency guard.
    * @param data - Event payload.
+   * @param context - RmqContext for manual acknowledgement after CONSUMED commit.
    * @returns Void.
    */
   @EventPattern('reservation.expired')
-  async handleReservationExpired(@Payload() data: any): Promise<void> {
-    const { eventId, correlationId, payload, aggregateId, userId, template } =
+  async handleReservationExpired(
+    @Payload() data: any,
+    @Ctx() context?: RmqContext,
+  ): Promise<void> {
+    const { eventId, eventType, payload, aggregateId, userId, template } =
       this.extractEnvelope(data);
-    const key = `notification:processed:${eventId}`;
+    await this.processDomainEvent({
+      eventId,
+      eventType: eventType === 'unknown' ? 'reservation.expired' : eventType,
+      userId,
+      title: 'Reservation Expired',
+      body: `Reservation ${aggregateId ?? 'unknown'} expired`,
+      template,
+      vars: payload,
+      aggregateId,
+      context,
+    });
+  }
+
+  /**
+   * Handles email.verification_requested events (trust-critical, always both channels).
+   * @param data - Flat auth payload {userId, email, rawToken, expiresAt} (no outbox envelope).
+   * @param context - RmqContext for manual acknowledgement after commit.
+   * @returns Void — fail-open skip when the user row is missing; never throws to the broker.
+   */
+  @EventPattern('email.verification_requested')
+  async handleVerificationRequested(
+    @Payload() data: any,
+    @Ctx() context?: RmqContext,
+  ): Promise<void> {
+    const payload: any = data?.data ?? data ?? {};
+    const userId: string | null = payload.userId ?? data?.userId ?? null;
+    const email: string | null = payload.email ?? data?.email ?? null;
+    const rawToken: string | undefined =
+      payload.rawToken ?? data?.rawToken ?? undefined;
+    // Dedup on the token hash: each emit carries a unique rawToken, replays carry the same one
+    const tokenHash = rawToken
+      ? createHash('sha256').update(rawToken).digest('hex')
+      : randomUUID();
+    const key = `notification:processed:verify:${tokenHash}`;
     const isFirst = await this.tryAcquireDedupKey(key);
     if (!isFirst) {
-      this.logger.log(`notification duplicate eventId=${eventId} skipped`);
+      this.logger.log(`verification duplicate userId=${userId} skipped`);
       await this.incrementCounter();
+      this.ack(context);
       return;
     }
-    this.logger.log(
-      `notification received reservation.expired eventId=${eventId} correlationId=${correlationId} reservationId=${aggregateId ?? 'unknown'}`,
-    );
-    if (this.emailProvider) {
-      try {
-        const to = (payload.userId as string)
-          ? `${payload.userId}@example.com`
-          : 'unknown@example.com';
-        const result = await this.emailProvider.send(
-          to,
-          'Reservation Expired',
-          template,
-          payload,
-        );
-        await this.saveNotificationLog({
-          userId: (userId as string) ?? 'unknown',
-          template,
-          aggregateId: aggregateId ?? null,
-          eventId,
-          provider: 'noop',
-          messageId: result?.messageId ?? null,
-        });
-      } catch (e: any) {
-        this.logger.warn(`email send failed eventId=${eventId}: ${e?.message}`);
+    try {
+      // Real email lookup: payload address wins, User row is the fallback — never a placeholder
+      const contact = await this.resolveUserContact(userId, email ?? undefined);
+      const to = contact.email;
+      if (!to) {
+        // Fail-open skip when neither payload nor User row yields an address
+        this.logger.warn(`verification skipped, no email userId=${userId}`);
+        this.ack(context);
+        return;
       }
+      const frontend =
+        this.configService?.get<string>('FRONTEND_URL') ??
+        'https://app.example.com';
+      const link = rawToken
+        ? `${frontend}/verify-email?token=${rawToken}&email=${encodeURIComponent(to)}`
+        : frontend;
+      const eventId = randomUUID();
+      const channels: DispatchChannel[] = this.dispatcher
+        ? this.dispatcher.dispatch(
+            { eventId, type: 'verify', userId: userId ?? 'unknown' },
+            { ...contact.prefs, emailVerified: contact.prefs.emailVerified },
+          )
+        : ['system', 'email'];
+      await this.upsertDeliveriesPending(eventId, channels);
+      if (channels.includes('system') && userId) {
+        await this.upsertNotificationRow(
+          {
+            eventId,
+            eventType: 'verify',
+            userId,
+            title: 'Verify your email',
+            body: `Verify your email: ${link}`,
+            vars: { link, email: to },
+          },
+          'system',
+        );
+      }
+      if (channels.includes('email') && userId) {
+        await this.upsertNotificationRow(
+          {
+            eventId,
+            eventType: 'verify',
+            userId,
+            title: 'Verify your email',
+            body: `Verify your email: ${link}`,
+            vars: { link, email: to },
+          },
+          'email',
+        );
+      }
+      for (const channel of channels) {
+        try {
+          const result = await this.sendViaChannel(
+            channel,
+            {
+              userId: userId ?? 'unknown',
+              title: 'Verify your email',
+              template: 'verify',
+              vars: { link, email: to, firstName: '' },
+              eventId,
+              eventType: 'verify',
+              body: `Verify your email: ${link}`,
+            },
+            to,
+          );
+          await this.finalizeDelivery(eventId, channel, true, result.messageId);
+          if (channel === 'system' && userId) {
+            this.gateway?.broadcastToUser(userId, {
+              type: 'verify',
+              title: 'Verify your email',
+              body: `Verify your email: ${link}`,
+              channel: 'system',
+              eventId,
+            });
+          }
+        } catch (e: any) {
+          this.logger.warn(
+            `verify channel failed userId=${userId} channel=${channel}: ${e?.message}`,
+          );
+          await this.finalizeDelivery(eventId, channel, false);
+        }
+      }
+      await this.saveNotificationLog({
+        userId: userId ?? 'unknown',
+        template: 'verify',
+        aggregateId: null,
+        eventId,
+        provider: this.configService?.get<string>('EMAIL_PROVIDER') ?? 'noop',
+        messageId: null,
+      });
+      this.processedFallback.add(key);
+      this.ack(context);
+    } catch (e: any) {
+      this.logger.error(
+        `verify processing failed userId=${userId}: ${e?.message}`,
+        e?.stack,
+      );
+      // No ACK — RabbitMQ requeues per queue config
     }
-    this.processedFallback.add(eventId);
+  }
+
+  /**
+   * Handles auth.password_reset_requested events (trust-critical, always both channels).
+   * @param data - Flat auth payload {userId, email, rawToken, expiresAt} (no outbox envelope).
+   * @param context - RmqContext for manual acknowledgement after commit.
+   * @returns Void — fail-open skip when the user row is missing; never throws to the broker.
+   */
+  @EventPattern('auth.password_reset_requested')
+  async handlePasswordResetRequested(
+    @Payload() data: any,
+    @Ctx() context?: RmqContext,
+  ): Promise<void> {
+    const payload: any = data?.data ?? data ?? {};
+    const userId: string | null = payload.userId ?? data?.userId ?? null;
+    const email: string | null = payload.email ?? data?.email ?? null;
+    const rawToken: string | undefined =
+      payload.rawToken ?? data?.rawToken ?? undefined;
+    const tokenHash = rawToken
+      ? createHash('sha256').update(rawToken).digest('hex')
+      : randomUUID();
+    const key = `notification:processed:reset:${tokenHash}`;
+    const isFirst = await this.tryAcquireDedupKey(key);
+    if (!isFirst) {
+      this.logger.log(`reset duplicate userId=${userId} skipped`);
+      await this.incrementCounter();
+      this.ack(context);
+      return;
+    }
+    try {
+      // Real email lookup: payload address wins, User row is the fallback — never a placeholder
+      const contact = await this.resolveUserContact(userId, email ?? undefined);
+      const to = contact.email;
+      if (!to) {
+        // Fail-open skip when neither payload nor User row yields an address
+        this.logger.warn(`reset skipped, no email userId=${userId}`);
+        this.ack(context);
+        return;
+      }
+      const frontend =
+        this.configService?.get<string>('FRONTEND_URL') ??
+        'https://app.example.com';
+      const link = rawToken
+        ? `${frontend}/reset-password?token=${rawToken}&email=${encodeURIComponent(to)}`
+        : frontend;
+      const eventId = randomUUID();
+      const channels: DispatchChannel[] = this.dispatcher
+        ? this.dispatcher.dispatch(
+            { eventId, type: 'reset', userId: userId ?? 'unknown' },
+            { ...contact.prefs },
+          )
+        : ['system', 'email'];
+      await this.upsertDeliveriesPending(eventId, channels);
+      if (userId) {
+        for (const channel of channels) {
+          await this.upsertNotificationRow(
+            {
+              eventId,
+              eventType: 'reset',
+              userId,
+              title: 'Reset your password',
+              body: 'Reset your password link expires in 15m',
+              vars: { link, email: to, expiresIn: '15m' },
+            },
+            channel,
+          );
+        }
+      }
+      for (const channel of channels) {
+        try {
+          const result = await this.sendViaChannel(
+            channel,
+            {
+              userId: userId ?? 'unknown',
+              title: 'Reset your password',
+              template: 'reset',
+              vars: { link, email: to, expiresIn: '15m' },
+              eventId,
+              eventType: 'reset',
+              body: 'Reset your password link expires in 15m',
+            },
+            to,
+          );
+          await this.finalizeDelivery(eventId, channel, true, result.messageId);
+          if (channel === 'system' && userId) {
+            this.gateway?.broadcastToUser(userId, {
+              type: 'reset',
+              title: 'Reset your password',
+              body: 'Reset your password link expires in 15m',
+              channel: 'system',
+              eventId,
+            });
+          }
+        } catch (e: any) {
+          this.logger.warn(
+            `reset channel failed userId=${userId} channel=${channel}: ${e?.message}`,
+          );
+          await this.finalizeDelivery(eventId, channel, false);
+        }
+      }
+      await this.saveNotificationLog({
+        userId: userId ?? 'unknown',
+        template: 'reset',
+        aggregateId: null,
+        eventId,
+        provider: this.configService?.get<string>('EMAIL_PROVIDER') ?? 'noop',
+        messageId: null,
+      });
+      this.processedFallback.add(key);
+      this.ack(context);
+    } catch (e: any) {
+      this.logger.error(
+        `reset processing failed userId=${userId}: ${e?.message}`,
+        e?.stack,
+      );
+      // No ACK — RabbitMQ requeues per queue config
+    }
   }
 
   /**

@@ -77,14 +77,38 @@ describe('AuthService Refresh Token (Phase 17)', () => {
       createQueryBuilder: jest.fn(() => mockQueryBuilder),
     };
     jwtService = { signAsync: jest.fn().mockResolvedValue('jwt-new') };
-    configService = { get: jest.fn((key: string) => (key === 'REFRESH_TOKEN_TTL' ? '7d' : undefined)) };
-    const cacheMock: any = { get: jest.fn(), set: jest.fn(), del: jest.fn(), store: { client: { incr: jest.fn(), expire: jest.fn() } } };
+    configService = {
+      get: jest.fn((key: string) =>
+        key === 'REFRESH_TOKEN_TTL' ? '7d' : undefined,
+      ),
+    };
+    const cacheMock: any = {
+      get: jest.fn(),
+      set: jest.fn(),
+      del: jest.fn(),
+      store: { client: { incr: jest.fn(), expire: jest.fn() } },
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
-        { provide: UsersService, useValue: { findUserByEmail: jest.fn(), findUserById: jest.fn(), findByGoogleId: jest.fn() } },
-        { provide: Logger, useValue: { log: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() } },
+        {
+          provide: UsersService,
+          useValue: {
+            findUserByEmail: jest.fn(),
+            findUserById: jest.fn(),
+            findByGoogleId: jest.fn(),
+          },
+        },
+        {
+          provide: Logger,
+          useValue: {
+            log: jest.fn(),
+            warn: jest.fn(),
+            error: jest.fn(),
+            debug: jest.fn(),
+          },
+        },
         { provide: JwtService, useValue: jwtService },
         { provide: DataSource, useValue: dataSource },
         { provide: CACHE_MANAGER, useValue: cacheMock },
@@ -105,7 +129,9 @@ describe('AuthService Refresh Token (Phase 17)', () => {
     expect(mockRefreshRepo.save).toHaveBeenCalledTimes(1);
     const saved = mockRefreshRepo.save.mock.calls[0][0];
     expect(saved.tokenHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(saved.tokenHash).toBe(crypto.createHash('sha256').update(result.refreshToken).digest('hex'));
+    expect(saved.tokenHash).toBe(
+      crypto.createHash('sha256').update(result.refreshToken).digest('hex'),
+    );
     expect(saved.expiresAt).toBeInstanceOf(Date);
     const ttl = 7 * 24 * 3600 * 1000;
     const diff = saved.expiresAt.getTime() - Date.now();
@@ -130,7 +156,11 @@ describe('AuthService Refresh Token (Phase 17)', () => {
     mockRefreshRepo.count.mockResolvedValue(1);
     // need to handle transaction manager getRepository for User findOne
     mockManager.getRepository = jest.fn((entity: any) => {
-      if (entity && entity.name === 'User') return { findOne: jest.fn().mockResolvedValue(user), update: jest.fn() } as any;
+      if (entity && entity.name === 'User')
+        return {
+          findOne: jest.fn().mockResolvedValue(user),
+          update: jest.fn(),
+        } as any;
       return mockRefreshRepo;
     });
     // also need User repo for refresh: use manager.getRepository(User).findOne
@@ -154,7 +184,10 @@ describe('AuthService Refresh Token (Phase 17)', () => {
     expect(result.refreshToken).toMatch(/^[a-f0-9]{64}$/);
     expect(result.refreshToken).not.toBe(raw);
     // old revoked
-    expect(mockRefreshRepo.update).toHaveBeenCalledWith('rt-1', expect.objectContaining({ revokedAt: expect.any(Date) }));
+    expect(mockRefreshRepo.update).toHaveBeenCalledWith(
+      'rt-1',
+      expect.objectContaining({ revokedAt: expect.any(Date) }),
+    );
     // new saved
     expect(mockRefreshRepo.save).toHaveBeenCalled();
   });
@@ -171,7 +204,8 @@ describe('AuthService Refresh Token (Phase 17)', () => {
       revokedAt: null,
     });
     mockManager.getRepository = jest.fn((entity: any) => {
-      if (entity && entity.name === 'User') return { findOne: jest.fn().mockResolvedValue(user) } as any;
+      if (entity && entity.name === 'User')
+        return { findOne: jest.fn().mockResolvedValue(user) } as any;
       return mockRefreshRepo;
     });
     await expect(service.refresh(raw)).rejects.toThrow(UnauthorizedException);
@@ -190,7 +224,10 @@ describe('AuthService Refresh Token (Phase 17)', () => {
   it('T026 parseTtlMs d suffix', async () => {
     // indirectly via login 7d
     const result = await service.login(user);
-    const saved = mockRefreshRepo.save.mock.calls[mockRefreshRepo.save.mock.calls.length - 1][0];
+    const saved =
+      mockRefreshRepo.save.mock.calls[
+        mockRefreshRepo.save.mock.calls.length - 1
+      ][0];
     const diff = saved.expiresAt.getTime() - Date.now();
     expect(diff).toBeGreaterThan(7 * 24 * 3600 * 1000 - 5000);
   });

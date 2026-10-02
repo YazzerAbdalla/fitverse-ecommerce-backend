@@ -7,7 +7,7 @@ Phase 0 consolidates all `NEEDS CLARIFICATION` (0 remaining in Technical Context
 
 ## Decision D1: FOR UPDATE SKIP LOCKED for Claim (PostgreSQL 17)
 
-**Decision**: Publisher claims via `QueryBuilder.setLock('pessimistic_write', undefined, {skipLocked:true})` with `SELECT ... WHERE (status='PENDING' AND nextRetryAt<=NOW()) OR (status='PROCESSING' AND processingStartedAt < NOW() - interval '30 seconds') ORDER BY createdAt ASC, id ASC LIMIT :batchSize FOR UPDATE SKIP LOCKED` then `UPDATE status='PROCESSING' processingStartedAt=NOW() WHERE id IN (:ids) RETURNING *`. Business writers never use `SKIP LOCKED` — only publisher.
+**Decision**: Publisher claims via `QueryBuilder.setLock('pessimistic_write').setOnLocked('skip_locked')` with `SELECT ... WHERE (status='PENDING' AND nextRetryAt<=NOW()) OR (status='PROCESSING' AND processingStartedAt < NOW() - interval '30 seconds') ORDER BY createdAt ASC, id ASC LIMIT :batchSize FOR UPDATE SKIP LOCKED` then `UPDATE status='PROCESSING' processingStartedAt=NOW() WHERE id IN (:ids) RETURNING *`. Business writers never use `SKIP LOCKED` — only publisher.
 
 **Rationale**: Native PG17 `SKIP LOCKED` gives lock-free concurrent claim for multi-pod publishers without Redis leader election; proven in `products.service.ts:updateMany` `pessimistic_write` but publisher adds `skipLocked`. Lease (`processingStartedAt`) prevents stuck `PROCESSING` after crash; reclaimed next poll.
 
@@ -83,5 +83,5 @@ No open `NEEDS CLARIFICATION` remains.
 - `src/modules/order/order-checkout.service.ts:44` (`dataSource.transaction` `FOR UPDATE` sortedIds)
 - `src/modules/reservation/reservation-expiration.service.ts:199` (per-candidate `RESERVED→EXPIRED` `FOR UPDATE`)
 - `src/app.module.ts:60` (`ClientsModule NOTIFICATION_SERVICE` + `BullModule.forRootAsync` shared `REDIS_URL`)
-- PostgreSQL 17 `FOR UPDATE SKIP LOCKED` docs, TypeORM `setLock('pessimistic_write', undefined, {skipLocked:true})`
+- PostgreSQL 17 `FOR UPDATE SKIP LOCKED` docs, TypeORM `setLock('pessimistic_write').setOnLocked('skip_locked')`
 - Prior `reservation.expired` direct emit superseded

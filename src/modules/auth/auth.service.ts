@@ -1,20 +1,27 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   Logger,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
+import { lastValueFrom } from 'rxjs';
+import { ClientProxy } from '@nestjs/microservices';
 import { UsersService } from '../users/users.service';
 import { UserRegisterDto } from './dto/user-register.dto';
+import { VerifyEmailDto } from './dto/verify-email.dto';
 import User, { AuthProvider } from '../users/entity/user.entity';
 import { JwtService } from '@nestjs/jwt';
 import { JwtPayloadProps } from './types';
-import { DataSource } from 'typeorm';
+import { DataSource, IsNull } from 'typeorm';
 import { PasswordResetToken } from './entities/password-reset-token.entity';
+import { EmailVerificationToken } from './entities/email-verification-token.entity';
 import {
   OtpVerification,
   OtpPurpose,
@@ -41,6 +48,9 @@ export class AuthService {
     private readonly configService: ConfigService,
     @Inject('WHATSAPP_PROVIDER')
     private readonly whatsappProvider: WhatsAppProvider,
+    @Optional()
+    @Inject('NOTIFICATION_SERVICE')
+    private readonly notificationClient?: ClientProxy,
   ) {}
 
   private saltOrRounds = 10;
@@ -48,6 +58,11 @@ export class AuthService {
   // For testing: allow capturing raw tokens
   public lastRawToken?: string;
   public lastOtp?: string;
+  /**
+   * Test hook (014 US1): last raw email-verification token issued by
+   * requestEmailVerification/resendVerification. Set after commit, never logged.
+   */
+  public lastVerificationToken?: string;
 
   async register(userRegisterDto: UserRegisterDto) {
     const { email, password } = userRegisterDto;
@@ -66,6 +81,14 @@ export class AuthService {
     await this.usersService.createNewUser(newUser);
 
     this.logger.log(`New user with email ${email} had registered successfuly`);
+
+    // Fire-and-forget verification email after commit — never blocks 201 (spec FR-005, edge: DB down after User commit)
+    this.requestEmailVerification(email).catch((e: any) => {
+      // Registration already committed; recovery via POST /auth/resend-verification
+      this.logger.error(
+        `requestEmailVerification after register failed email=${email}: ${e?.message ?? e}`,
+      );
+    });
 
     return { message: 'User created successfuly.', data: newUser };
   }
@@ -140,13 +163,13 @@ export class AuthService {
     // Enforce cap 5 active LRU — revoke oldest if needed
     // Count active tokens for user
     const activeCount = await repo.count({
-      where: { userId, revokedAt: null as any },
+      where: { userId, revokedAt: IsNull() },
     });
     // If active >=5, revoke oldest active token (FOR UPDATE style — simple UPDATE oldest)
     if (activeCount >= 5) {
       // Find oldest active token
       const oldest = await repo.find({
-        where: { userId, revokedAt: null as any },
+        where: { userId, revokedAt: IsNull() },
         order: { createdAt: 'ASC' },
         take: 1,
       });
@@ -162,10 +185,11 @@ export class AuthService {
     try {
       const entity = repo.create({
         userId,
+        user: { id: userId },
         tokenHash,
         expiresAt,
         revokedAt: null,
-      } as any);
+      });
       await repo.save(entity);
     } catch (e: any) {
       // Handle partial unique collision (prob negligible) — retry once
@@ -183,7 +207,7 @@ export class AuthService {
           tokenHash: retryHash,
           expiresAt,
           revokedAt: null,
-        } as any);
+        });
         await repo.save(retryEntity);
         return retryRaw;
       }
@@ -446,6 +470,27 @@ export class AuthService {
     return count;
   }
 
+  /**
+   * Purges used/expired EmailVerificationToken rows older than 7 days.
+   * Intended to be called by a nightly job (BullMQ repeat or ops cron), never in the request path.
+   * @returns Number of rows deleted.
+   */
+  async purgeExpiredVerificationTokens(): Promise<number> {
+    // Retention 7d per spec clarification: used tokens and long-expired actives are audit-dead
+    const result = await this.dataSource
+      .createQueryBuilder()
+      .delete()
+      .from(EmailVerificationToken)
+      .where(
+        `("usedAt" IS NOT NULL AND "usedAt" < NOW() - INTERVAL '7 days') OR ("expiresAt" < NOW() - INTERVAL '7 days')`,
+      )
+      .execute();
+    const count = result.affected || 0;
+    if (count > 0)
+      this.logger.log(`EmailVerificationToken purge deleted ${count} rows`);
+    return count;
+  }
+
   // ============ Phase 16: Forgot Password & Recovery Token ============
   async requestPasswordReset(email: string): Promise<void> {
     const user = await this.usersService.findUserByEmail(email);
@@ -484,14 +529,24 @@ export class AuthService {
         }),
       );
     });
-    // publish after commit (hybrid: RabbitMQ for password reset)
+    // Publish after commit (US3 wired: replaces TODO Logger-only publish).
+    // Never inside dataSource.transaction above — broker I/O stays outside the tx.
+    const resetPayload = {
+      userId: user.id,
+      email,
+      rawToken,
+      expiresAt: expiresAt.toISOString(),
+    };
     try {
       this.logger.log(
         `Password reset token created for ${email}, expires ${expiresAt.toISOString()}`,
       );
-      // TODO: publish to RabbitMQ topic auth.password_reset_requested
-    } catch (e) {
-      this.logger.warn(`Failed to publish password reset event: ${e}`);
+      await this.emitAuthEvent('auth.password_reset_requested', resetPayload);
+    } catch (e: any) {
+      // Fire-and-forget after commit — 200 anti-enum already decided, never throw to caller
+      this.logger.error(
+        `Failed to emit password reset event email=${email}: ${e?.message ?? e}`,
+      );
     }
   }
 
@@ -562,6 +617,304 @@ export class AuthService {
     this.logger.log(`Password reset successful for ${dto.email}`);
   }
 
+  // ============ Phase 18 (014 US1/US2): Email verification ============
+
+  /**
+   * Emits an auth domain event after the DB commit (publish-after-commit).
+   * Never call inside dataSource.transaction — broker I/O stays outside the tx.
+   * Fail-open: logs and resolves, never throws to the caller (register stays 201).
+   * @param eventType - Event name (email.verification_requested, auth.password_reset_requested, auth.email_verified).
+   * @param payload - Event payload (may contain rawToken once; never logged raw).
+   * @returns Void.
+   */
+  public async emitAuthEvent(
+    eventType: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      if (this.notificationClient) {
+        // Bounded wait so a down broker can never hang the request path
+        const obs = this.notificationClient.emit(eventType, payload);
+        await Promise.race([
+          lastValueFrom(obs),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('emit timeout 2000ms')), 2000),
+          ),
+        ]);
+      }
+      // Hash prefix only in logs — rawToken is never logged
+      const userId = (payload as any)?.userId ?? 'unknown';
+      this.logger.log(`auth event emitted type=${eventType} userId=${userId}`);
+      // TODO (T026 worker): EmailWorker/NotificationWorker consumes
+      // email.verification_requested + auth.password_reset_requested via the
+      // BullMQ 'notification' queue and calls EmailProvider.send (owned by another task).
+    } catch (e: any) {
+      // Async after commit never rolls back business — log only
+      this.logger.error(
+        `Failed to emit auth event type=${eventType}: ${e?.message ?? e}`,
+      );
+    }
+  }
+
+  /**
+   * Parses a TTL string with s/m/h/d suffixes.
+   * @param ttl - TTL string (e.g. '24h', '15m', '604800000').
+   * @param fallbackMs - Fallback when invalid.
+   * @param key - Config key name for the warn log.
+   * @returns Milliseconds.
+   */
+  private parseTtlWithDefault(
+    ttl: string,
+    fallbackMs: number,
+    key: string,
+  ): number {
+    if (ttl.endsWith('m')) return parseInt(ttl, 10) * 60_000;
+    if (ttl.endsWith('s')) return parseInt(ttl, 10) * 1000;
+    if (ttl.endsWith('h')) return parseInt(ttl, 10) * 3600_000;
+    if (ttl.endsWith('d')) return parseInt(ttl, 10) * 24 * 3600_000;
+    const numeric = parseInt(ttl, 10);
+    if (!isNaN(numeric) && String(numeric) === ttl) return numeric;
+    this.logger.warn(`Invalid TTL "${key}=${ttl}", fallback ${fallbackMs}ms`);
+    return fallbackMs;
+  }
+
+  /**
+   * Resolves the email-verification TTL (default 24h).
+   * @returns Milliseconds until a verification token expires.
+   */
+  private getVerificationTtlMs(): number {
+    const raw =
+      this.configService.get<string>('EMAIL_VERIFICATION_TTL') || '24h';
+    return this.parseTtlWithDefault(
+      raw,
+      24 * 3600_000,
+      'EMAIL_VERIFICATION_TTL',
+    );
+  }
+
+  /**
+   * Creates (or refreshes) an email-verification token after commit and emits the send event.
+   * Fire-and-forget: unknown email or already-verified returns void (anti-enum); failures never throw.
+   * @param email - User email to verify.
+   * @returns Void.
+   */
+  async requestEmailVerification(email: string): Promise<void> {
+    const user = await this.usersService.findUserByEmail(email);
+    // Anti-enumeration: same void whether or not the email exists
+    if (!user) {
+      this.logger.debug(`requestEmailVerification: email not found ${email}`);
+      return;
+    }
+    // Already verified → no new token, no email (resend returns the distinct message)
+    if ((user as any).emailVerified) {
+      return;
+    }
+    const raw = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const expiresAt = new Date(Date.now() + this.getVerificationTtlMs());
+
+    await this.dataSource.transaction(async (manager) => {
+      // Invalidate prior active tokens so only one link is live at a time
+      await manager
+        .createQueryBuilder()
+        .update(EmailVerificationToken)
+        .set({ usedAt: new Date() })
+        .where('userId = :userId AND "usedAt" IS NULL', { userId: user.id })
+        .execute();
+      const repo = manager.getRepository(EmailVerificationToken);
+      try {
+        await repo.save(
+          repo.create({
+            userId: user.id,
+            tokenHash,
+            expiresAt,
+            usedAt: null,
+          }),
+        );
+      } catch (e: any) {
+        // Negligible hash-collision retry once (edge: UQ 23505), else propagate
+        if (this.isUniqueViolation(e)) {
+          this.logger.warn(
+            `EmailVerificationToken hash collision userId=${user.id} hashPrefix=${tokenHash.slice(0, 6)} retry once`,
+          );
+          const retryRaw = crypto.randomBytes(32).toString('hex');
+          const retryHash = crypto
+            .createHash('sha256')
+            .update(retryRaw)
+            .digest('hex');
+          await repo.save(
+            repo.create({
+              userId: user.id,
+              tokenHash: retryHash,
+              expiresAt,
+              usedAt: null,
+            }),
+          );
+          this.lastVerificationToken = retryRaw;
+          return;
+        }
+        throw e;
+      }
+      this.lastVerificationToken = raw;
+    });
+    // Publish after commit — outside dataSource.transaction (constitution async rule)
+    const rawForEvent = this.lastVerificationToken ?? raw;
+    await this.emitAuthEvent('email.verification_requested', {
+      userId: user.id,
+      email,
+      rawToken: rawForEvent,
+      expiresAt: expiresAt.toISOString(),
+    });
+  }
+
+  /**
+   * Verifies an email link/body token with single-use semantics.
+   * @param dto - VerifyEmailDto {email, token 64hex}.
+   * @returns {verified:true, emailVerified:true} on success.
+   * @throws BadRequestException 400 for unknown email, missing/used/expired token (no 404 leak).
+   */
+  async verifyEmail(
+    dto: VerifyEmailDto,
+  ): Promise<{ verified: boolean; emailVerified: boolean }> {
+    const user = await this.usersService.findUserByEmail(dto.email);
+    // Do not 404-leak existence — unknown email is the same 400 as a bad token
+    if (!user) {
+      throw new BadRequestException('Invalid or expired verification token');
+    }
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(dto.token)
+      .digest('hex');
+    const hashPrefix = tokenHash.slice(0, 6);
+
+    await this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(EmailVerificationToken);
+      // FOR UPDATE lookup scoped to (tokenHash, userId) — concurrent same raw serializes here
+      const found = await repo
+        .createQueryBuilder('t')
+        .setLock('pessimistic_write')
+        .where('t.tokenHash = :tokenHash AND t.userId = :userId', {
+          tokenHash,
+          userId: user.id,
+        })
+        .getOne();
+      // Single-use or expired or wrong-user hash → 400 without mutating
+      if (!found || found.usedAt || found.expiresAt.getTime() <= Date.now()) {
+        throw new BadRequestException('Invalid or expired verification token');
+      }
+      found.usedAt = new Date();
+      await repo.save(found);
+      // Set verified once (idempotent flag, no toggle)
+      if (!(user as any).emailVerified) {
+        await manager
+          .getRepository(User)
+          .update(user.id, { emailVerified: true });
+      }
+    });
+    // Hash prefix only — raw token is never logged
+    this.logger.log(
+      `email verified userId=${user.id} hashPrefix=${hashPrefix}`,
+    );
+    // Optional post-commit event — outside the tx, fail-open
+    await this.emitAuthEvent('auth.email_verified', {
+      userId: user.id,
+      email: dto.email,
+    });
+    return { verified: true, emailVerified: true };
+  }
+
+  /**
+   * Re-sends the verification email with anti-enumeration and a 60s per-email cooldown.
+   * @param email - User email to re-send to.
+   * @returns Anti-enum 200 message, or distinct already-verified 200.
+   * @throws HttpException 429 when the 60s cooldown is still active (before any transaction).
+   */
+  async resendVerification(email: string): Promise<{ message: string }> {
+    const normalized = email.toLowerCase();
+    const cooldownKey = `resend:cooldown:${normalized}`;
+    // 60s cooldown prevents burst re-sends — checked before any DB transaction
+    try {
+      const existing = await (this.cache as any).get(cooldownKey);
+      if (existing) {
+        // Cooldown active → 429 immediately, 0 transaction calls
+        const ex: any = new HttpException(
+          'Too Many Requests',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+        ex.options = {
+          headers: {
+            'Retry-After': '60',
+            'X-RateLimit-Limit': '3',
+            'X-RateLimit-Remaining': '0',
+          },
+        };
+        throw ex;
+      }
+    } catch (e: any) {
+      // Re-throw intentional 429; fail open on Redis errors
+      if (e instanceof HttpException && e.getStatus() === 429) throw e;
+      this.logger.warn(
+        `Resend cooldown check fail-open for ${normalized}: ${e?.message ?? e}`,
+      );
+    }
+
+    const user = await this.usersService.findUserByEmail(email);
+    // Anti-enumeration: same message whether or not the email exists
+    if (!user) {
+      this.logger.debug(`resendVerification anti-enum email=${email}`);
+      return {
+        message: 'If an account exists, a verification email has been sent.',
+      };
+    }
+    // Verified users get a distinct message and no new token/email
+    if ((user as any).emailVerified) {
+      return { message: 'Email already verified' };
+    }
+
+    const raw = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const expiresAt = new Date(Date.now() + this.getVerificationTtlMs());
+
+    await this.dataSource.transaction(async (manager) => {
+      // Invalidate priors so the old link dies exactly when the new one is born
+      // (a racing verifyEmail on the old raw serializes on FOR UPDATE and sees usedAt → 400)
+      await manager
+        .createQueryBuilder()
+        .update(EmailVerificationToken)
+        .set({ usedAt: new Date() })
+        .where('userId = :userId AND "usedAt" IS NULL', { userId: user.id })
+        .execute();
+      const repo = manager.getRepository(EmailVerificationToken);
+      await repo.save(
+        repo.create({
+          userId: user.id,
+          tokenHash,
+          expiresAt,
+          usedAt: null,
+        }),
+      );
+      this.lastVerificationToken = raw;
+    });
+    // Arm the 60s cooldown after a successful issue (fail-open on Redis errors)
+    try {
+      await (this.cache as any).set(cooldownKey, '1', 60_000);
+    } catch (e: any) {
+      this.logger.warn(
+        `Resend cooldown set fail-open for ${normalized}: ${e?.message ?? e}`,
+      );
+    }
+    // Publish after commit — outside dataSource.transaction
+    await this.emitAuthEvent('email.verification_requested', {
+      userId: user.id,
+      email,
+      rawToken: raw,
+      expiresAt: expiresAt.toISOString(),
+    });
+    return {
+      message: 'If an account exists, a verification email has been sent.',
+    };
+  }
+
   // ============ Phase 16: WhatsApp OTP — TODO (Future) DEFERRED per 2026-09-16 ============
   // Logic remains implemented but controller returns 501 until WhatsApp Business setup.
   // Password-only login is enforced in V1. Re-enable by removing 501 guard in auth.controller.ts.
@@ -591,7 +944,6 @@ export class AuthService {
           'Resend cooldown active, try in 60 seconds',
         );
     } catch (e) {
-      if (e?.status === 400) throw e;
       this.logger.warn(`Redis cooldown check fail-open: ${e}`);
     }
     const otp = crypto.randomInt(100000, 999999).toString();

@@ -15,7 +15,7 @@ import User from '../../users/entity/user.entity';
  * This entity represents a refresh token for silent accessToken renewal.
  * It handles opaque token storage (sha256 hash only) and enforces single-use rotation.
  */
-@Entity()
+@Entity('refresh_token')
 @Check(`"expiresAt" > "createdAt"`)
 @Index('IDX_refresh_token_userId', ['userId'])
 @Index('IDX_refresh_token_tokenHash', ['tokenHash'])
