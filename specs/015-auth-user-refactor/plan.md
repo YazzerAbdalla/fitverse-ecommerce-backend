@@ -100,6 +100,43 @@ src/
 module — auth stays self-contained per FR-009); shared `src/common/` touched only if the
 CC-A ports don't already exist, vendored with identical semantics.
 
+## Design Constraints (HOW — moved here from spec per WHAT/HOW split)
+
+Spec states observable behavior; this section states the structural rules that
+implement it (details in `research.md` D1–D8, all preserved verbatim):
+
+- **TX ownership (FR-003)**: use-case service owns `dataSource.transaction`;
+  stores receive the tx-scoped `EntityManager` and never commit/rollback/open
+  nested transactions (TX-1/TX-2, invariant TI-3).
+- **Module boundary (FR-002/FR-004)**: no `manager.getRepository(User)` in auth
+  (replace `:264,432,599` via extended `UsersService`); no
+  `DataSource`/repository/`EntityManager` in controllers (invariant TI-1).
+- **Locking (FR-005)**: `FOR UPDATE` on token/refresh rows where the current
+  code locks; single-winner preserved (TI-8).
+- **S-1 mechanics**: unified `JwtGuard` = `JwtService.verifyAsync` + Bearer
+  extract + `UsersService` lookup + `tokenVersion` (+`passwordChangedAt`/`iat`
+  fallback) check, exact strategy messages; `request.user` keeps payload shape;
+  `logoutAll`/`googleLink` switch `(user).id` → `sub`; `JwtStrategy`/
+  `JwtAuthGuard` retained but off the request path (research D1).
+- **S-2 mechanics**: `validateResetToken` stays plain `findOne` (advisory);
+  `resetPassword` revalidates under `FOR UPDATE` then consumes atomically
+  (research D2).
+- **D3 mechanics**: strip only the `password` key from register `data`
+  (research D3).
+- **HTTP boundary (FR-007)**: `VerificationCooldownError(retryAfterMs)` thrown
+  by service, translated by controller to identical 429 + `Retry-After`;
+  zero `HttpException` left in service.
+- **Purity (FR-010)**: `TokenHasher`/`SecureToken`/`Clock`/`parseDurationMs`
+  (CC-A-compatible); triple TTL parse unified with identical outputs.
+- **Config (FR-011)**: full typed `AuthTokenConfig` parsed once at startup,
+  warn-once fallbacks, identical values, no new hard-fail (OD-1/CF-1).
+- **Abstraction gate (FR-010)**: Rule-of-Three (≥3 sites, one reason); no
+  generic `Base/Generic/StateMachine/Repository` (MF-1); two-site merges only
+  if touched; size is a signal (SG-1); queries are signals (PQ-1); deletions
+  need reachability evidence (DC-1).
+- **Docs (FR-013)**: JSDoc + `@param/@returns/@throws` per AGENTS.md §3;
+  `//` intent comments on complex conditions and calculations.
+
 ## Complexity Tracking
 
 > Only items requiring justification beyond the R-baseline (all are approved S-deltas):

@@ -3,13 +3,13 @@
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-10-02
 **Feature**: `specs/015-auth-user-refactor/spec.md`
-**Validation pass**: 2 (post-clarification; all markers resolved 2026-10-02)
+**Validation pass**: 3 (WHAT/HOW split 2026-10-02 — structural detail moved to plan.md Design Constraints + research.md D1–D8; spec is observable-behavior only)
 
 ## Content Quality
 
-- [ ] No implementation details (languages, frameworks, APIs) — FAIL: intentional deviation. This is a behavior-preserving refactor spec governed by `docs/REFACTOR_PLAN.md`; structural constraints (tx ownership, `FOR UPDATE`, store seams, 429/cookie/header parity) ARE the requirements. Rewording them away would lose the guarantee. Accepted for refactor specs; flagged here for transparency.
+- [x] No implementation details (languages, frameworks, APIs) — PASS (pass 3): spec states observable contracts + business rules only; locks/stores/guard-internals/helpers live in plan.md + research.md per the split.
 - [x] Focused on user value and business needs — PASS: US1 covers external consumers (zero migration); US2–US4 cover maintainers (single ownership, auditable tx, clean seams).
-- [ ] Written for non-technical stakeholders — PARTIAL: primary audience is maintainers + security approvers per refactor plan (invariants TI-1/TI-3/TI-8). US1 acceptance scenarios are consumer-readable; structural sections require engineering context by design.
+- [x] Written for non-technical stakeholders — PASS (pass 3): stories, requirements, and success criteria read without codebase knowledge; code identifiers and lock/transaction mechanics removed (guard decision kept by name as the approved stakeholder decision in FR-014 only).
 - [x] All mandatory sections completed — PASS: scenarios, requirements (FR-001–FR-014), entities, success criteria, assumptions all present.
 
 ## Requirement Completeness
@@ -28,9 +28,12 @@
 - [x] All functional requirements have clear acceptance criteria — PASS via US scenarios + SC matrix.
 - [x] User scenarios cover primary flows — PASS: P1 consumer parity, P1 ownership, P2 transactions, P3 seams.
 - [x] Feature meets measurable outcomes defined in Success Criteria — PASS.
-- [ ] No implementation details leak into specification — FAIL: same accepted refactor deviation as above.
+- [x] No implementation details leak into specification — PASS (pass 3): same split; FR numbers/order unchanged so tasks.md + contracts keep their references.
 
 ## Notes
 
-- Remaining failures are structural, not gaps: they reflect that a refactor spec must name the seams it preserves (per `docs/REFACTOR_PLAN.md` §§4, 10). Do not "fix" by deleting them; proceed to `/speckit.clarify` for Q1–Q3, then `/speckit.plan`.
-- After user answers Q1–Q3, replace the 3 [NEEDS CLARIFICATION] markers in FR-014 and re-run this checklist (iteration 2).
+- Pass 3 (2026-10-02): WHAT/HOW split applied per stakeholder direction — spec.md
+  is observable-behavior only; all structural prescriptions moved to plan.md
+  (§Design Constraints) with details in research.md D1–D8. FR/US/SC numbers and
+  order unchanged, so tasks.md, contracts/, and data-model.md references hold.
+  All items pass; ready for `/speckit.implement` gate.
