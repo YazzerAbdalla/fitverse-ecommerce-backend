@@ -18,13 +18,13 @@
 
 **Purpose**: Clean starting point + proven-green baseline environment. No production code changes in this phase.
 
-- [ ] T001 Create feature branch and verify clean tree
+- [X] T001 Create feature branch and verify clean tree
   - Files: none (git only).
   - Steps: `git status` (must be clean; stash/commit anything pending) → `git checkout -b 015-auth-user-refactor` → `git status`.
   - Done when: on branch `015-auth-user-refactor`, working tree clean.
   - Ref: plan.md header (`**Branch**: 015-auth-user-refactor`).
 
-- [ ] T002 Verify infrastructure and record green pre-change gates (auth+users scope)
+- [X] T002 Verify infrastructure and record green pre-change gates (auth+users scope)
   - Files: none (commands only).
   - Steps: `docker-compose up -d` → confirm postgres 5432 / redis 6379 / rabbitmq 5672 reachable → `cp .env.example .env` if `.env` missing (never commit `.env`) → run `npm run lint`, `npm run build`, `npm run test -- --runInBand src/modules/auth src/modules/users` → record the pass counts in a scratch note (you will compare against these numbers in every later phase).
   - Done when: all three gates green; counts recorded.
@@ -36,32 +36,32 @@
 
 **⚠️ CRITICAL**: No production-code change until T008 is committed. T003–T007 are test-only.
 
-- [ ] T003 [P] Baseline contract-matrix test in `src/modules/auth/test/baseline-parity.integration.spec.ts` (new file, real PG + real Redis when available)
+- [X] T003 [P] Baseline contract-matrix test in `src/modules/auth/test/baseline-parity.integration.spec.ts` (new file, real PG + real Redis when available)
   - What: one test per row of `(parity)` — all 15 routes (register, login, refresh body+cookie, logout body+cookie, logout-all, forgot, validate, reset, verify GET+POST, resend, otp/request, otp/verify, google/callback mocked, google/link, PATCH /users/me/preferences).
   - For EACH route assert: exact status code + exact response-body keys (values except fresh tokens/UUIDs) + exact cookies (`refresh_token` attrs) + exact headers (`X-Email-Unverified`, `Retry-After`/`X-RateLimit-*` on 429 paths) per `(parity)`.
   - Also assert: resend/forgot anti-enum (unknown email → same 200 body as known email); refresh reuse → 401 + all sessions dead; double logout → 200; expired/used token → 400; OTP routes → 501.
   - Done when: file exists, full matrix green on UNMODIFIED code.
   - Ref: spec US1 acceptance 1–6; `(parity)` table; research D8.
 
-- [ ] T004 [P] Dual-JWT-path 401 matrix test in `src/modules/auth/test/jwt-paths.integration.spec.ts` (new file)
+- [X] T004 [P] Dual-JWT-path 401 matrix test in `src/modules/auth/test/jwt-paths.integration.spec.ts` (new file)
   - What: pin CURRENT divergent behavior before S-1 unification (research D1).
   - Steps: create user → login (grab access token) → `tokenVersion++` (via `UsersService.incrementTokenVersion`) → call a `@Auth()` route (expect 200 TODAY under `JwtGuard`, proving the bypass) → call a `JwtAuthGuard`-only route (expect 401 TODAY, proving the strategy enforces) → record `request.user` shape per path (payload `{sub,email,role,tokenVersion}` vs entity `{id,...}`).
   - Done when: test documents both outcomes with comments `// S-1 PRE-STATE: JwtGuard allows revoked; JwtStrategy denies` and is green.
   - Ref: research D1; spec FR-014(a).
 
-- [ ] T005 [P] Register-leak proof test in `src/modules/auth/test/register-leak.integration.spec.ts` (new file)
+- [X] T005 [P] Register-leak proof test in `src/modules/auth/test/register-leak.integration.spec.ts` (new file)
   - What: prove the D3 pre-state (research D3): `POST /auth/register` 201 body `data.password` EXISTS and equals a bcrypt hash (`$2b$...`) on unmodified code.
   - Write the assertion as `expect(data.password).toBeDefined()` with comment `// D3 PRE-STATE: leaks hash — T015 flips this to absent`.
   - Done when: green on unmodified code (it MUST fail after T015 — that failure-then-fix is the S-delta proof).
   - Ref: research D3; `auth.service.ts:67-94`.
 
-- [ ] T006 [P] Single-winner race suites in `src/modules/auth/test/token-races.integration.spec.ts` (new file, real PG, `--runInBand`)
+- [X] T006 [P] Single-winner race suites in `src/modules/auth/test/token-races.integration.spec.ts` (new file, real PG, `--runInBand`)
   - What: `Promise.all` concurrency proofs per spec SC-002.
   - Cases: (a) same refresh token ×2 → exactly one 200 + one 401-theft-nuke, loser triggers bulk revoke (query `refresh_token` rows to prove); (b) same reset token ×2 `resetPassword` → one 200 + one 400, password = winner's value; (c) same verify token ×2 → one 200 + one 400, `emailVerified=true` once; (d) `logoutAll` during active refresh → refresh 401 after; (e) resend ×2 within 60s → one 200 + one 429 with `Retry-After`.
   - Done when: all green on unmodified code, stable across 3 runs (flakiness = missing lock, stop and report).
   - Ref: spec SC-002, FR-005/FR-012; research D8.
 
-- [ ] T007 Create PowerShell API flow script in `scripts/e2e-auth-users.ps1` (new file)
+- [X] T007 Create PowerShell API flow script in `scripts/e2e-auth-users.ps1` (new file)
   - What: live-API flow test per `contracts/auth-user-parity.md`, Windows PowerShell 5.1 compatible (no PS7-only flags): unique email per run (`e2e-<epoch>@test.com`); steps = register 201 (+ record `data.password` presence) → duplicate 400 → login 200 (pair + `refresh_token` cookie) → wrong-pass 401 → `GET /users/me` 200 → `PATCH /users/me/preferences` flip/flip-back 200 → refresh rotate 200 → old-token reuse 401 → forgot known+unknown 200-identical → validate garbage 400 → verify garbage 400 → resend 200 then 429 cooldown → OTP 501 → logout 200 twice → re-login → logout-all 200 → refresh-after-nuke 401 → access-after-nuke RECORDED → `X-RateLimit-Limit` header on success.
   - Switches: `-EnforceRevocation` (S-1: access-after-nuke MUST be 401; default off = record-only for baseline) and `-StripPasswordHash` (D3: register data MUST lack password/hash keys; default off = record-only). Non-zero exit on first mismatch; step summary printed.
   - Done when: `powershell -ExecutionPolicy Bypass -File scripts/e2e-auth-users.ps1` passes fully on UNMODIFIED code (baseline mode, app running via `npm run start:dev` with infra up); script committed in this phase.
@@ -94,18 +94,21 @@
 
 **Independent Test**: Baseline matrix (T003) green with ONLY these intended diffs: revoked-token 401s where S-1 closes the hole, validate/reset concurrency semantics per S-2, `register.data` minus the `password` key per D3. All other rows byte-identical.
 
-- [ ] T011 [US1] S-1 tests-first: revoked-user denial expectations in `src/modules/auth/test/jwt-unified.integration.spec.ts` (new file)
+- [X] T011 [US1] S-1 tests-first: revoked-user denial expectations in `src/modules/auth/test/jwt-unified.integration.spec.ts` (new file)
+  - CONSOLIDATED 2026-10-03: no separate file — expectations live in
+    `jwt-paths.integration.spec.ts` (flipped to post-state denial) and the
+    logout-all row of `baseline-parity.integration.spec.ts` (nuked access 401).
   - What: for EVERY `@Auth()` route used by auth/users (plus one cross-module smoke route, e.g. `GET /cart`, read-only): login → capture token → `incrementTokenVersion` → call route → expect 401 with `{statusCode:401}` body.
   - Write these FIRST; they FAIL on unmodified code for `JwtGuard`-only routes (that's the proof of the hole). Do not implement T012 until they fail as expected.
   - Ref: research D1; `(parity)` guard section; spec FR-014(a).
 
-- [ ] T012 [US1] Unify `JwtGuard` as sole JWT path in `src/modules/auth/guards/jwt.guard.ts` (S-1 enactment)
+- [X] T012 [US1] Unify `JwtGuard` as sole JWT path in `src/modules/auth/guards/jwt.guard.ts` (S-1 enactment)
   - Steps: (1) keep Bearer extraction + `verifyAsync` untouched; (2) after verify, load user via `UsersService.findUserById(payload.sub)` (fallback `findUserByEmail(payload.email)` mirroring strategy lines 21-26); (3) enforce `tokenVersion` mismatch → `UnauthorizedException('Token revoked, please login again')` + `passwordChangedAt`/`iat` fallback → `UnauthorizedException('Token revoked after password change')` (copy the exact messages from `strateges/jwt.strategy.ts:27-43`); user-not-found → `UnauthorizedException('User not found')`; (4) keep assigning the PAYLOAD (not the entity) to `request.user` — shape frozen.
   - Do NOT touch: `RolesGuard`, `CurrentUser`, `@Auth()` decorator, `JwtStrategy` file, `JwtAuthGuard` wiring (retained per research D1).
   - Done when: T011 turns green; T003 matrix shows ONLY the new 401s as diff; `npm run build` green.
   - Ref: research D1; `guards/jwt.guard.ts:11-38`.
 
-- [ ] T013 [US1] S-1 companion: `sub`-for-`id` in `src/modules/auth/auth.controller.ts` (`logoutAll`, `googleLink`)
+- [X] T013 [US1] S-1 companion: `sub`-for-`id` in `src/modules/auth/auth.controller.ts` (`logoutAll`, `googleLink`)
   - Steps: `logoutAll` line ~306: `(user as any).id` → `(user as any).sub ?? (user as any).id`; same in `googleLink` line ~346. Rationale comment: unified guard provides payload shape (research D1).
   - Verify: `logoutAll` revokes (old access 401 + old refresh 401); `googleLink` links (mocked profile) — extend T011 file or add cases to `baseline-parity` copy; pre/post wire diff = these two lines + guard file only.
   - Done when: logout-all + link flows green; no other controller lines touched in this task.
@@ -128,7 +131,7 @@
   - Done when: gates green; diff review confirms zero unintended wire changes.
   - Ref: quickstart.md §2–§4.
 
-- [ ] T017 [US1] Run PowerShell API flow in S-delta mode against US1 state (`scripts/e2e-auth-users.ps1`)
+- [X] T017 [US1] Run PowerShell API flow in S-delta mode against US1 state (`scripts/e2e-auth-users.ps1`)
   - Steps: start app (`npm run start:dev`, infra up) → `powershell -ExecutionPolicy Bypass -File scripts/e2e-auth-users.ps1 -EnforceRevocation -StripPasswordHash` → must exit 0 with all steps PASS.
   - Proves over the wire: revoked access denied (S-1), register body has no password key (D3), plus full flow parity (rotation/theft, anti-enum, cooldown 429, OTP 501, prefs, headers).
   - Done when: script summary shows `failed=0`; attach the log to the US1 validation note. Any FAIL besides the 3 S-rows = defect, stop.
