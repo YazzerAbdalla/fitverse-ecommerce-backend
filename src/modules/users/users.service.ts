@@ -1,3 +1,11 @@
+/**
+ * User-record persistence: the sole writer of the user table.
+ *
+ * Responsibility (SRP): user persistence, nothing else.
+ * Used by: AuthService/AuthController (via boundary), JwtGuard/JwtStrategy,
+ *   UsersController, NotificationsModule (contact resolution).
+ * Depends on: TypeORM User repository, DataSource (tx participation).
+ */
 import {
   BadRequestException,
   Injectable,

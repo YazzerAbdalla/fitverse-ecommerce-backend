@@ -1,3 +1,12 @@
+/**
+ * Auth HTTP endpoints: transport, validation, cookies/headers, 429 shaping.
+ * No business logic, no persistence — delegates to AuthService.
+ *
+ * Responsibility (SRP): auth HTTP transport, nothing else.
+ * Used by: AuthModule (route registration).
+ * Depends on: AuthService, RateLimitGuard/JwtAuthGuard/GoogleAuthGuard,
+ *   AUTH_TOKEN_CONFIG (cookie shaping).
+ */
 import {
   Body,
   Controller,

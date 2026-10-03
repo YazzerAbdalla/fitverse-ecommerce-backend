@@ -1,3 +1,10 @@
+/**
+ * Typed auth token configuration, resolved once at startup.
+ *
+ * Responsibility (SRP): auth configuration resolution, nothing else.
+ * Used by: AuthModule provider (AUTH_TOKEN_CONFIG), AuthService/stores.
+ * Depends on: ConfigService (reads), Logger (warn-once on fallback).
+ */
 import { ConfigService } from '@nestjs/config';
 import { Logger } from '@nestjs/common';
 import { parseDurationMs } from '../../common/parse-duration';

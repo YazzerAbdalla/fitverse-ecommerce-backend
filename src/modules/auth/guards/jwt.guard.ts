@@ -1,3 +1,13 @@
+/**
+ * JWT request authentication + revocation enforcement (sole JWT path, S-1).
+ *
+ * Responsibility (SRP): request authentication, nothing else.
+ * Used by: Auth decorator (all guarded REST routes).
+ * Depends on: JwtService (signature), UsersService (user + tokenVersion).
+ * Data owner: request.user in payload shape ({sub, email, fullName, role,
+ *   tokenVersion}) — reused downstream by RolesGuard and @CurrentUser();
+ *   downstream layers MUST NOT re-query the user for identity.
+ */
 import {
   CanActivate,
   ExecutionContext,
@@ -9,16 +19,8 @@ import { Request } from 'express';
 import { UsersService } from '../../users/users.service';
 
 /**
- * This guard is responsible for JWT authentication on every guarded route.
- * It verifies the Bearer signature, loads the user once, and enforces
- * tokenVersion revocation (plus the passwordChangedAt fallback).
- *
- * Responsibility (SRP): request authentication + revocation enforcement, nothing else.
- * Used by: Auth decorator (all guarded REST routes).
- * Depends on: JwtService (signature), UsersService (user + tokenVersion lookup).
- * Data owner: request.user in payload shape ({sub, email, fullName, role,
- *   tokenVersion}) — reused downstream by RolesGuard and @CurrentUser();
- *   downstream layers MUST NOT re-query the user for identity.
+ * Unified JWT guard: verifies the Bearer signature, loads the user once,
+ * and enforces tokenVersion revocation (see file header for the contract).
  */
 @Injectable()
 export class JwtGuard implements CanActivate {

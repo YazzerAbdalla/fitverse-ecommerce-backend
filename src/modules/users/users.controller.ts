@@ -1,3 +1,11 @@
+/**
+ * User self-service HTTP endpoints (profile read, preference update).
+ * No business logic, no persistence — delegates to UsersService.
+ *
+ * Responsibility (SRP): user HTTP transport, nothing else.
+ * Used by: UsersModule (route registration).
+ * Depends on: UsersService.
+ */
 import {
   Body,
   Controller,

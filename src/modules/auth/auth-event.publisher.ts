@@ -1,3 +1,10 @@
+/**
+ * Post-commit auth domain event publishing (transport + bounded wait + fail-open).
+ *
+ * Responsibility (SRP): post-commit auth event publishing, nothing else.
+ * Used by: AuthService (register/reset/verify/resend flows, after commit).
+ * Depends on: NOTIFICATION_SERVICE ClientProxy (optional).
+ */
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { lastValueFrom } from 'rxjs';

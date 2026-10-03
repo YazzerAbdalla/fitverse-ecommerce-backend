@@ -1,3 +1,11 @@
+/**
+ * Refresh-token persistence mechanics (locked lookup, rotation writes, cap-5
+ * eviction, revokes, theft nuke, purge).
+ *
+ * Responsibility (SRP): refresh-token persistence, nothing else.
+ * Used by: AuthService (login/refresh/logout/logout-all orchestration).
+ * Depends on: DataSource, RefreshToken entity.
+ */
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
 import { RefreshToken } from '../entities/refresh-token.entity';

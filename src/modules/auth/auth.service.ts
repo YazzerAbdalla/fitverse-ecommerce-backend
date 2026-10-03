@@ -1,3 +1,12 @@
+/**
+ * Auth orchestration: transaction boundaries + delegation to intent-based
+ * stores, UsersService, and AuthEventPublisher. No broker/cache I/O in tx.
+ *
+ * Responsibility (SRP): auth use-case orchestration, nothing else.
+ * Used by: AuthController, LocalStrategy, GoogleStrategy flows.
+ * Depends on: UsersService, JwtService, DataSource, Cache, ConfigService,
+ *   WHATSAPP_PROVIDER, token stores, AuthEventPublisher, Clock, AUTH_TOKEN_CONFIG.
+ */
 import {
   BadRequestException,
   ConflictException,

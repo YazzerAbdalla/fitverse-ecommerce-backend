@@ -1,3 +1,10 @@
+/**
+ * Email-verification-token persistence mechanics plus resend cooldown state.
+ *
+ * Responsibility (SRP): verification-token persistence + cooldown, nothing else.
+ * Used by: AuthService (requestEmailVerification/verifyEmail/resendVerification).
+ * Depends on: DataSource, Cache (cooldown keys, fail-open).
+ */
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';

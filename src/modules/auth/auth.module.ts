@@ -1,3 +1,13 @@
+/**
+ * Auth module wiring: services, guards, strategies, token stores, and the
+ * startup-resolved token config. Exports shared guards + UsersService access.
+ *
+ * Responsibility (SRP): auth dependency wiring, nothing else.
+ * Used by: AppModule; Order/Cart/Products/Notifications/Inventory/
+ *   Reservation/Outbox modules (shared guards + UsersService scope).
+ * Depends on: UsersModule, TypeOrmModule (token entities), JwtModule,
+ *   PassportModule, ConfigModule.
+ */
 import { Logger, Module } from '@nestjs/common';
 import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';

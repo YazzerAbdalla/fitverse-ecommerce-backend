@@ -1,13 +1,10 @@
 /**
- * This utility is responsible for parsing human duration strings to milliseconds.
- * It unifies the previously triple-duplicated TTL parsers (service x2 + controller
- * cookie math) with byte-identical outputs for identical inputs.
+ * Human duration strings to milliseconds (unifies the triple-duplicated TTL parsers).
  *
  * Responsibility (SRP): duration parsing, nothing else.
  * Used by: AuthTokenConfig (TTL/cooldown resolution).
  * Depends on: nothing (pure function).
  */
-
 /**
  * Parses a duration string to milliseconds.
  *

@@ -1,3 +1,10 @@
+/**
+ * One-time-passcode state (Redis primary, PostgreSQL audit fallback).
+ *
+ * Responsibility (SRP): OTP state, nothing else.
+ * Used by: AuthService OTP orchestration (501-isolated paths only).
+ * Depends on: DataSource (PG audit), Cache (TTL/cooldown, fail-open).
+ */
 import {
   BadRequestException,
   Inject,

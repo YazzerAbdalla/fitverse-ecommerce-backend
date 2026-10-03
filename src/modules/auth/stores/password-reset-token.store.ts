@@ -1,3 +1,11 @@
+/**
+ * Password-reset-token persistence mechanics (issue, advisory/locked lookup,
+ * single-use consume).
+ *
+ * Responsibility (SRP): reset-token persistence, nothing else.
+ * Used by: AuthService (requestPasswordReset/validateResetToken/resetPassword).
+ * Depends on: DataSource, PasswordResetToken entity.
+ */
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 import { PasswordResetToken } from '../entities/password-reset-token.entity';
