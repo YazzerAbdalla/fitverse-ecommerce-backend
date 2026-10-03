@@ -68,6 +68,13 @@ describe('AuthService', () => {
       createNewUser: jest.fn(),
       findUserById: jest.fn(),
       findByGoogleId: jest.fn(),
+      findUserByIdForUpdate: jest.fn(),
+      updatePassword: jest.fn(),
+      incrementTokenVersion: jest.fn(),
+      setEmailVerified: jest.fn(),
+      setPhoneVerified: jest.fn(),
+      findUserByPhone: jest.fn(),
+      linkGoogleAccount: jest.fn(),
     };
     jwtService = { signAsync: jest.fn().mockResolvedValue('token') };
     logger = {
@@ -352,24 +359,22 @@ describe('AuthService', () => {
         expect.stringContaining('tokenHash'),
         expect.objectContaining({ tokenHash, userId: user.id }),
       );
-      // bcrypt 10 rounds: real hash starts with $2b$10$ (cost 10)
-      const updateCall = mockUserRepo.update.mock.calls[0][1];
-      expect(updateCall.password).toBeDefined();
-      expect(updateCall.password).toMatch(/^\$2[ab]\$10\$/);
-      const matches = await bcrypt.compare(
-        'NewStrong123!',
-        updateCall.password,
-      );
-      expect(matches).toBe(true);
-      // user update with increment
-      expect(mockUserRepo.update).toHaveBeenCalledWith(
+      // bcrypt 10 rounds: real hash starts with $2b$10$ (cost 10).
+      // US2: the password write goes through UsersService.updatePassword —
+      // assert on that boundary (same hash + increment + stamp, same tx).
+      expect(usersService.updatePassword).toHaveBeenCalledWith(
         user.id,
+        expect.any(String),
+        undefined,
         expect.objectContaining({
-          password: expect.any(String),
-          tokenVersion: expect.any(Function),
           passwordChangedAt: expect.any(Date),
         }),
       );
+      const [uid, hash] = usersService.updatePassword.mock.calls[0];
+      expect(uid).toBe(user.id);
+      expect(hash).toMatch(/^\$2[ab]\$10\$/);
+      const matches = await bcrypt.compare('NewStrong123!', hash);
+      expect(matches).toBe(true);
       // token usedAt set
       expect(mockTokenRepo.update).toHaveBeenCalledWith(tokenRow.id, {
         usedAt: expect.any(Date),

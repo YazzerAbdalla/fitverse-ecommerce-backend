@@ -96,8 +96,15 @@ describe('AuthService Refresh Token (Phase 17)', () => {
           provide: UsersService,
           useValue: {
             findUserByEmail: jest.fn(),
-            findUserById: jest.fn(),
+            findUserById: jest.fn().mockResolvedValue(user),
             findByGoogleId: jest.fn(),
+            findUserByIdForUpdate: jest.fn(),
+            updatePassword: jest.fn(),
+            incrementTokenVersion: jest.fn(),
+            setEmailVerified: jest.fn(),
+            setPhoneVerified: jest.fn(),
+            findUserByPhone: jest.fn(),
+            linkGoogleAccount: jest.fn(),
           },
         },
         {

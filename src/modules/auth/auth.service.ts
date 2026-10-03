@@ -263,9 +263,8 @@ export class AuthService {
         throw new UnauthorizedException('Invalid or expired refresh token');
       }
 
-      // Load user
-      const userRepo = manager.getRepository(User);
-      const user = await userRepo.findOne({ where: { id: found.userId } });
+      // Load user through the users boundary (US2: no direct user repo here).
+      const user = await this.usersService.findUserById(found.userId, manager);
       if (!user) {
         throw new UnauthorizedException('Invalid or expired refresh token');
       }
@@ -435,16 +434,15 @@ export class AuthService {
    */
   async logoutAll(userId: string): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
-      const userRepo = manager.getRepository(User);
-      const user = await userRepo
-        .createQueryBuilder('u')
-        .setLock('pessimistic_write')
-        .where('u.id = :userId', { userId })
-        .getOne();
+      // Locked read + nuke owned by UsersService (US2); same lock, same 404.
+      const user = await this.usersService.findUserByIdForUpdate(
+        manager,
+        userId,
+      );
       if (!user) throw new UnauthorizedException('User not found');
       // Increment tokenVersion atomically
-      await userRepo.update(userId, {
-        tokenVersion: () => '"tokenVersion" + 1',
+      await this.usersService.incrementTokenVersion(userId, {
+        manager,
         passwordChangedAt: new Date(),
       });
       // Bulk revoke all active refresh tokens
@@ -614,10 +612,10 @@ export class AuthService {
         throw new BadRequestException('Invalid or expired token.');
       }
       const hashed = await bcrypt.hash(dto.newPassword, this.saltOrRounds);
-      const userRepo = manager.getRepository(User);
-      await userRepo.update(user.id, {
-        password: hashed,
-        tokenVersion: () => '"tokenVersion" + 1',
+      // Password write owned by UsersService (US2): same hash + increment +
+      // passwordChangedAt, inside this transaction.
+      await this.usersService.updatePassword(user.id, hashed, undefined, {
+        manager,
         passwordChangedAt: new Date(),
       });
       await repo.update(token.id, { usedAt: new Date() });
@@ -822,11 +820,9 @@ export class AuthService {
       }
       found.usedAt = new Date();
       await repo.save(found);
-      // Set verified once (idempotent flag, no toggle)
+      // Set verified once (idempotent flag, no toggle) via UsersService (US2).
       if (!(user as any).emailVerified) {
-        await manager
-          .getRepository(User)
-          .update(user.id, { emailVerified: true });
+        await this.usersService.setEmailVerified(user.id, manager);
       }
     });
     // Hash prefix only — raw token is never logged
@@ -991,7 +987,9 @@ export class AuthService {
     // persist to PG
     try {
       const repo = this.dataSource.getRepository(OtpVerification);
-      const user = phone ? await this.findUserByPhone(phone) : null;
+      const user = phone
+        ? await this.usersService.findUserByPhone(phone)
+        : null;
       await repo.save(
         repo.create({
           phoneNumber: phone,
@@ -1108,12 +1106,10 @@ export class AuthService {
   }
 
   private async handleOtpSuccess(phone: string, purpose: OtpPurpose) {
-    const user = await this.findUserByPhone(phone);
+    const user = await this.usersService.findUserByPhone(phone);
     if (purpose === OtpPurpose.VerifyPhone) {
       if (user) {
-        await this.dataSource
-          .getRepository(User)
-          .update(user.id, { phoneVerified: true });
+        await this.usersService.setPhoneVerified(user.id);
       }
       return { verified: true };
     }
@@ -1124,17 +1120,9 @@ export class AuthService {
       throw new BadRequestException('No user found with this phone number');
     }
     if (!target.phoneVerified) {
-      await this.dataSource
-        .getRepository(User)
-        .update(target.id, { phoneVerified: true });
+      await this.usersService.setPhoneVerified(target.id);
     }
     return this.login(target);
-  }
-
-  private async findUserByPhone(phone: string): Promise<User | null> {
-    return await this.dataSource
-      .getRepository(User)
-      .findOne({ where: { phoneNumber: phone } });
   }
 
   private async incrementOtpAttempts(phone: string) {
@@ -1198,12 +1186,12 @@ export class AuthService {
       profile.email,
     );
     if (existingByEmail) {
-      // auto-link per Q1
+      // auto-link per Q1 — write owned by UsersService (US2), 409 mapping kept here.
       try {
-        await this.dataSource.getRepository(User).update(existingByEmail.id, {
-          googleId: profile.googleId,
-          provider: AuthProvider.Google,
-        });
+        await this.usersService.linkGoogleAccount(
+          existingByEmail.id,
+          profile.googleId,
+        );
       } catch (e: any) {
         if (this.isUniqueViolation(e))
           throw new ConflictException('Google account already linked');
@@ -1213,20 +1201,19 @@ export class AuthService {
       const { accessToken, refreshToken } = await this.login(updated as any);
       return { user: updated!, accessToken, refreshToken };
     }
-    const repo = this.dataSource.getRepository(User);
-    const created = repo.create({
-      email: profile.email,
-      firstName: profile.firstName || 'Google',
-      lastName: profile.lastName || 'User',
-      googleId: profile.googleId,
-      provider: AuthProvider.Google,
-      password: null,
-      phoneVerified: false,
-      emailVerified: profile.verified,
-    } as any);
+    // Google-create owned by UsersService (US2): same fields, same 409 mapping.
     let saved: User;
     try {
-      saved = await repo.save(created as any);
+      saved = await this.usersService.createNewUser({
+        email: profile.email,
+        firstName: profile.firstName || 'Google',
+        lastName: profile.lastName || 'User',
+        googleId: profile.googleId,
+        provider: AuthProvider.Google,
+        password: null,
+        phoneVerified: false,
+        emailVerified: profile.verified,
+      });
     } catch (e: any) {
       if (this.isUniqueViolation(e))
         throw new ConflictException('Google account already linked');
@@ -1270,11 +1257,9 @@ export class AuthService {
     const existing = await this.usersService.findByGoogleId(profile.googleId);
     if (existing && existing.id !== userId)
       throw new ConflictException('Google account already linked');
+    // Write owned by UsersService (US2); 409 mapping kept here.
     try {
-      await this.dataSource.getRepository(User).update(userId, {
-        googleId: profile.googleId,
-        provider: AuthProvider.Google,
-      });
+      await this.usersService.linkGoogleAccount(userId, profile.googleId);
     } catch (e: any) {
       if (this.isUniqueViolation(e))
         throw new ConflictException('Google account already linked');

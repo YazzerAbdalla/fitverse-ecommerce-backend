@@ -116,17 +116,70 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
         ),
       } as unknown as ConfigService;
       const usersServiceMock: any = {
-        findUserByEmail: jest.fn(async (e: string) =>
-          dataSource.getRepository(User).findOne({ where: { email: e } }),
+        findUserByEmail: jest.fn(async (e: string, m?: any) =>
+          (m ? m.getRepository(User) : dataSource.getRepository(User)).findOne({
+            where: { email: e },
+          }),
         ),
-        findUserById: jest.fn(async (id: string) =>
-          dataSource.getRepository(User).findOne({ where: { id } }),
+        findUserById: jest.fn(async (id: string, m?: any) =>
+          (m ? m.getRepository(User) : dataSource.getRepository(User)).findOne({
+            where: { id },
+          }),
+        ),
+        findUserByIdForUpdate: jest.fn(async (m: any, id: string) =>
+          m
+            .getRepository(User)
+            .createQueryBuilder('u')
+            .setLock('pessimistic_write')
+            .where('u.id = :id', { id })
+            .getOne(),
         ),
         findByGoogleId: jest.fn(async (gid: string) =>
           dataSource.getRepository(User).findOne({ where: { googleId: gid } }),
         ),
         createNewUser: jest.fn(async (data: any) =>
           dataSource.getRepository(User).save(data),
+        ),
+        updatePassword: jest.fn(
+          async (
+            userId: string,
+            hash: string,
+            _v?: number,
+            opts?: { manager?: any; passwordChangedAt?: Date },
+          ) => {
+            const repo = opts?.manager
+              ? opts.manager.getRepository(User)
+              : dataSource.getRepository(User);
+            const update: any = {
+              password: hash,
+              tokenVersion: () => '"tokenVersion" + 1',
+            };
+            if (opts?.passwordChangedAt)
+              update.passwordChangedAt = opts.passwordChangedAt;
+            await repo.update(userId, update);
+          },
+        ),
+        incrementTokenVersion: jest.fn(
+          async (
+            userId: string,
+            opts?: { manager?: any; passwordChangedAt?: Date },
+          ) => {
+            const repo = opts?.manager
+              ? opts.manager.getRepository(User)
+              : dataSource.getRepository(User);
+            const update: any = {
+              tokenVersion: () => '"tokenVersion" + 1',
+            };
+            if (opts?.passwordChangedAt)
+              update.passwordChangedAt = opts.passwordChangedAt;
+            await repo.update(userId, update);
+          },
+        ),
+        setEmailVerified: jest.fn(async (userId: string, m?: any) =>
+          (m ? m.getRepository(User) : dataSource.getRepository(User)).update(
+            userId,
+            { emailVerified: true },
+          ),
         ),
       };
       const whatsappMock: any = { sendOtp: jest.fn() };
