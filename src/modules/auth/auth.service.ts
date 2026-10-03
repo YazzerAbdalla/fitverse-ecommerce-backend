@@ -113,6 +113,14 @@ export class AuthService {
     return { message: 'User created successfuly.', data: safeUser };
   }
 
+  /**
+   * Validates local credentials for the passport-local strategy.
+   *
+   * @param email - Login email.
+   * @param password - Plaintext password to compare (bcrypt).
+   * @returns The user without password hash, or null (unknown user, OAuth-only
+   *   account, or mismatch — all map to the same 401 downstream).
+   */
   async userValidation(
     email: string,
     password: string,
@@ -452,6 +460,14 @@ export class AuthService {
   }
 
   // ============ Phase 16: Forgot Password & Recovery Token ============
+  /**
+   * Starts a password reset: anti-enumeration void for unknown emails,
+   * otherwise issues a single-use 15m token (priors invalidated) and emits
+   * the send event after commit.
+   *
+   * @param email - Account email (never leaked on miss).
+   * @returns Void.
+   */
   async requestPasswordReset(email: string): Promise<void> {
     const user = await this.usersService.findUserByEmail(email);
     if (!user) {
@@ -729,6 +745,14 @@ export class AuthService {
   // ============ Phase 16: WhatsApp OTP — TODO (Future) DEFERRED per 2026-09-16 ============
   // Logic remains implemented but controller returns 501 until WhatsApp Business setup.
   // Password-only login is enforced in V1. Re-enable by removing 501 guard in auth.controller.ts.
+  /**
+   * Issues a 6-digit OTP (deferred path: controller currently returns 501).
+   *
+   * @param dto - {phoneNumber, purpose} (phone falls back to the caller's own).
+   * @param currentUser - Authenticated caller, if any.
+   * @returns Seconds until expiry.
+   * @throws BadRequestException on missing/invalid phone or unsupported purpose.
+   */
   async requestWhatsAppOtp(
     dto: { phoneNumber?: string; purpose?: OtpPurpose },
     currentUser?: Partial<User>,
@@ -773,6 +797,14 @@ export class AuthService {
     return { expiresIn: Math.round(ttlMs / 1000) };
   }
 
+  /**
+   * Verifies an OTP attempt and continues post-verification orchestration
+   * (flag set or passwordless login). State machine lives in OtpStore.
+   *
+   * @param dto - {phoneNumber, otp, purpose}.
+   * @returns Verification result or fresh login pair (purpose-dependent).
+   * @throws BadRequestException on invalid/expired OTP or too many attempts.
+   */
   async verifyWhatsAppOtp(dto: {
     phoneNumber: string;
     otp: string;
@@ -809,6 +841,14 @@ export class AuthService {
   }
 
   // ============ Phase 16: Google OAuth ============ (Phase 17 extends to issue refresh)
+  /**
+   * Signs in with a verified Google profile: existing Google link returns,
+   * verified-email match auto-links, otherwise a Google user is created.
+   *
+   * @param profile - Verified Google profile (email, names, googleId).
+   * @returns User plus fresh access/refresh pair.
+   * @throws BadRequestException on unverified provider email.
+   */
   async handleGoogleLogin(
     profile: GoogleProfile,
   ): Promise<{ user: User; accessToken: string; refreshToken: string }> {
@@ -872,6 +912,15 @@ export class AuthService {
     );
   }
 
+  /**
+   * Links a Google identity to the current user (verified provider email only).
+   *
+   * @param userId - Owner user id (from the payload subject, S-1).
+   * @param profile - Verified Google profile.
+   * @returns The linked user.
+   * @throws BadRequestException on unverified email; ConflictException on
+   *   double-link.
+   */
   async linkGoogleAccount(
     userId: string,
     profile: GoogleProfile,

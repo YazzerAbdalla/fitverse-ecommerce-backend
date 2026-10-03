@@ -108,6 +108,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Registers a new user and triggers the verification email (fire-and-forget). */
   async register(@Body() userResgisterDto: UserRegisterDto) {
     return await this.authService.register(userResgisterDto);
   }
@@ -121,6 +122,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Logs in with password credentials; sets the HttpOnly refresh cookie. */
   async login(
     @Request() req: ExpressRequest & { user: Partial<User> },
     @Res({ passthrough: true }) res: ExpressResponse,
@@ -144,6 +146,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Requests a password reset (anti-enumeration: always the neutral success). */
   async forgotPassword(@Body() dto: ForgotPasswordDto) {
     await this.authService.requestPasswordReset(dto.email);
     return { message: 'If an account exists, a reset link has been sent.' };
@@ -156,6 +159,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Advisory reset-token pre-check (non-authoritative UX helper). */
   async validateResetToken(@Body() dto: ValidateResetTokenDto) {
     await this.authService.validateResetToken(dto.email, dto.token);
     return { valid: true };
@@ -168,6 +172,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Consumes a reset token and changes the password (single-use authority). */
   async resetPassword(@Body() dto: ResetPasswordDto) {
     await this.authService.resetPassword(dto);
     return { message: 'Password reset successful.' };
@@ -182,6 +187,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Verifies an email link token (query transport). */
   async verifyEmailGet(@Query() dto: VerifyEmailDto) {
     return await this.authService.verifyEmail(dto);
   }
@@ -195,6 +201,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Verifies an email token (body transport). */
   async verifyEmailPost(@Body() dto: VerifyEmailDto) {
     return await this.authService.verifyEmail(dto);
   }
@@ -207,6 +214,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 60 or 3600',
   })
+  /** Resends verification honoring cooldown + anti-enumeration; renders 429 on cooldown. */
   async resendVerification(@Body() dto: ResendVerificationDto) {
     try {
       return await this.authService.resendVerification(dto.email);
@@ -242,6 +250,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Deferred WhatsApp OTP request (501 until provider setup). */
   async requestOtp(
     @Body() _dto: RequestOtpDto,
     @CurrentUser() _user?: Partial<User>,
@@ -260,6 +269,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Deferred WhatsApp OTP verify (501 until provider setup). */
   async verifyOtp(@Body() _dto: VerifyOtpDto) {
     throw new HttpException(
       'WhatsApp OTP not enabled — password login only. TODO future.',
@@ -281,6 +291,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Rotates a refresh token (body or cookie transport); sets the new cookie. */
   async refresh(
     @Body() dto: RefreshTokenDto,
     @Req() req: ExpressRequest,
@@ -310,6 +321,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Revokes one refresh token (idempotent success). */
   async logout(@Body() dto: LogoutDto, @Req() req: ExpressRequest) {
     const raw = this.resolveRefreshRaw(dto, req);
     await this.authService.logout(raw);
@@ -328,6 +340,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Revokes all sessions via tokenVersion++ plus bulk revoke. */
   async logoutAll(@CurrentUser() user: Partial<User>) {
     // S-1: unified guard provides the payload shape ({sub, ...}); the entity
     // shape ({id}) existed only via the removed stacked JwtAuthGuard.
@@ -339,6 +352,7 @@ export class AuthController {
   @Get('/google')
   @UseGuards(GoogleAuthGuard)
   @ApiOperation({ summary: 'Initiate Google OAuth (302)' })
+  /** Initiates Google OAuth (passport redirect). */
   async googleAuth() {}
 
   @Get('/google/callback')
@@ -348,6 +362,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Completes Google OAuth; returns the pair plus refresh cookie. */
   async googleCallback(
     @Request() req: ExpressRequest & { user: any },
     @Res({ passthrough: true }) res: ExpressResponse,
@@ -369,6 +384,7 @@ export class AuthController {
   @Get('/google/link')
   @UseGuards(JwtAuthGuard, GoogleAuthGuard)
   @ApiOperation({ summary: 'Link Google to current user' })
+  /** Links the Google identity to the current user. */
   async googleLink(
     @CurrentUser() user: Partial<User>,
     @Request() req: ExpressRequest & { user: any },

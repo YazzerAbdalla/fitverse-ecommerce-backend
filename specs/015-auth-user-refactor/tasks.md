@@ -233,34 +233,39 @@
 
 **Independent Test**: Per-helper identical-output matrices + unchanged controller suites; reviewer finds ≥3 call sites cited per abstraction and zero generic framework types.
 
-- [ ] T029 [US4] Rewire crypto/clock/TTL call sites to T009 ports + `AuthTokenConfig`
+- [X] T029 [US4] Rewire crypto/clock/TTL call sites to T009 ports + `AuthTokenConfig`
   - Files: `auth.service.ts` (sha256 ×14 → `TokenHasher`, `randomBytes` ×7 → `SecureToken`, `new Date/Date.now` ~30× → `Clock`, TTL reads → injected `AuthTokenConfig` + `parseDurationMs`); `auth.controller.ts` (cookie TTL math + `resolveRefreshRaw`/`getRefreshCookieName` → config + shared helper; keep triple-extraction body→cookie→header behavior identical).
   - Add `ports-parity.spec.ts`: same-input→same-output matrix for hasher/token/TTL/clock-frozen-expiry.
   - Done when: matrices green; `grep -n "crypto\|Date.now\|new Date()" src/modules/auth/auth.service.ts` → only inside ports; T003 matrix zero-diff.
   - Ref: research D7; clarified Q4; spec FR-010.
 
-- [ ] T030 [US4] Move in-service 429 to controller in `auth.service.ts:830-855` + `auth.controller.ts:199-212` (resend cooldown)
+- [X] T030 [US4] Move in-service 429 to controller in `auth.service.ts:830-855` + `auth.controller.ts:199-212` (resend cooldown)
   - Steps: service throws `VerificationCooldownError(retryAfterMs)` (new tiny class in `auth.service.ts` or `errors.ts` — do NOT add a shared framework error hierarchy); controller catches → identical 429 status + body + `Retry-After` header (prove byte-identical via T003 resend-429 row pre/post). Repeat the pattern for ANY other in-service HTTP construction found (`grep -n "HttpException" src/modules/auth/auth.service.ts`).
   - Done when: T003 resend rows zero-diff; service file has zero `HttpException` imports left (prove via grep).
   - Ref: research D7; spec FR-007.
 
-- [ ] T031 [P] [US4] Logger hygiene + `LocalAuthGuard` proof-gated simplification
+- [X] T031 [P] [US4] Logger hygiene + `LocalAuthGuard` proof-gated simplification
   - Logger: replace `console.log` (`auth.controller.ts:124,126`) with injected `Logger`; keep message content.
   - `LocalAuthGuard:15-27`: temporarily REMOVE the manual `plainToInstance+validate` block on a scratch branch → run T003 login-400 rows → if byte-identical (global pipe covers), keep removal; if ANY shape differs, RESTORE and record keep-decision. Proof-gated, never assumed.
   - Done when: logger done + guard decision recorded with test evidence either way.
   - Ref: research D6; AGENTS.md logging rule.
 
-- [ ] T032 [P] [US4] `strateges/` → `strategies/` path-hygiene move
+- [X] T032 [P] [US4] `strateges/` → `strategies/` path-hygiene move
   - Steps: move `strateges/*.strategy.ts` → `strategies/`; update imports (`auth.module.ts:8-10`, `local.strategy` self-import, any spec imports); delete `strateges/`; run `npm run build` + FULL auth/users test suites.
   - Done when: build + suites green; `git status` shows pure renames + import-line edits (reachability evidence = compiler + DI resolution, DC-1).
   - Ref: research D6; spec edge-case bullet.
 
-- [ ] T033 [US4] Rule-of-Three review pass over all new units
+- [X] T033 [US4] Rule-of-Three review pass over all new units
+  - REVIEWED 2026-10-03: sha256Hex 12 sites, generateHex 6, clock.now 8,
+    tokenConfig 9, eventPublisher.emit 4–5, VerificationCooldownError
+    raise+translate (HTTP-boundary seam, documented); stores carry single
+    crisp responsibilities (file headers); zero generic Base/StateMachine/
+    Repository framework types (grep-proven).
   - Steps: for each new abstraction (stores, publisher, ports, cooldown error, config) append its ≥3 call sites (or single crisp responsibility for stores) to its file JSDoc `@responsibility` note; DELETE or inline anything that fails the gate (builder-style single-use wrappers, generic helpers).
   - Done when: review recorded; `grep -rn "Base\|Generic\|StateMachine" src/modules/auth/ src/modules/users/` → zero new framework types.
   - Ref: plan MF-1; spec FR-010/SC-005.
 
-- [ ] T034 [US4] Re-run PowerShell API flow in S-delta mode (`scripts/e2e-auth-users.ps1`)
+- [X] T034 [US4] Re-run PowerShell API flow in S-delta mode (`scripts/e2e-auth-users.ps1`)
   - Steps: same command as T017 (`-EnforceRevocation -StripPasswordHash`).
   - Done when: exit 0, `failed=0`, log attached. Final wire proof before polish — any FAIL = defect, stop.
   - Ref: T007 script.
@@ -273,12 +278,12 @@
 
 **Purpose**: Docs, doc-comments, full gates, final diff review. No behavior change in this phase.
 
-- [ ] T035 JSDoc + intent-comment audit on every touched class/method (`auth.service.ts`, all stores, publisher, config, `jwt.guard.ts`, controller, `users.service.ts`)
+- [X] T035 JSDoc + intent-comment audit on every touched class/method (`auth.service.ts`, all stores, publisher, config, `jwt.guard.ts`, controller, `users.service.ts`)
   - Class-level `/** This service/store/controller is responsible for ... */`; public methods with `@param/@returns/@throws`; `//` intent comments on multi-predicate guards, TTL/expiry math, lock ordering, cap-5 eviction pick, anti-enum branches. Update stale comments (esp. S-1/S-2/D3 sites).
   - Done when: manual audit complete; `npm run lint` green (treats missing docs as failure per AGENTS.md §3).
   - Ref: AGENTS.md §3; spec FR-013.
 
-- [ ] T036 [P] Record decisions: ADR entry in `docs/decisions/` (`0012-auth-users-refactor.md`: S-1/S-2/D3 + store split + frozen guard/factory) + touch-up `docs/architecture/modules.md` auth section + `docs/plan.md` backlog line if the repo convention requires
+- [X] T036 [P] Record decisions: ADR entry in `docs/decisions/` (`0012-auth-users-refactor.md`: S-1/S-2/D3 + store split + frozen guard/factory) + touch-up `docs/architecture/modules.md` auth section + `docs/plan.md` backlog line if the repo convention requires
   - Constraints: record, don't duplicate `docs/plan.md` narrative (constitution IX); link spec/plan/research.
   - Done when: ADR merged in the branch; cross-links valid.
   - Ref: constitution IX; research D1–D8.
