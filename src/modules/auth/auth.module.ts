@@ -18,6 +18,7 @@ import { NoopEmailProvider } from '../notifications/email.provider';
 import { SmtpEmailProvider } from '../notifications/smtp-email.provider';
 import { RateLimitGuard } from './guards/rate-limit.guard';
 import { JwtGuard } from './guards/jwt.guard';
+import { AUTH_TOKEN_CONFIG, resolveAuthTokenConfig } from './auth-token.config';
 
 @Module({
   imports: [
@@ -47,6 +48,14 @@ import { JwtGuard } from './guards/jwt.guard';
     GoogleStrategy,
     RateLimitGuard,
     JwtGuard,
+    {
+      // Parsed once at startup (T010): TTL/cooldown/cookie/OAuth settings with
+      // legacy-identical defaults. No hard-fail on missing keys (warn-once).
+      provide: AUTH_TOKEN_CONFIG,
+      inject: [ConfigService, Logger],
+      useFactory: (config: ConfigService, logger: Logger) =>
+        resolveAuthTokenConfig(config, logger),
+    },
     { provide: 'WHATSAPP_PROVIDER', useClass: NoopWhatsAppProvider },
     SmtpEmailProvider,
     NoopEmailProvider,
