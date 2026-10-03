@@ -34,10 +34,14 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     ) {
       throw new UnauthorizedException('Token revoked, please login again');
     }
-    // fallback passwordChangedAt check for old tokens
+    // fallback passwordChangedAt check for old tokens.
+    // iat is second-precision (truncated down) while passwordChangedAt is
+    // ms-precision: only revoke when issued a full second+ before the change,
+    // otherwise logins within ~1s after a change falsely read as revoked.
+    // (Kept in sync with JwtGuard.assertNotRevoked until S-1 removes this path.)
     if ((user as any).passwordChangedAt && payload.iat) {
       const changed = new Date((user as any).passwordChangedAt).getTime();
-      if (payload.iat * 1000 < changed) {
+      if (payload.iat * 1000 < changed - 1000) {
         throw new UnauthorizedException('Token revoked after password change');
       }
     }

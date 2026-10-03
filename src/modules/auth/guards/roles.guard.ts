@@ -22,7 +22,9 @@ export class RolesGuard implements CanActivate {
       [context.getHandler(), context.getClass()],
     );
 
-    if (!requiredRoles) return true;
+    // B4: bare @Auth() sets metadata to [] (truthy). Empty means
+    // authenticated-only — no role restriction — so pass through.
+    if (!requiredRoles || requiredRoles.length === 0) return true;
 
     const request = context
       .switchToHttp()

@@ -17,6 +17,7 @@ import { NoopWhatsAppProvider } from './providers/whatsapp.provider';
 import { NoopEmailProvider } from '../notifications/email.provider';
 import { SmtpEmailProvider } from '../notifications/smtp-email.provider';
 import { RateLimitGuard } from './guards/rate-limit.guard';
+import { JwtGuard } from './guards/jwt.guard';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { RateLimitGuard } from './guards/rate-limit.guard';
     JwtStrategy,
     GoogleStrategy,
     RateLimitGuard,
+    JwtGuard,
     { provide: 'WHATSAPP_PROVIDER', useClass: NoopWhatsAppProvider },
     SmtpEmailProvider,
     NoopEmailProvider,
@@ -65,6 +67,15 @@ import { RateLimitGuard } from './guards/rate-limit.guard';
     },
   ],
   controllers: [AuthController],
-  exports: [AuthService, RateLimitGuard, 'EMAIL_PROVIDER'],
+  // UsersModule is re-exported so every AuthModule importer (order, cart,
+  // products, notifications, inventory, reservation, outbox) can resolve the
+  // unified JwtGuard's UsersService in its own scope (S-1 wiring).
+  exports: [
+    AuthService,
+    RateLimitGuard,
+    JwtGuard,
+    UsersModule,
+    'EMAIL_PROVIDER',
+  ],
 })
 export class AuthModule {}
