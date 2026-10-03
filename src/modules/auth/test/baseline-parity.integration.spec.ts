@@ -129,7 +129,7 @@ describe('Baseline Parity T003 - auth/users contract matrix (full-app supertest)
     expect(app).toBeDefined();
   });
 
-  it('register 201 + D3 pre-state key record', async () => {
+  it('register 201 without password key (D3 POST-STATE)', async () => {
     if (!needApp()) return;
     const res = await req('post', '/auth/register')
       .send({ firstName: 'Base', lastName: 'Line', email, password })
@@ -137,9 +137,9 @@ describe('Baseline Parity T003 - auth/users contract matrix (full-app supertest)
     expect(Object.keys(res.body).sort()).toEqual(['data', 'message']);
     expect(res.body.message).toBe('User created successfuly.');
     expect(res.body.data.email).toBe(email);
-    // D3 PRE-STATE: register leaks the bcrypt hash — T015 flips this to absent
-    expect(res.body.data.password).toBeDefined();
-    expect(String(res.body.data.password)).toMatch(/^\$2b\$/);
+    // D3 POST-STATE (was PRE-STATE leak): no credential material in the body.
+    expect(res.body.data.password).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain('$2b$');
   });
 
   it('duplicate register 400 (nested message object)', async () => {

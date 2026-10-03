@@ -160,7 +160,7 @@ describe('Register leak baseline T005/D3 - real PG', () => {
     }
   });
 
-  it('register returns data.password bcrypt hash (D3 PRE-STATE)', async () => {
+  it('register returns data WITHOUT password hash (D3 POST-STATE)', async () => {
     if (skip) {
       console.warn('[register-leak integration] SKIP test 1', skipReason);
       return;
@@ -173,9 +173,9 @@ describe('Register leak baseline T005/D3 - real PG', () => {
       password: 'Password123!',
     });
     expect(result.message).toBe('User created successfuly.');
-    // D3 PRE-STATE: leaks hash — T015 flips this to absent
-    expect(result.data.password).toBeDefined();
-    expect(result.data.password).toMatch(/^\$2[aby]\$/);
+    // D3 POST-STATE (was PRE-STATE leak): no password/hash key anywhere.
+    expect(result.data.password).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('$2b$');
   });
 
   it('userValidation strips password on success (control: leak is register-specific)', async () => {

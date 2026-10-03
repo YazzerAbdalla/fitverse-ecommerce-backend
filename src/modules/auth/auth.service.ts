@@ -90,7 +90,10 @@ export class AuthService {
       );
     });
 
-    return { message: 'User created successfuly.', data: newUser };
+    // D3: same shape as before minus the credential material — the bcrypt hash
+    // must never leave the server in a response body (approved S-delta).
+    const { password: _dropped, ...safeUser } = newUser;
+    return { message: 'User created successfuly.', data: safeUser };
   }
 
   async userValidation(
@@ -553,6 +556,12 @@ export class AuthService {
     }
   }
 
+  /**
+   * Advisory pre-check for reset-token validity (UX only, unlocked read).
+   * S-2: this is NOT the authority — resetPassword revalidates hash/expiry/
+   * use inside its own transaction holding FOR UPDATE and is the sole decider.
+   * A "valid" answer here can still 400 at reset time under concurrency.
+   */
   async validateResetToken(email: string, rawToken: string): Promise<User> {
     const user = await this.usersService.findUserByEmail(email);
     if (!user) throw new BadRequestException('Invalid or expired token.');
@@ -570,6 +579,12 @@ export class AuthService {
     return user;
   }
 
+  /**
+   * Consumes a reset token and changes the password as one atomic unit.
+   * S-2 authority: hash/expiry/use are revalidated here inside the
+   * transaction holding FOR UPDATE — validateResetToken's answer is advisory
+   * only. Single-winner under concurrency (second consume 400s).
+   */
   async resetPassword(dto: {
     email: string;
     token: string;

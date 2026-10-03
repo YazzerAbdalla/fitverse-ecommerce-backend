@@ -254,6 +254,36 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
     expect(await bcrypt.compare(loserPw, dbUser.password)).toBe(false);
   });
 
+  it('(b2) validate says valid, but reset is the authority (S-2 ordering)', async () => {
+    if (skip) {
+      console.warn('SKIP (b2)');
+      return;
+    }
+    // S-2: validateResetToken is an advisory pre-check; a concurrent consume
+    // wins and the second reset 400s even though validate just said valid.
+    const email = uniq('race_validate');
+    await seedUser(email);
+    await authService.requestPasswordReset(email);
+    const raw = authService.lastRawToken!;
+    // Advisory check passes before any consume.
+    await expect(
+      authService.validateResetToken(email, raw),
+    ).resolves.toBeDefined();
+    // Consume the token, then prove the same raw is now rejected at BOTH
+    // layers: advisory validate AND authoritative reset.
+    await authService.resetPassword({
+      email,
+      token: raw,
+      newPassword: 'Consumed123!',
+    });
+    await expect(authService.validateResetToken(email, raw)).rejects.toThrow(
+      /Invalid or expired token/,
+    );
+    await expect(
+      authService.resetPassword({ email, token: raw, newPassword: 'Late123!' }),
+    ).rejects.toThrow(/Invalid or expired token/);
+  });
+
   it('(c) same verify token x2 -> one 200 + one 400, emailVerified true once', async () => {
     if (skip) {
       console.warn('SKIP (c)');
