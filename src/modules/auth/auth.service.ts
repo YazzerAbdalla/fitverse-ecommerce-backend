@@ -271,9 +271,11 @@ export class AuthService {
       // This is single-use rotation: old token should be revokedAt NOT NULL after first refresh
       if (found.revokedAt) {
         // Theft: revoke all remaining active tokens for this user (outside rows already revoked)
-        // Do bulk revoke before throwing 401 — must be observable
-        // Use manager for bulk revoke
-        await manager
+        // Do bulk revoke before throwing 401 — must be observable.
+        // B5: this UPDATE runs on the DataSource (own implicit transaction), NOT
+        // the enclosing manager — the 401 below rolls the outer tx back, which
+        // would otherwise undo the nuke and leave the stolen session alive.
+        await this.dataSource
           .createQueryBuilder()
           .update(RefreshToken)
           .set({ revokedAt: new Date() })
@@ -326,13 +328,14 @@ export class AuthService {
       // Revoke old token
       await repo.update(found.id, { revokedAt: new Date() });
 
-      // Cap 5 LRU before insert — count active excluding the just-revoked old
+      // Cap 5 LRU before insert — count active excluding the just-revoked old.
+      // IS NULL (not `null`) is required by the installed TypeORM in where clauses (B1).
       const activeCount = await repo.count({
-        where: { userId: found.userId, revokedAt: null as any },
+        where: { userId: found.userId, revokedAt: IsNull() },
       });
       if (activeCount >= 5) {
         const oldest = await repo.find({
-          where: { userId: found.userId, revokedAt: null as any },
+          where: { userId: found.userId, revokedAt: IsNull() },
           order: { createdAt: 'ASC' },
           take: 1,
         });
