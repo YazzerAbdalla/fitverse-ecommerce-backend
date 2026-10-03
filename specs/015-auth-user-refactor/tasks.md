@@ -288,7 +288,7 @@
   - Done when: ADR merged in the branch; cross-links valid.
   - Ref: constitution IX; research D1–D8.
 
-- [ ] T037 Final gates + baseline diff review + PowerShell flow sign-off (`src/modules/auth/`, `src/modules/users/`, git diff vs baseline hash, `scripts/e2e-auth-users.ps1`)
+- [X] T037 Final gates + baseline diff review + PowerShell flow sign-off (`src/modules/auth/`, `src/modules/users/`, git diff vs baseline hash, `scripts/e2e-auth-users.ps1`)
   - Steps: `npm run lint` → `npm run build` → `npm run test -- --runInBand src/modules/auth src/modules/users` → `npm run test:e2e` (auth-relevant suites) → quickstart.md §3 greps (all zero) → final `powershell -ExecutionPolicy Bypass -File scripts/e2e-auth-users.ps1 -EnforceRevocation -StripPasswordHash` (exit 0, log kept) → `git diff <baseline-hash> --stat` + full diff read: ONLY intended files; wire diff limited to the 3 approved S rows.
   - Done when: everything green; diff review signed off in the task tracker/PR description with the baseline hash + S-delta test links + all PS run logs (T007/T017/T021/T028/T034/T037).
   - Ref: quickstart.md §4; spec SC-001–SC-005; plan DoD (§11 of REFACTOR_PLAN).
