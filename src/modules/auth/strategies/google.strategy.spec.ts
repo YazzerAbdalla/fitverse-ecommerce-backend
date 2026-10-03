@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { GoogleStrategy } from '../strateges/google.strategy';
+import { GoogleStrategy } from './google.strategy';
 
 describe('GoogleStrategy', () => {
   let configGetMock: jest.Mock;

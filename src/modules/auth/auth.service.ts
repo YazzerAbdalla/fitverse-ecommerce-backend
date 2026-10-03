@@ -1,15 +1,19 @@
 import {
   BadRequestException,
   ConflictException,
-  HttpException,
-  HttpStatus,
   Inject,
   Injectable,
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import * as crypto from 'crypto';
+import * as crypto from 'crypto'; // randomInt only (OTP digits have no port)
+import { sha256Hex } from '../../common/token-hasher';
+import { generateHex } from '../../common/secure-token';
+import { parseDurationMs } from '../../common/parse-duration';
+import { SystemClock } from '../../common/clock';
+import { AUTH_TOKEN_CONFIG } from './auth-token.config';
+import type { AuthTokenConfig } from './auth-token.config';
 import { UsersService } from '../users/users.service';
 import { UserRegisterDto } from './dto/user-register.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
@@ -22,12 +26,13 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
 import type { WhatsAppProvider } from './providers/whatsapp.provider';
-import { GoogleProfile } from './strateges/google.strategy';
+import { GoogleProfile } from './strategies/google.strategy';
 import { RefreshTokenStore } from './stores/refresh-token.store';
 import { PasswordResetTokenStore } from './stores/password-reset-token.store';
 import { VerificationTokenStore } from './stores/verification-token.store';
 import { OtpStore } from './stores/otp.store';
 import { AuthEventPublisher } from './auth-event.publisher';
+import { VerificationCooldownError } from './stores/verification-token.store';
 
 /**
  * This service is responsible for auth orchestration (register, login,
@@ -52,6 +57,8 @@ export class AuthService {
     private readonly verificationTokens: VerificationTokenStore,
     private readonly otpStore: OtpStore,
     private readonly eventPublisher: AuthEventPublisher,
+    private readonly clock: SystemClock,
+    @Inject(AUTH_TOKEN_CONFIG) private readonly tokenConfig: AuthTokenConfig,
   ) {}
 
   private saltOrRounds = 10;
@@ -158,10 +165,12 @@ export class AuthService {
    * @throws UnauthorizedException if user not found (rare).
    */
   private async createRefreshTokenForUser(userId: string): Promise<string> {
-    const raw = crypto.randomBytes(32).toString('hex');
-    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
-    const ttl = this.configService.get<string>('REFRESH_TOKEN_TTL') || '7d';
-    const expiresAt = new Date(Date.now() + this.parseTtlMs(ttl));
+    const raw = generateHex();
+    const tokenHash = sha256Hex(raw);
+    // Lifetime from startup-resolved config (was per-access read + parse).
+    const expiresAt = new Date(
+      this.clock.now().getTime() + this.tokenConfig.refreshTokenTtlMs,
+    );
 
     // Enforce cap 5 active LRU — revoke oldest if needed (store-owned reads).
     const activeCount = await this.refreshTokens.countActive(userId);
@@ -185,11 +194,8 @@ export class AuthService {
         this.logger.warn(
           `Refresh tokenHash collision userId=${userId} retry once`,
         );
-        const retryRaw = crypto.randomBytes(32).toString('hex');
-        const retryHash = crypto
-          .createHash('sha256')
-          .update(retryRaw)
-          .digest('hex');
+        const retryRaw = generateHex();
+        const retryHash = sha256Hex(retryRaw);
         await this.refreshTokens.create({
           userId,
           tokenHash: retryHash,
@@ -220,10 +226,7 @@ export class AuthService {
     if (!/^[0-9a-f]{64}$/.test(rawRefresh)) {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(rawRefresh)
-      .digest('hex');
+    const tokenHash = sha256Hex(rawRefresh);
     const prefix = tokenHash.slice(0, 6);
 
     let result: {
@@ -320,10 +323,11 @@ export class AuthService {
         }
       }
 
-      const newRaw = crypto.randomBytes(32).toString('hex');
-      const newHash = crypto.createHash('sha256').update(newRaw).digest('hex');
-      const ttl = this.configService.get<string>('REFRESH_TOKEN_TTL') || '7d';
-      const newExpiresAt = new Date(Date.now() + this.parseTtlMs(ttl));
+      const newRaw = generateHex();
+      const newHash = sha256Hex(newRaw);
+      const newExpiresAt = new Date(
+        this.clock.now().getTime() + this.tokenConfig.refreshTokenTtlMs,
+      );
       await this.refreshTokens.create(
         {
           userId: found.userId,
@@ -384,10 +388,7 @@ export class AuthService {
       // Invalid shape → still 200 anti-enum per spec
       return;
     }
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(rawRefresh)
-      .digest('hex');
+    const tokenHash = sha256Hex(rawRefresh);
     // Idempotent UPDATE where revokedAt IS NULL — 0 rows is still 200 (store-owned).
     await this.refreshTokens.revokeByHashWhereActive(tokenHash);
     this.logger.log(`logout revoked prefix=${tokenHash.slice(0, 6)}`);
@@ -448,14 +449,12 @@ export class AuthService {
       this.logger.debug(`forgot-password: email not found ${email}`);
       return;
     }
-    const rawToken = crypto.randomBytes(32).toString('hex');
+    const rawToken = generateHex();
     this.lastRawToken = rawToken;
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
-    const ttl = this.configService.get<string>('RESET_TOKEN_TTL') || '15m';
-    const expiresAt = new Date(Date.now() + this.parseTtlMs(ttl));
+    const tokenHash = sha256Hex(rawToken);
+    const expiresAt = new Date(
+      this.clock.now().getTime() + this.tokenConfig.resetTokenTtlMs,
+    );
 
     await this.dataSource.transaction(async (manager) => {
       await this.resetTokens.issue(manager, user.id, tokenHash, expiresAt);
@@ -493,10 +492,7 @@ export class AuthService {
   async validateResetToken(email: string, rawToken: string): Promise<User> {
     const user = await this.usersService.findUserByEmail(email);
     if (!user) throw new BadRequestException('Invalid or expired token.');
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
+    const tokenHash = sha256Hex(rawToken);
     // Advisory read (S-2): no lock, UX pre-check only.
     const token = await this.resetTokens.findAdvisory(tokenHash, user.id);
     if (!token || token.usedAt || token.expiresAt.getTime() <= Date.now()) {
@@ -521,10 +517,7 @@ export class AuthService {
     }
     const user = await this.usersService.findUserByEmail(dto.email);
     if (!user) throw new BadRequestException('Invalid or expired token.');
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(dto.token)
-      .digest('hex');
+    const tokenHash = sha256Hex(dto.token);
 
     await this.dataSource.transaction(async (manager) => {
       // S-2 authority: revalidated under FOR UPDATE (store-owned lookup).
@@ -533,7 +526,11 @@ export class AuthService {
         tokenHash,
         user.id,
       );
-      if (!token || token.usedAt || token.expiresAt.getTime() <= Date.now()) {
+      if (
+        !token ||
+        token.usedAt ||
+        token.expiresAt.getTime() <= this.clock.now().getTime()
+      ) {
         throw new BadRequestException('Invalid or expired token.');
       }
       const hashed = await bcrypt.hash(dto.newPassword, this.saltOrRounds);
@@ -549,42 +546,10 @@ export class AuthService {
   }
 
   // ============ Phase 18 (014 US1/US2): Email verification ============
-
-  /**
-   * Parses a TTL string with s/m/h/d suffixes.
-   * @param ttl - TTL string (e.g. '24h', '15m', '604800000').
-   * @param fallbackMs - Fallback when invalid.
-   * @param key - Config key name for the warn log.
-   * @returns Milliseconds.
-   */
-  private parseTtlWithDefault(
-    ttl: string,
-    fallbackMs: number,
-    key: string,
-  ): number {
-    if (ttl.endsWith('m')) return parseInt(ttl, 10) * 60_000;
-    if (ttl.endsWith('s')) return parseInt(ttl, 10) * 1000;
-    if (ttl.endsWith('h')) return parseInt(ttl, 10) * 3600_000;
-    if (ttl.endsWith('d')) return parseInt(ttl, 10) * 24 * 3600_000;
-    const numeric = parseInt(ttl, 10);
-    if (!isNaN(numeric) && String(numeric) === ttl) return numeric;
-    this.logger.warn(`Invalid TTL "${key}=${ttl}", fallback ${fallbackMs}ms`);
-    return fallbackMs;
-  }
-
-  /**
-   * Resolves the email-verification TTL (default 24h).
-   * @returns Milliseconds until a verification token expires.
-   */
-  private getVerificationTtlMs(): number {
-    const raw =
-      this.configService.get<string>('EMAIL_VERIFICATION_TTL') || '24h';
-    return this.parseTtlWithDefault(
-      raw,
-      24 * 3600_000,
-      'EMAIL_VERIFICATION_TTL',
-    );
-  }
+  // NOTE (US4): TTL parsing moved to the shared parseDurationMs port and all
+  // lifetimes come from startup-resolved AuthTokenConfig — the three private
+  // parsers below were deleted after the rewire (identical outputs proven by
+  // src/common/ports.spec.ts).
 
   /**
    * Creates (or refreshes) an email-verification token after commit and emits the send event.
@@ -603,7 +568,9 @@ export class AuthService {
     if ((user as any).emailVerified) {
       return;
     }
-    const expiresAt = new Date(Date.now() + this.getVerificationTtlMs());
+    const expiresAt = new Date(
+      this.clock.now().getTime() + this.tokenConfig.emailVerificationTtlMs,
+    );
 
     await this.dataSource.transaction(async (manager) => {
       // Store-owned issue (invalidate priors + insert + collision retry);
@@ -613,11 +580,8 @@ export class AuthService {
         user.id,
         expiresAt,
         () => {
-          const r = crypto.randomBytes(32).toString('hex');
-          return {
-            raw: r,
-            hash: crypto.createHash('sha256').update(r).digest('hex'),
-          };
+          const r = generateHex();
+          return { raw: r, hash: sha256Hex(r) };
         },
         (e: unknown) => this.isUniqueViolation(e),
       );
@@ -663,7 +627,11 @@ export class AuthService {
         user.id,
       );
       // Single-use or expired or wrong-user hash → 400 without mutating
-      if (!found || found.usedAt || found.expiresAt.getTime() <= Date.now()) {
+      if (
+        !found ||
+        found.usedAt ||
+        found.expiresAt.getTime() <= this.clock.now().getTime()
+      ) {
         throw new BadRequestException('Invalid or expired verification token');
       }
       await this.verificationTokens.consume(manager, found);
@@ -688,27 +656,17 @@ export class AuthService {
    * Re-sends the verification email with anti-enumeration and a 60s per-email cooldown.
    * @param email - User email to re-send to.
    * @returns Anti-enum 200 message, or distinct already-verified 200.
-   * @throws HttpException 429 when the 60s cooldown is still active (before any transaction).
+   * @throws VerificationCooldownError when the 60s cooldown is still active
+   *   (before any transaction; the controller renders the 429 wire shape).
    */
   async resendVerification(email: string): Promise<{ message: string }> {
     const normalized = email.toLowerCase();
     // 60s cooldown prevents burst re-sends — checked before any DB
-    // transaction (store-owned state; 429 construction stays here until the
-    // US4 HTTP-boundary move, so the wire bytes cannot drift).
+    // transaction (store-owned state). The denial is a domain signal;
+    // the controller renders the identical 429 wire shape (T030).
     if (await this.verificationTokens.isCooldownActive(normalized)) {
-      // Cooldown active → 429 immediately, 0 transaction calls
-      const ex: any = new HttpException(
-        'Too Many Requests',
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-      ex.options = {
-        headers: {
-          'Retry-After': '60',
-          'X-RateLimit-Limit': '3',
-          'X-RateLimit-Remaining': '0',
-        },
-      };
-      throw ex;
+      // Cooldown active → deny immediately, 0 transaction calls.
+      throw new VerificationCooldownError(60);
     }
 
     const user = await this.usersService.findUserByEmail(email);
@@ -724,7 +682,9 @@ export class AuthService {
       return { message: 'Email already verified' };
     }
 
-    const expiresAt = new Date(Date.now() + this.getVerificationTtlMs());
+    const expiresAt = new Date(
+      this.clock.now().getTime() + this.tokenConfig.emailVerificationTtlMs,
+    );
 
     await this.dataSource.transaction(async (manager) => {
       // Invalidate priors so the old link dies exactly when the new one is
@@ -735,11 +695,8 @@ export class AuthService {
         user.id,
         expiresAt,
         () => {
-          const r = crypto.randomBytes(32).toString('hex');
-          return {
-            raw: r,
-            hash: crypto.createHash('sha256').update(r).digest('hex'),
-          };
+          const r = generateHex();
+          return { raw: r, hash: sha256Hex(r) };
         },
         (e: unknown) => this.isUniqueViolation(e),
         false, // resend path never retried collisions (legacy propagates)
@@ -782,11 +739,9 @@ export class AuthService {
     }
     const otp = crypto.randomInt(100000, 999999).toString();
     this.lastOtp = otp;
-    const codeHash = crypto.createHash('sha256').update(otp).digest('hex');
-    const ttlMs = this.parseTtlMs(
-      this.configService.get<string>('OTP_TTL') || '5m',
-    );
-    const expiresAt = new Date(Date.now() + ttlMs);
+    const codeHash = sha256Hex(otp);
+    const ttlMs = this.tokenConfig.otpTtlMs;
+    const expiresAt = new Date(this.clock.now().getTime() + ttlMs);
     // State owned by OtpStore (cooldown gate, Redis record, PG audit).
     // Provider send stays here: external I/O after state, fail-open.
     const user = phone ? await this.usersService.findUserByPhone(phone) : null;
@@ -816,7 +771,7 @@ export class AuthService {
   }): Promise<any> {
     const phone = dto.phoneNumber;
     const purpose = (dto.purpose as OtpPurpose) || OtpPurpose.Login;
-    const codeHash = crypto.createHash('sha256').update(dto.otp).digest('hex');
+    const codeHash = sha256Hex(dto.otp);
     // State machine owned by OtpStore (Redis primary, PG fallback). The
     // purpose for post-verification orchestration stays the verify call's
     // (legacy: dto.purpose || Login), not the stored record's.
@@ -894,19 +849,6 @@ export class AuthService {
     }
     const { accessToken, refreshToken } = await this.login(saved);
     return { user: saved, accessToken, refreshToken };
-  }
-
-  private parseTtlMs(ttl: string): number {
-    // Support s/m/h/d suffixes (Phase 17 adds 'd' for 7d)
-    if (ttl.endsWith('m')) return parseInt(ttl, 10) * 60_000;
-    if (ttl.endsWith('s')) return parseInt(ttl, 10) * 1000;
-    if (ttl.endsWith('h')) return parseInt(ttl, 10) * 3600_000;
-    if (ttl.endsWith('d')) return parseInt(ttl, 10) * 24 * 3600_000;
-    // Numeric fallback (e.g., "604800000")
-    const numeric = parseInt(ttl, 10);
-    if (!isNaN(numeric) && String(numeric) === ttl) return numeric;
-    this.logger.warn(`Invalid TTL "${ttl}", fallback 15m`);
-    return 15 * 60_000;
   }
 
   private isUniqueViolation(e: any): boolean {

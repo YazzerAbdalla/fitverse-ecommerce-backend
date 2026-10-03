@@ -5,7 +5,7 @@
  * - JwtGuard (guards/jwt.guard.ts): S-1 UNIFIED — `verifyAsync` + UsersService
  *   lookup + tokenVersion check, sets `request.user = payload`.
  *   (Pre-S-1 it skipped the lookup and let revoked tokens through.)
- * - JwtStrategy (strateges/jwt.strategy.ts): retained but off the request path.
+ * - JwtStrategy (strategies/jwt.strategy.ts): retained but off the request path.
  * - @Auth() hardcodes JwtGuard (decorators/auth.decorator.ts:7-11), so every
  *   `@Auth()` route runs the payload shape through RolesGuard.
  *
@@ -20,7 +20,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { JwtGuard } from '../guards/jwt.guard';
 import { RolesGuard } from '../guards/roles.guard';
-import { JwtStrategy } from '../strateges/jwt.strategy';
+import { JwtStrategy } from '../strategies/jwt.strategy';
 import { UserRoles } from '../../users/enum/roles';
 import { JwtPayloadProps } from '../types';
 

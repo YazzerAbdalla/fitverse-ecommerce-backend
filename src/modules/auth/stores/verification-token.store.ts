@@ -5,6 +5,17 @@ import type { Cache } from 'cache-manager';
 import { EmailVerificationToken } from '../entities/email-verification-token.entity';
 
 /**
+ * Domain signal for an active resend cooldown (no HTTP inside).
+ * The controller translates it to the 429 + Retry-After wire shape (T030).
+ */
+export class VerificationCooldownError extends Error {
+  constructor(readonly retryAfterSec = 60) {
+    super('Verification resend cooldown active');
+    this.name = 'VerificationCooldownError';
+  }
+}
+
+/**
  * This store is responsible for email-verification-token persistence mechanics
  * plus the resend cooldown state. It owns prior-invalidation, insert (with the
  * hash-collision retry), locked lookup, single-use consume, and the 60s

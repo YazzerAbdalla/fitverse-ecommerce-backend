@@ -25,6 +25,12 @@ import { CartItem } from '../../cart/entities/cart-items.entity';
 import { Product } from '../../products/entities/product.entity';
 import { Inventory } from '../../inventory/entities/inventory.entity';
 import { AuthService } from '../auth.service';
+import { VerificationCooldownError } from '../stores/verification-token.store';
+import { RefreshTokenStore } from '../stores/refresh-token.store';
+import { PasswordResetTokenStore } from '../stores/password-reset-token.store';
+import { VerificationTokenStore } from '../stores/verification-token.store';
+import { OtpStore } from '../stores/otp.store';
+import { SystemClock } from '../../../common/clock';
 
 dotenv.config();
 
@@ -183,6 +189,24 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
         ),
       };
       const whatsappMock: any = { sendOtp: jest.fn() };
+      // Real stores wired to the real DataSource (US3): races prove the
+      // production wiring, not mocks.
+      const refreshTokens = new RefreshTokenStore(dataSource);
+      const resetTokens = new PasswordResetTokenStore(dataSource);
+      const verificationTokens = new VerificationTokenStore(
+        dataSource,
+        cacheMock,
+      );
+      const otpStore = new OtpStore(dataSource, cacheMock);
+      const eventPublisher: any = { emit: jest.fn() };
+      // SystemClock + legacy-identical config values (US4 rewire).
+      const clock = new SystemClock();
+      const tokenConfig: any = {
+        refreshTokenTtlMs: 7 * 24 * 3600_000,
+        resetTokenTtlMs: 15 * 60_000,
+        emailVerificationTtlMs: 24 * 3600_000,
+        otpTtlMs: 5 * 60_000,
+      };
       authService = new AuthService(
         usersServiceMock,
         logger,
@@ -191,6 +215,13 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
         cacheMock,
         configService,
         whatsappMock,
+        refreshTokens,
+        resetTokens,
+        verificationTokens,
+        otpStore,
+        eventPublisher,
+        clock,
+        tokenConfig,
       );
       console.log('[token-races] PG connected');
     } catch (e: any) {
@@ -408,8 +439,10 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
     try {
       await authService.resendVerification(email);
     } catch (e: any) {
-      expect(e).toBeInstanceOf(HttpException);
-      status = e.getStatus();
+      // T030: service throws the domain signal (controller renders 429).
+      expect(e).toBeInstanceOf(VerificationCooldownError);
+      expect(e.retryAfterSec).toBe(60);
+      status = 429;
     }
     expect(status).toBe(429);
   });

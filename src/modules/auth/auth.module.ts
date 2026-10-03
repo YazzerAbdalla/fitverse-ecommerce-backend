@@ -5,9 +5,9 @@ import { AuthService } from './auth.service';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PassportModule } from '@nestjs/passport';
-import { LocalStrategy } from './strateges/local.strategy';
-import { JwtStrategy } from './strateges/jwt.strategy';
-import { GoogleStrategy } from './strateges/google.strategy';
+import { LocalStrategy } from './strategies/local.strategy';
+import { JwtStrategy } from './strategies/jwt.strategy';
+import { GoogleStrategy } from './strategies/google.strategy';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PasswordResetToken } from './entities/password-reset-token.entity';
 import { OtpVerification } from './entities/otp-verification.entity';
@@ -24,6 +24,7 @@ import { PasswordResetTokenStore } from './stores/password-reset-token.store';
 import { VerificationTokenStore } from './stores/verification-token.store';
 import { OtpStore } from './stores/otp.store';
 import { AuthEventPublisher } from './auth-event.publisher';
+import { SystemClock } from '../../common/clock';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { AuthEventPublisher } from './auth-event.publisher';
     VerificationTokenStore,
     OtpStore,
     AuthEventPublisher,
+    SystemClock,
     {
       // Parsed once at startup (T010): TTL/cooldown/cookie/OAuth settings with
       // legacy-identical defaults. No hard-fail on missing keys (warn-once).

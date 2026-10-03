@@ -26,6 +26,11 @@ import { CartItem } from '../../cart/entities/cart-items.entity';
 import { Product } from '../../products/entities/product.entity';
 import { Inventory } from '../../inventory/entities/inventory.entity';
 import { AuthService } from '../auth.service';
+import { RefreshTokenStore } from '../stores/refresh-token.store';
+import { PasswordResetTokenStore } from '../stores/password-reset-token.store';
+import { VerificationTokenStore } from '../stores/verification-token.store';
+import { OtpStore } from '../stores/otp.store';
+import { SystemClock } from '../../../common/clock';
 
 dotenv.config();
 
@@ -122,8 +127,8 @@ describe('Register leak baseline T005/D3 - real PG', () => {
         ),
       };
       const whatsappMock: any = { sendOtp: jest.fn() };
-      // NOTIFICATION_SERVICE + EMAIL_PROVIDER omitted (undefined): emitAuthEvent
-      // guards `if (this.notificationClient)` (auth.service.ts:635) so absence is safe.
+      // Real stores wired to the real DataSource (US3); publisher mocked.
+      const eventPublisher: any = { emit: jest.fn() };
       authService = new AuthService(
         usersServiceMock,
         logger,
@@ -132,6 +137,18 @@ describe('Register leak baseline T005/D3 - real PG', () => {
         cacheMock,
         configService,
         whatsappMock,
+        new RefreshTokenStore(dataSource),
+        new PasswordResetTokenStore(dataSource),
+        new VerificationTokenStore(dataSource, cacheMock),
+        new OtpStore(dataSource, cacheMock),
+        eventPublisher,
+        new SystemClock(),
+        {
+          refreshTokenTtlMs: 7 * 24 * 3600_000,
+          resetTokenTtlMs: 15 * 60_000,
+          emailVerificationTtlMs: 24 * 3600_000,
+          otpTtlMs: 5 * 60_000,
+        },
       );
       console.log('[register-leak integration] PG connected');
     } catch (e: any) {

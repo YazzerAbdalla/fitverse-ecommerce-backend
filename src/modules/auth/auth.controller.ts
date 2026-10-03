@@ -4,6 +4,7 @@ import {
   Get,
   HttpException,
   HttpStatus,
+  Inject,
   Post,
   Query,
   Req,
@@ -35,6 +36,9 @@ import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { ConfigService } from '@nestjs/config';
 import { Auth } from './decorators/auth.decorator';
+import { AUTH_TOKEN_CONFIG } from './auth-token.config';
+import type { AuthTokenConfig } from './auth-token.config';
+import { VerificationCooldownError } from './stores/verification-token.store';
 
 /**
  * This controller exposes auth endpoints for register/login/refresh/logout and Google OAuth.
@@ -46,31 +50,23 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly configService: ConfigService,
+    @Inject(AUTH_TOKEN_CONFIG) private readonly tokenConfig: AuthTokenConfig,
   ) {}
 
   private getRefreshCookieName(): string {
-    return (
-      this.configService.get<string>('REFRESH_TOKEN_COOKIE_NAME') ||
-      'refresh_token'
-    );
+    return this.tokenConfig.refreshCookieName;
   }
 
   private getRefreshCookieOptions() {
-    const ttl = this.configService.get<string>('REFRESH_TOKEN_TTL') || '7d';
-    // Parse TTL to ms for maxAge (reuse parse logic — simple fallback 7d)
-    let maxAge = 7 * 24 * 3600 * 1000;
-    if (ttl.endsWith('d')) maxAge = parseInt(ttl, 10) * 24 * 3600 * 1000;
-    else if (ttl.endsWith('h')) maxAge = parseInt(ttl, 10) * 3600 * 1000;
-    else if (ttl.endsWith('m')) maxAge = parseInt(ttl, 10) * 60_000;
-    else if (ttl.endsWith('s')) maxAge = parseInt(ttl, 10) * 1000;
-    const secure =
-      this.configService.get<string>('REFRESH_TOKEN_COOKIE_SECURE') === 'true';
+    // Cookie lifetime tracks the refresh-token TTL from startup-resolved
+    // config (was triple-duplicated inline math; value-identical in all
+    // cases including the non-numeric-suffix quirk, proven by ports.spec).
     return {
       httpOnly: true,
-      secure,
+      secure: this.tokenConfig.refreshCookieSecure,
       sameSite: 'strict' as const,
       path: '/auth',
-      maxAge,
+      maxAge: this.tokenConfig.refreshTokenTtlMs,
     };
   }
 
@@ -121,9 +117,7 @@ export class AuthController {
     @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     const user: Partial<User> = req.user;
-    console.log('🚀 ~ AuthController ~ login ~ user:', user);
     const result = await this.authService.login(user);
-    console.log('🚀 ~ AuthController ~ login ~ result:', result);
 
     // Set HttpOnly refresh cookie for browser clients
     res.cookie(
@@ -205,7 +199,27 @@ export class AuthController {
     description: 'Too Many Requests — Retry-After: 60 or 3600',
   })
   async resendVerification(@Body() dto: ResendVerificationDto) {
-    return await this.authService.resendVerification(dto.email);
+    try {
+      return await this.authService.resendVerification(dto.email);
+    } catch (e) {
+      // T030: domain cooldown signal → identical 429 wire shape as before
+      // (status, body, Retry-After + rate-limit headers); nothing else changes.
+      if (e instanceof VerificationCooldownError) {
+        const ex: any = new HttpException(
+          'Too Many Requests',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+        ex.options = {
+          headers: {
+            'Retry-After': String(e.retryAfterSec),
+            'X-RateLimit-Limit': '3',
+            'X-RateLimit-Remaining': '0',
+          },
+        };
+        throw ex;
+      }
+      throw e;
+    }
   }
 
   // TODO (Future) — WhatsApp OTP deferred per 2026-09-16, password-only login in V1

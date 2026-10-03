@@ -1,6 +1,14 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuthService } from './auth.service';
+import { VerificationCooldownError } from './stores/verification-token.store';
 import { UsersService } from '../users/users.service';
+import { RefreshTokenStore } from './stores/refresh-token.store';
+import { PasswordResetTokenStore } from './stores/password-reset-token.store';
+import { VerificationTokenStore } from './stores/verification-token.store';
+import { OtpStore } from './stores/otp.store';
+import { AuthEventPublisher } from './auth-event.publisher';
+import { SystemClock } from '../../common/clock';
+import { AUTH_TOKEN_CONFIG } from './auth-token.config';
 import { JwtService } from '@nestjs/jwt';
 import { BadRequestException, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
@@ -21,6 +29,7 @@ describe('AuthService', () => {
   let cacheManager: Record<string, jest.Mock>;
   let configService: Record<string, jest.Mock>;
   let logger: Record<string, jest.Mock>;
+  let eventPublisher: Record<string, jest.Mock>;
 
   // transaction helpers
   let mockManager: any;
@@ -85,6 +94,7 @@ describe('AuthService', () => {
     };
     cacheManager = { get: jest.fn(), set: jest.fn(), del: jest.fn() };
     configService = { get: jest.fn().mockReturnValue('15m') };
+    eventPublisher = { emit: jest.fn() };
     dataSource = {
       transaction: jest.fn(async (cb: any) => cb(mockManager)),
       getRepository: jest.fn((entity: any) => {
@@ -107,6 +117,172 @@ describe('AuthService', () => {
           provide: 'WHATSAPP_PROVIDER',
           useValue: {
             sendOtp: jest.fn().mockResolvedValue({ messageId: 'test' }),
+          },
+        },
+        {
+          provide: RefreshTokenStore,
+          useValue: {
+            findByHashForUpdate: jest.fn(),
+            revokeById: jest.fn(),
+            countActive: jest.fn(),
+            findOldestActive: jest.fn(),
+            create: jest.fn(),
+            revokeByHashWhereActive: jest.fn(),
+            revokeAllActive: jest.fn(),
+            revokeAllInTx: jest.fn(),
+            purgeExpired: jest.fn(),
+          },
+        },
+        // Functional fakes (US3): mirror the real stores through the mocked
+        // repos/manager so existing repo-level assertions keep proving the
+        // same SQL shapes; real behavior is proven by token-races on PG.
+        {
+          provide: PasswordResetTokenStore,
+          useValue: {
+            issue: jest.fn(
+              async (
+                manager: any,
+                userId: string,
+                tokenHash: string,
+                expiresAt: Date,
+              ) => {
+                await manager
+                  .createQueryBuilder()
+                  .update('PasswordResetToken')
+                  .set({ usedAt: new Date() })
+                  .where(
+                    'userId = :userId AND "usedAt" IS NULL AND "expiresAt" > NOW()',
+                    { userId },
+                  )
+                  .execute();
+                const repo = manager.getRepository('PasswordResetToken');
+                await repo.save(
+                  repo.create({ userId, tokenHash, expiresAt, usedAt: null }),
+                );
+              },
+            ),
+            findAdvisory: jest.fn(async (tokenHash: string, userId: string) =>
+              dataSource
+                .getRepository('PasswordResetToken')
+                .findOne({ where: { tokenHash, userId } }),
+            ),
+            findForUpdate: jest.fn(
+              async (manager: any, tokenHash: string, userId: string) =>
+                manager
+                  .getRepository('PasswordResetToken')
+                  .createQueryBuilder('t')
+                  .setLock('pessimistic_write')
+                  .where('t.tokenHash = :tokenHash AND t.userId = :userId', {
+                    tokenHash,
+                    userId,
+                  })
+                  .getOne(),
+            ),
+            consume: jest.fn(
+              async (manager: any, token: any, userId: string) => {
+                const repo = manager.getRepository('PasswordResetToken');
+                await repo.update(token.id, { usedAt: new Date() });
+                await manager
+                  .createQueryBuilder()
+                  .update('PasswordResetToken')
+                  .set({ usedAt: new Date() })
+                  .where(
+                    'userId = :userId AND id != :id AND "usedAt" IS NULL',
+                    { userId, id: token.id },
+                  )
+                  .execute();
+              },
+            ),
+          },
+        },
+        {
+          provide: VerificationTokenStore,
+          useValue: {
+            issue: jest.fn(
+              async (
+                manager: any,
+                userId: string,
+                expiresAt: Date,
+                mint: any,
+                isUniqueViolation: any,
+                collisionRetry = true,
+              ) => {
+                const first = mint();
+                await manager
+                  .createQueryBuilder()
+                  .update('EmailVerificationToken')
+                  .set({ usedAt: new Date() })
+                  .where('userId = :userId AND "usedAt" IS NULL', { userId })
+                  .execute();
+                const repo = manager.getRepository('EmailVerificationToken');
+                try {
+                  await repo.save(
+                    repo.create({
+                      userId,
+                      tokenHash: first.hash,
+                      expiresAt,
+                      usedAt: null,
+                    }),
+                  );
+                  return first.raw;
+                } catch (e: any) {
+                  if (!collisionRetry || !isUniqueViolation(e)) throw e;
+                  const retry = mint();
+                  await repo.save(
+                    repo.create({
+                      userId,
+                      tokenHash: retry.hash,
+                      expiresAt,
+                      usedAt: null,
+                    }),
+                  );
+                  return retry.raw;
+                }
+              },
+            ),
+            findForUpdate: jest.fn(
+              async (manager: any, tokenHash: string, userId: string) =>
+                manager
+                  .getRepository('EmailVerificationToken')
+                  .createQueryBuilder('t')
+                  .setLock('pessimistic_write')
+                  .where('t.tokenHash = :tokenHash AND t.userId = :userId', {
+                    tokenHash,
+                    userId,
+                  })
+                  .getOne(),
+            ),
+            consume: jest.fn(async (manager: any, token: any) => {
+              token.usedAt = new Date();
+              await manager.getRepository('EmailVerificationToken').save(token);
+            }),
+            isCooldownActive: jest.fn(
+              async (email: string) =>
+                !!(await cacheManager.get(`resend:cooldown:${email}`)),
+            ),
+            markCooldown: jest.fn(async (email: string) =>
+              cacheManager.set(`resend:cooldown:${email}`, '1', 60_000),
+            ),
+            purgeExpired: jest.fn(),
+          },
+        },
+        {
+          provide: OtpStore,
+          useValue: { issue: jest.fn(), verifyAttempt: jest.fn() },
+        },
+        { provide: AuthEventPublisher, useValue: eventPublisher },
+        { provide: SystemClock, useValue: { now: () => new Date() } },
+        {
+          provide: AUTH_TOKEN_CONFIG,
+          useValue: {
+            refreshTokenTtlMs: 7 * 24 * 3600_000,
+            refreshCookieName: 'refresh_token',
+            refreshCookieSecure: false,
+            resetTokenTtlMs: 15 * 60_000,
+            emailVerificationTtlMs: 24 * 3600_000,
+            otpTtlMs: 5 * 60_000,
+            otpMaxAttempts: 3,
+            otpResendCooldownMs: 60_000,
           },
         },
       ],
@@ -561,7 +737,7 @@ describe('AuthService', () => {
 
     it('emailVerified false → UPDATE priors + INSERT 24h sha256 + emit once, EmailProvider.send not called directly', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
-      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      const emitSpy = eventPublisher.emit;
       const before = Date.now();
       await service.requestEmailVerification(user.email);
       const after = Date.now();
@@ -600,7 +776,7 @@ describe('AuthService', () => {
         expect.objectContaining({ userId: user.id, email: user.email }),
       );
       expect((service as any).emailProvider).toBeUndefined();
-      emitSpy.mockRestore();
+      emitSpy.mockClear();
     });
   });
 
@@ -734,10 +910,12 @@ describe('AuthService', () => {
       );
     });
 
-    it('cooldown key exists → 429, 0 transaction', async () => {
+    it('cooldown key exists → VerificationCooldownError, 0 transaction', async () => {
       cacheManager.get.mockResolvedValue('1');
+      // T030: the service throws the domain signal; the controller renders
+      // the identical 429 wire shape (proven at HTTP level by parity resend).
       await expect(service.resendVerification(user.email)).rejects.toThrow(
-        expect.objectContaining({ status: 429 }),
+        VerificationCooldownError,
       );
       expect(dataSource.transaction).not.toHaveBeenCalled();
       expect(mockTokenRepo.save).not.toHaveBeenCalled();
@@ -764,7 +942,7 @@ describe('AuthService', () => {
 
     it('unverified → UPDATE priors + INSERT 24h + emit + cooldown set', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
-      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      const emitSpy = eventPublisher.emit;
       const res = await service.resendVerification(user.email);
       expect(res).toEqual({
         message: 'If an account exists, a verification email has been sent.',
@@ -784,7 +962,7 @@ describe('AuthService', () => {
         expect.anything(),
         expect.any(Number),
       );
-      emitSpy.mockRestore();
+      emitSpy.mockClear();
     });
   });
 
@@ -800,7 +978,7 @@ describe('AuthService', () => {
 
     it('existing user → INSERT 15m + emit auth.password_reset_requested once', async () => {
       usersService.findUserByEmail.mockResolvedValue(user);
-      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      const emitSpy = eventPublisher.emit;
       await service.requestPasswordReset(user.email);
       expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
       expect(emitSpy).toHaveBeenCalledTimes(1);
@@ -808,16 +986,16 @@ describe('AuthService', () => {
         'auth.password_reset_requested',
         expect.objectContaining({ userId: user.id, email: user.email }),
       );
-      emitSpy.mockRestore();
+      emitSpy.mockClear();
     });
 
     it('unknown email → 0 insert + 0 emit', async () => {
       usersService.findUserByEmail.mockResolvedValue(null);
-      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      const emitSpy = eventPublisher.emit;
       await service.requestPasswordReset('nobody@example.com');
       expect(mockTokenRepo.save).not.toHaveBeenCalled();
       expect(emitSpy).not.toHaveBeenCalled();
-      emitSpy.mockRestore();
+      emitSpy.mockClear();
     });
   });
 });
