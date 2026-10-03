@@ -295,7 +295,7 @@ export class AuthController {
 
   @Post('/logout-all')
   @Auth()
-  @UseGuards(RateLimitGuard, JwtAuthGuard)
+  @UseGuards(RateLimitGuard)
   @ApiOperation({
     summary: 'Logout all sessions (tokenVersion++ + bulk revoke)',
   })
@@ -306,7 +306,10 @@ export class AuthController {
     description: 'Too Many Requests — Retry-After: 3600',
   })
   async logoutAll(@CurrentUser() user: Partial<User>) {
-    await this.authService.logoutAll((user as any).id);
+    // S-1: unified guard provides the payload shape ({sub, ...}); the entity
+    // shape ({id}) existed only via the removed stacked JwtAuthGuard.
+    const userId = (user as any).sub ?? (user as any).id;
+    await this.authService.logoutAll(userId);
     return { message: 'All sessions revoked' };
   }
 
@@ -348,7 +351,11 @@ export class AuthController {
     @Request() req: ExpressRequest & { user: any },
   ) {
     const profile = req.user;
-    await this.authService.linkGoogleAccount((user as any).id, profile);
+    // S-1 companion: prefer payload sub; entity id only pre-unification.
+    await this.authService.linkGoogleAccount(
+      (user as any).sub ?? (user as any).id,
+      profile,
+    );
     return { message: 'Google linked.' };
   }
 }
