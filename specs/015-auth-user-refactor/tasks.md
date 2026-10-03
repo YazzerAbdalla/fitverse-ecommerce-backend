@@ -67,18 +67,22 @@
   - Done when: `powershell -ExecutionPolicy Bypass -File scripts/e2e-auth-users.ps1` passes fully on UNMODIFIED code (baseline mode, app running via `npm run start:dev` with infra up); script committed in this phase.
   - Ref: `(parity)` rows; quickstart.md §1; research D8.
 
-- [ ] T008 Commit the baseline (test-only, zero production-code delta)
+- [X] T008 Commit the baseline (test-only, zero production-code delta)
+  - SUPERSEDED 2026-10-03: baseline proved B1–B5 bugs, so the "test-only"
+    premise was replaced by a B-fix bundle (commits bcbbf24 + 55dcfac, each
+    with regression proof) BEFORE the test commit (22e15cf). Pure-R diffing
+    starts at 22e15cf.
   - Steps: `git status` (only `src/modules/auth/test/*` + `src/modules/users/**test*` new files + `scripts/e2e-auth-users.ps1`) → `git diff --stat` (no `auth.service.ts`/`auth.controller.ts`/`users.service.ts`/guards/strategies changes) → run T002 gates once more → commit `test(auth): full pre-split baseline (contract matrix, JWT paths, leak proof, races, PS API flow)`.
   - Done when: baseline commit hash recorded; every later phase diffs against it (`git diff <baseline> -- <files>` shows only intended slices + 3 S rows).
   - Ref: quickstart.md §1; research D8.
 
-- [ ] T009 [P] Vendor CC-A pure ports in `src/common/` (only if absent — check first): `token-hasher.ts` (`sha256Hex`), `secure-token.ts` (`generateHex(32)`), `clock.ts` (`now()`, `plusMs()`), `parse-duration.ts` (`parseDurationMs`, single semantic)
+- [X] T009 [P] Vendor CC-A pure ports in `src/common/` (only if absent — check first): `token-hasher.ts` (`sha256Hex`), `secure-token.ts` (`generateHex(32)`), `clock.ts` (`now()`, `plusMs()`), `parse-duration.ts` (`parseDurationMs`, single semantic)
   - Steps: `ls src/common/` — if these already exist with compatible signatures, SKIP (record reuse, do not duplicate). Else create the 4 tiny units + `src/common/ports.spec.ts` unit matrix proving byte-identical outputs vs current inline code (same input → same sha256 hex, same `7d/15m/24h/60s/5m` → same ms as the three current parsers in `auth.service.ts:666,1221` + controller cookie math).
   - Constraints: ports own NO business logic; deterministic fakes exported for tests; no other behavior.
   - Done when: unit matrix green; zero call-site changes yet (wiring happens in US4).
   - Ref: research D7; plan.md structure; CC-A-compatible signatures required.
 
-- [ ] T010 [P] Full typed `AuthTokenConfig` parsed once at startup in `src/modules/auth/auth-token.config.ts` (new file)
+- [X] T010 [P] Full typed `AuthTokenConfig` parsed once at startup in `src/modules/auth/auth-token.config.ts` (new file)
   - Keys (from research D7): `JWT_SECRET`, `JWT_EXPIRES_IN`, `REFRESH_TOKEN_TTL`, `REFRESH_TOKEN_COOKIE_NAME`, `REFRESH_TOKEN_COOKIE_SECURE`, `RESET_TOKEN_TTL`, `EMAIL_VERIFICATION_TTL`, `OTP_TTL`, `OTP_MAX_ATTEMPTS`, `OTP_RESEND_COOLDOWN`, `GOOGLE_CLIENT_ID/SECRET/CALLBACK_URL`, `FRONTEND_URL`.
   - Steps: validate-and-clamp once at startup (same defaults as today's `??` fallbacks: `7d/15m/24h/5m`, cookie `refresh_token`, `Secure=false` unless `'true'`); warn-once (Logger) on every fallback; NO new hard-fail. Add `auth-token.config.spec.ts` asserting each default equals the current inline fallback + warn-once fires once.
   - Done when: spec green; service/controller NOT yet rewired (rewire happens in US4 T029–T030).
@@ -114,19 +118,19 @@
   - Done when: logout-all + link flows green; no other controller lines touched in this task.
   - Ref: research D1 (`auth.controller.ts:296-351`).
 
-- [ ] T014 [US1] S-2 tests-first then enact in `src/modules/auth/auth.service.ts` (`validateResetToken` ~:553, `resetPassword` ~:570)
+- [X] T014 [US1] S-2 tests-first then enact in `src/modules/auth/auth.service.ts` (`validateResetToken` ~:553, `resetPassword` ~:570)
   - Tests first (add to `token-races.integration.spec.ts`): concurrent validate-during-reset — validate may return valid, but double-`resetPassword` with same token → exactly one 200 + one 400; assert second 400 even when validate said valid milliseconds earlier (proves reset is the authority).
   - Enact: `resetPassword` revalidates hash-match + `expiresAt > now` + `usedAt IS NULL` INSIDE its transaction while holding `FOR UPDATE`, then sets `usedAt`, bcrypt-hashes, `tokenVersion++` atomically. `validateResetToken` stays plain `findOne` (add comment `// advisory pre-check; resetPassword is authoritative (S-2)`).
   - Done when: race test green; T003 reset/validate rows unchanged except documented authority semantics.
   - Ref: research D2; spec FR-014(b); data-model.md reset-token row.
 
-- [ ] T015 [US1] D3 enactment: strip `password` from register response in `src/modules/auth/auth.service.ts:67-94`
+- [X] T015 [US1] D3 enactment: strip `password` from register response in `src/modules/auth/auth.service.ts:67-94`
   - Steps: after `createNewUser`, `const { password, ...safeUser } = newUser; return { message: 'User created successfuly.', data: safeUser };` (keep the exact message strings, typos included — R).
   - Flip T005's assertion to `expect(data.password).toBeUndefined()` + add `expect(JSON.stringify(body)).not.toContain('$2b$')`; keep the test file, update comments to `// D3 POST-STATE`.
   - Done when: T005 green in flipped form; T003 register row shows ONLY the missing key as diff.
   - Ref: research D3; spec FR-014(c).
 
-- [ ] T016 [US1] Parity re-verification + gates for the US1 slice (`src/modules/auth/`, `src/modules/users/`, git diff vs baseline)
+- [X] T016 [US1] Parity re-verification + gates for the US1 slice (`src/modules/auth/`, `src/modules/users/`, git diff vs baseline)
   - Steps: run T003+T004-baseline-copy+T006 full suites → `git diff <baseline-hash> --stat` (expect: guard + 2 controller lines + reset/validate + register return + tests only) → `npm run lint`, `npm run build`.
   - Done when: gates green; diff review confirms zero unintended wire changes.
   - Ref: quickstart.md §2–§4.
@@ -147,23 +151,23 @@
 
 **Independent Test**: `grep -rn "getRepository(User)" src/modules/auth/` → zero hits; T003 matrix fully green (no wire diff vs US1 state).
 
-- [ ] T018 [US2] Extend `UsersService` write API in `src/modules/users/users.service.ts` (keep names/signatures; research D5)
+- [X] T018 [US2] Extend `UsersService` write API in `src/modules/users/users.service.ts` (keep names/signatures; research D5)
   - Steps: add OPTIONAL tx-scoped overloads/params only where auth flows need them: allow passing an `EntityManager` into `createNewUser`, `updatePassword`, Google-link setter, `emailVerified` setter (new small methods `linkGoogleAccount(userId, googleId)`, `markEmailVerified(userId)` reusing the `updatePreferences`-style `FOR UPDATE` pattern lines 111-135). Keep `updatePassword` EXACT current semantics including the dead-param quirk (research D5 — add `// preserves pre-refactor semantics; explicit tokenVersion param intentionally ignored (quirk, follow-up candidate)`).
   - Add/extend `src/modules/users/test/users.service.spec.ts` for each new/changed method (mocked repos).
   - Done when: users unit tests green; no caller wired yet (wiring is T017).
   - Ref: research D4–D5; data-model.md ownership map (`user` row).
 
-- [ ] T019 [US2] Replace the 3 bypass sites in `src/modules/auth/auth.service.ts` (`:264`, `:432`, `:599` — find exact lines via `grep -n "manager.getRepository(User)"`)
+- [X] T019 [US2] Replace the 3 bypass sites in `src/modules/auth/auth.service.ts` (`:264`, `:432`, `:599` — find exact lines via `grep -n "manager.getRepository(User)"`)
   - Steps: per site, replace direct user read/write with the matching `UsersService` method, passing the ambient `manager` where the enclosing flow is transactional. Preserve lock mode (`FOR UPDATE` where the current code locks) and error type/message exactly.
   - Done when: grep proves zero; T003 matrix green with ZERO diff vs US1 state; `npm run build` green.
   - Ref: spec FR-002; plan invariant TI-1.
 
-- [ ] T020 [US2] Boundary audit + gates for the US2 slice (`src/modules/auth/`, `src/modules/users/`, quickstart.md §3 greps)
+- [X] T020 [US2] Boundary audit + gates for the US2 slice (`src/modules/auth/`, `src/modules/users/`, quickstart.md §3 greps)
   - Steps: run quickstart.md §3 greps (`getRepository(User)` in auth → 0; controller persistence → 0) → `npm run lint`, `npm run build`, `npm run test -- --runInBand src/modules/auth src/modules/users`.
   - Done when: all green; diff vs baseline = US1 files + users.service.ts + auth.service bypass replacements only.
   - Ref: spec SC-004 (first clause); quickstart.md §3.
 
-- [ ] T021 [US2] Re-run PowerShell API flow in S-delta mode (`scripts/e2e-auth-users.ps1`)
+- [X] T021 [US2] Re-run PowerShell API flow in S-delta mode (`scripts/e2e-auth-users.ps1`)
   - Steps: same command as T017 (`-EnforceRevocation -StripPasswordHash`).
   - Done when: exit 0, `failed=0`, log attached. Ownership changes must be wire-invisible — any new FAIL = defect, stop.
   - Ref: T007 script; T017 log (diff the two summaries: identical).
@@ -178,43 +182,43 @@
 
 **Independent Test**: Fault-injection (event publish throws; cache throws) → committed token/user state intact + user-visible success unchanged; crash-between-rotate-steps → full rollback (prove via reordered mock or review + race suites green).
 
-- [ ] T022 [US3] `RefreshTokenStore` in `src/modules/auth/stores/refresh-token.store.ts` (new) + rewire rotation
+- [X] T022 [US3] `RefreshTokenStore` in `src/modules/auth/stores/refresh-token.store.ts` (new) + rewire rotation
   - Methods: `acquire(manager, userId, tokenHash, expiresAt)` / `rotate(manager, oldHash, newHash, newExpiry)` (invalidates old + cap-5 evict-oldest + inserts new, ONE tx participant) / `revokeOne(manager, hash)` (idempotent) / `revokeAllForUser(manager, userId)` + `purgeExpired(manager, cutoff)`.
   - Move logic from `auth.service.ts:156-183` (create+cap5) and `:225-400` (refresh+theft-nuke) + `:401-457` (logout/logout-all) verbatim-semantics: same queries, same `FOR UPDATE`, same eviction pick (oldest `createdAt`), same 401 messages, same warn(prefix6) + `INCR` counter keys.
   - Store takes tx-scoped `EntityManager`, never `dataSource.transaction` inside (TX-1). Unit-test with mocked manager.
   - Done when: store unit tests green; service delegates (no logic duplicated); T003 refresh/logout rows + T006(a)(d) green.
   - Ref: research D4; data-model.md refresh-session row + transition diagram.
 
-- [ ] T023 [P] [US3] `PasswordResetTokenStore` + `VerificationTokenStore` in `src/modules/auth/stores/` (new files)
+- [X] T023 [P] [US3] `PasswordResetTokenStore` + `VerificationTokenStore` in `src/modules/auth/stores/` (new files)
   - Reset store: `issue(manager, userId, hash, expiresAt)` (invalidates priors) / `consume(manager, userId, hash)` (revalidates under `FOR UPDATE`, sets `usedAt`, returns userId) — from `auth.service.ts:495-551,570-665`. Validate stays a thin read in the service (S-2).
   - Verification store: `issue` (24h, invalidate priors) / `consume` (sets `usedAt`, returns userId; service then sets flag via `UsersService.markEmailVerified`) / `isCooldownActive(email)` + `markCooldown(email)` (60s `SET NX`, fail-open) — from `:685-920`.
   - Same TX-1 rule; same TTLs/messages/anti-enum behavior.
   - Done when: unit tests green; T003 forgot/validate/reset/verify/resend rows + T006(b)(c)(e) green.
   - Ref: research D4; data-model.md token rows.
 
-- [ ] T024 [P] [US3] `OtpStore` in `src/modules/auth/stores/otp.store.ts` (new) — 501 paths rewired, behavior frozen
+- [X] T024 [P] [US3] `OtpStore` in `src/modules/auth/stores/otp.store.ts` (new) — 501 paths rewired, behavior frozen
   - Move Redis TTL/hash/attempts/cooldown + PG audit logic from `auth.service.ts:921-1167` (`requestWhatsAppOtp`, `verifyWhatsAppOtp`, `handleOtpSuccess`, `findUserByPhone`, `incrementOtpAttempts`, `markOtpVerified`, `timingSafeEqual`) with identical keys/TTLs/attempt-cap/fallback semantics (ADR-0011 Q4).
   - Keep controller 501 guards untouched; OTP endpoints still 501.
   - Done when: OTP unit tests (mocked cache) green; T003 OTP rows still 501; no other flow touched.
   - Ref: research D4; data-model.md otp row.
 
-- [ ] T025 [US3] `AuthEventPublisher` in `src/modules/auth/auth-event.publisher.ts` (new) — broker out of domain
+- [X] T025 [US3] `AuthEventPublisher` in `src/modules/auth/auth-event.publisher.ts` (new) — broker out of domain
   - Move `emitAuthEvent` (`auth.service.ts:630-657`, `ClientProxy` + try/catch-warn) verbatim-semantics; service calls it ONLY after commit (register `:701-775`, reset `:544`, verify `:762,819,907`). Same event names + payload keys + queue.
   - Signature frozen for CC-C `EventBusPort` adoption (note in file JSDoc). Remove `ClientProxy`/`NOTIFICATION_SERVICE` injection from `AuthService` (keep in publisher).
   - Done when: publish-failure fault test → committed state stands + warn logged (add to race spec file or new `publisher-fault.integration.spec.ts`); T003 event-observing rows green.
   - Ref: research D4; TI-4; spec FR-008.
 
-- [ ] T026 [US3] Thin the orchestrator: rewrite `src/modules/auth/auth.service.ts` to delegate (no logic duplication)
+- [X] T026 [US3] Thin the orchestrator: rewrite `src/modules/auth/auth.service.ts` to delegate (no logic duplication)
   - Per method (register/login/refresh/logout/logout-all/purge×2/reset/verify/resend/OTP/Google): service opens/owns the ONE tx boundary (`dataSource.transaction`), calls stores + `UsersService` + publisher in the same order as today, maps store results to the SAME return shapes. No `ClientProxy`, no `CACHE_MANAGER`, no `crypto`/`Date` left here (those move in US4 — leave the imports until then, just stop adding new uses).
   - Done when: T003 FULL matrix green with zero diff vs US2 state; T006 races green; file has class+method JSDoc per AGENTS.md §3 (draft; final audit is T031).
   - Ref: research D4; spec FR-003/FR-008; plan TX-1/TX-2.
 
-- [ ] T027 [US3] Controller tx-free verification for `src/modules/auth/auth.controller.ts` (+ `src/modules/users/users.controller.ts` check)
+- [X] T027 [US3] Controller tx-free verification for `src/modules/auth/auth.controller.ts` (+ `src/modules/users/users.controller.ts` check)
   - Steps: prove (already true, now enforced by review + test): no `DataSource`/`EntityManager`/repository in controllers. If ANY found, move to service. Add a CI-guard unit test? Cheap approach: extend quickstart §3 greps into a documented manual gate in this task (no new framework).
   - Done when: greps zero; `npm run lint`, `npm run build` green.
   - Ref: spec FR-004/SC-004; TI-1.
 
-- [ ] T028 [US3] Re-run PowerShell API flow in S-delta mode (`scripts/e2e-auth-users.ps1`)
+- [X] T028 [US3] Re-run PowerShell API flow in S-delta mode (`scripts/e2e-auth-users.ps1`)
   - Steps: same command as T017 (`-EnforceRevocation -StripPasswordHash`).
   - Done when: exit 0, `failed=0`, log attached. The whole store split must be wire-invisible — any FAIL = defect, stop. Keep all three run logs (T017/T021/T028) for the final diff review.
   - Ref: T007 script.
