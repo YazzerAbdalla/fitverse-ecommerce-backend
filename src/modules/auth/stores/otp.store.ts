@@ -1,0 +1,283 @@
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
+import { DataSource } from 'typeorm';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
+import * as crypto from 'crypto';
+import {
+  OtpVerification,
+  OtpPurpose,
+} from '../entities/otp-verification.entity';
+
+/** OTP cache record shape (Redis `otp:whatsapp:<phone>`). */
+export interface OtpCacheRecord {
+  hash: string;
+  attempts: number;
+  createdAt: number;
+  expiresAt: number;
+  purpose: OtpPurpose;
+}
+
+/**
+ * This store is responsible for one-time-passcode state (Redis primary,
+ * PostgreSQL audit fallback). It owns mint persistence, cooldown, the
+ * verify state machine (attempts, expiry, hash compare), and audit writes.
+ *
+ * Responsibility (SRP): OTP state, nothing else.
+ * Used by: AuthService OTP orchestration (501-isolated paths only).
+ * Depends on: DataSource (PG audit), Cache (TTL/cooldown, fail-open).
+ *
+ * OTP behavior is frozen (501 at the controller): this move is mechanical.
+ * Fail-open postures (Redis down → allow + warn; PG audit best-effort) are
+ * preserved exactly, including the every-attempt increment (B2 choice B) and
+ * the PG fallback path (Q4).
+ */
+@Injectable()
+export class OtpStore {
+  private readonly logger = new Logger(OtpStore.name);
+
+  constructor(
+    private readonly dataSource: DataSource,
+    @Inject(CACHE_MANAGER) private readonly cache: Cache,
+  ) {}
+
+  /**
+   * Issues an OTP: cooldown gate, Redis record + cooldown arm, PG audit row.
+   * Provider send stays with the orchestrator (external I/O after state).
+   *
+   * @param phone - E.164 phone number.
+   * @param purpose - OTP purpose (login default at the orchestrator).
+   * @param minted - {otp, codeHash, expiresAt} minted by the orchestrator
+   *   (crypto stays caller-owned until the US4 port rewire).
+   * @param ttlMs - Record TTL in ms.
+   * @param userId - Owner user id or null (audit link, best-effort).
+   * @throws BadRequestException when the 60s cooldown is active.
+   * @returns Void.
+   */
+  async issue(
+    phone: string,
+    purpose: OtpPurpose,
+    minted: { codeHash: string; expiresAt: Date },
+    ttlMs: number,
+    userId: string | null,
+  ): Promise<void> {
+    // cooldown 60s via Redis SET NX EX.
+    // QUIRK (preserved): the legacy code throws the cooldown denial INSIDE
+    // its own fail-open try, whose catch only warns — so the denial is
+    // swallowed and issuance always proceeds. Changing that is out of scope.
+    const cooldownKey = `otp:cooldown:${phone}`;
+    try {
+      const exists = await (
+        this.cache as unknown as {
+          get(k: string): Promise<unknown>;
+        }
+      ).get(cooldownKey);
+      if (exists)
+        throw new BadRequestException(
+          'Resend cooldown active, try in 60 seconds',
+        );
+    } catch (e) {
+      this.logger.warn(`Redis cooldown check fail-open: ${e}`);
+    }
+    const cacheKey = `otp:whatsapp:${phone}`;
+    const record: OtpCacheRecord = {
+      hash: minted.codeHash,
+      attempts: 0,
+      createdAt: Date.now(),
+      expiresAt: minted.expiresAt.getTime(),
+      purpose,
+    };
+    try {
+      await (this.cache as any).set(cacheKey, record, ttlMs);
+      await (this.cache as any).set(cooldownKey, '1', 60_000);
+    } catch (e) {
+      this.logger.warn(`Redis set fail-open: ${e}`);
+    }
+    // persist to PG
+    try {
+      const repo = this.dataSource.getRepository(OtpVerification);
+      await repo.save(
+        repo.create({
+          phoneNumber: phone,
+          userId: userId || null,
+          purpose,
+          codeHash: minted.codeHash,
+          expiresAt: minted.expiresAt,
+          attempts: 0,
+          verifiedAt: null,
+        } as never),
+      );
+    } catch (e) {
+      this.logger.warn(`PG OtpVerification save failed: ${e}`);
+    }
+  }
+
+  /**
+   * Verifies one attempt: Redis state machine with PG fallback.
+   *
+   * @param phone - E.164 phone number.
+   * @param codeHash - sha256 hex of the presented OTP.
+   * @param purpose - Calling purpose scope (audit row scope only; the
+   *   orchestrator resolves post-verification purpose from its own input).
+   * @returns Void on success.
+   * @throws BadRequestException on invalid/expired/too-many-attempts.
+   */
+  async verifyAttempt(
+    phone: string,
+    codeHash: string,
+    purpose: OtpPurpose,
+  ): Promise<void> {
+    const cacheKey = `otp:whatsapp:${phone}`;
+    let redisData: OtpCacheRecord | null = null;
+    let redisAvailable = true;
+    try {
+      redisData = await (this.cache as any).get(cacheKey);
+    } catch (e) {
+      redisAvailable = false;
+      this.logger.warn(`Redis get fail-open, fallback to DB: ${e}`);
+    }
+
+    // Redis path
+    if (redisAvailable && redisData) {
+      // increment attempts on every attempt per B2 choice B
+      redisData.attempts = (redisData.attempts || 0) + 1;
+      const attemptsOk = redisData.attempts <= 3;
+      const notExpired = redisData.expiresAt > Date.now();
+      const hashOk = timingSafeEqual(redisData.hash, codeHash);
+      if (!notExpired) {
+        try {
+          await (this.cache as any).del(cacheKey);
+        } catch {
+          // best-effort delete — absence is fail-open safe
+        }
+        throw new BadRequestException('Invalid or expired OTP');
+      }
+      if (!attemptsOk) {
+        try {
+          await (this.cache as any).del(cacheKey);
+        } catch {
+          // best-effort delete — absence is fail-open safe
+        }
+        throw new BadRequestException('Too many attempts, request new OTP');
+      }
+      if (!hashOk) {
+        try {
+          await (this.cache as any).set(
+            cacheKey,
+            redisData,
+            redisData.expiresAt - Date.now(),
+          );
+        } catch {
+          // best-effort persist — absence is fail-open safe
+        }
+        // also increment PG attempts
+        await this.incrementAttempts(phone);
+        throw new BadRequestException('Invalid or expired OTP');
+      }
+      // success: delete Redis, update PG audit scoped to the calling purpose
+      try {
+        await (this.cache as any).del(cacheKey);
+      } catch {
+        void 0;
+      }
+      await this.markVerified(phone, purpose);
+      return;
+    }
+
+    // Fallback DB path (Q4)
+    const repo = this.dataSource.getRepository(OtpVerification);
+    const latest = await repo.find({
+      where: { phoneNumber: phone },
+      order: { createdAt: 'DESC' },
+      take: 1,
+    });
+    const row = latest[0];
+    if (!row || row.verifiedAt || row.expiresAt.getTime() <= Date.now()) {
+      throw new BadRequestException('Invalid or expired OTP');
+    }
+    // increment attempts on every attempt per B2
+    row.attempts += 1;
+    await repo.save(row);
+    if (row.attempts > 3)
+      throw new BadRequestException('Too many attempts, request new OTP');
+    if (!timingSafeEqual(row.codeHash, codeHash)) {
+      throw new BadRequestException('Invalid or expired OTP');
+    }
+    row.verifiedAt = new Date();
+    await repo.save(row);
+    return;
+  }
+
+  /**
+   * Increments PG audit attempts for a phone (fail-open best-effort).
+   *
+   * @param phone - E.164 phone number.
+   * @returns Void.
+   */
+  private async incrementAttempts(phone: string): Promise<void> {
+    try {
+      const repo = this.dataSource.getRepository(OtpVerification);
+      const rows = await repo.find({
+        where: { phoneNumber: phone },
+        order: { createdAt: 'DESC' },
+        take: 1,
+      });
+      if (rows[0]) {
+        rows[0].attempts += 1;
+        await repo.save(rows[0]);
+      }
+    } catch {
+      // best-effort audit — absence is fail-open safe
+    }
+  }
+
+  /**
+   * Marks the latest PG audit row verified (fail-open best-effort).
+   *
+   * @param phone - E.164 phone number.
+   * @param purpose - OTP purpose scope for the audit row.
+   * @returns Void.
+   */
+  private async markVerified(
+    phone: string,
+    purpose: OtpPurpose,
+  ): Promise<void> {
+    try {
+      const repo = this.dataSource.getRepository(OtpVerification);
+      const rows = await repo.find({
+        where: { phoneNumber: phone, purpose },
+        order: { createdAt: 'DESC' },
+        take: 1,
+      });
+      if (rows[0]) {
+        rows[0].verifiedAt = new Date();
+        rows[0].attempts += 1;
+        await repo.save(rows[0]);
+      }
+    } catch {
+      void 0;
+    }
+  }
+}
+
+/**
+ * Constant-time string comparison (moved with the OTP state machine).
+ *
+ * @param a - First string.
+ * @param b - Second string.
+ * @returns True when equal (length + timing safe).
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
+  try {
+    const bufA = Buffer.from(a, 'utf8');
+    const bufB = Buffer.from(b, 'utf8');
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return a === b;
+  }
+}

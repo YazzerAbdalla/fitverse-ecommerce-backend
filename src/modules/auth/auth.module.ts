@@ -19,6 +19,11 @@ import { SmtpEmailProvider } from '../notifications/smtp-email.provider';
 import { RateLimitGuard } from './guards/rate-limit.guard';
 import { JwtGuard } from './guards/jwt.guard';
 import { AUTH_TOKEN_CONFIG, resolveAuthTokenConfig } from './auth-token.config';
+import { RefreshTokenStore } from './stores/refresh-token.store';
+import { PasswordResetTokenStore } from './stores/password-reset-token.store';
+import { VerificationTokenStore } from './stores/verification-token.store';
+import { OtpStore } from './stores/otp.store';
+import { AuthEventPublisher } from './auth-event.publisher';
 
 @Module({
   imports: [
@@ -48,6 +53,11 @@ import { AUTH_TOKEN_CONFIG, resolveAuthTokenConfig } from './auth-token.config';
     GoogleStrategy,
     RateLimitGuard,
     JwtGuard,
+    RefreshTokenStore,
+    PasswordResetTokenStore,
+    VerificationTokenStore,
+    OtpStore,
+    AuthEventPublisher,
     {
       // Parsed once at startup (T010): TTL/cooldown/cookie/OAuth settings with
       // legacy-identical defaults. No hard-fail on missing keys (warn-once).
