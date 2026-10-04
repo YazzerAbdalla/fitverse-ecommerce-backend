@@ -1,3 +1,11 @@
+/**
+ * User self-service HTTP endpoints (profile read, preference update).
+ * No business logic, no persistence — delegates to UsersService.
+ *
+ * Responsibility (SRP): user HTTP transport, nothing else.
+ * Used by: UsersModule (route registration).
+ * Depends on: UsersService.
+ */
 import {
   Body,
   Controller,
@@ -9,8 +17,9 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import type { JwtPayloadProps } from '../auth/types';
+import type { JwtPayload } from '../auth/types';
 import { UpdatePreferencesDto } from './dto/update-preferences.dto';
+import { toSafeUser } from './dto/safe-user-response.dto';
 import { UsersService } from './users.service';
 
 /**
@@ -22,9 +31,9 @@ export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
   /**
-   * Returns the current user's profile without the password hash.
+   * Returns the current user's profile (client-safe projection).
    * @param user - Authenticated JWT payload.
-   * @returns Own user row (incl. marketingOptIn, emailOptIn, emailVerified).
+   * @returns Own user as SafeUserResponseDto (never password/token hashes).
    * @throws UnauthorizedException if the payload carries no subject.
    * @throws NotFoundException if the user row no longer exists.
    */
@@ -35,7 +44,7 @@ export class UsersController {
   @ApiResponse({ status: 200, description: 'Own user with preference flags' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 404, description: 'User not found' })
-  async getMe(@CurrentUser() user: JwtPayloadProps) {
+  async getMe(@CurrentUser() user: JwtPayload) {
     const userId = user?.sub;
     if (!userId) {
       throw new UnauthorizedException();
@@ -44,9 +53,9 @@ export class UsersController {
     if (!found) {
       throw new NotFoundException(`User ${userId} not found.`);
     }
-    // Never expose the password hash
-    const { password: _password, ...safe } = found;
-    return safe;
+    // Allow-list projection: password hash and any future token columns
+    // can never leak even when the entity gains new sensitive fields.
+    return toSafeUser(found);
   }
 
   /**

@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { GoogleStrategy } from '../strateges/google.strategy';
+import { GoogleStrategy } from './google.strategy';
 
 describe('GoogleStrategy', () => {
   let configGetMock: jest.Mock;
@@ -230,6 +230,42 @@ describe('GoogleStrategy', () => {
         null,
         expect.objectContaining({ googleId: 'google-unique-999' }),
       );
+    });
+  });
+
+  describe('A4 secret fail-fast (startup behavior)', () => {
+    const missingAll = {
+      NODE_ENV: 'production',
+      GOOGLE_CLIENT_ID: undefined,
+      GOOGLE_CLIENT_SECRET: undefined,
+      GOOGLE_CALLBACK_URL: undefined,
+    };
+
+    it('production + missing keys → throws (no silent test fallback)', () => {
+      expect(() => createStrategy(missingAll)).toThrow(
+        /Google OAuth misconfigured: missing .*GOOGLE_CLIENT_ID/,
+      );
+    });
+
+    it('production + all keys present → constructs (NODE_ENV unread)', () => {
+      const strategy = createStrategy({
+        NODE_ENV: 'production',
+        GOOGLE_CLIENT_ID: 'prod-id',
+        GOOGLE_CLIENT_SECRET: 'prod-secret',
+        GOOGLE_CALLBACK_URL: 'https://app.example.com/auth/google/callback',
+      });
+      expect(strategy).toBeDefined();
+      // Nothing missing → no env gate consulted, no fallback, no throw.
+      expect(configGetMock).not.toHaveBeenCalledWith('NODE_ENV');
+    });
+
+    it('non-production + missing keys → constructs with dev fallbacks', () => {
+      const strategy = createStrategy({
+        GOOGLE_CLIENT_ID: undefined,
+        GOOGLE_CLIENT_SECRET: undefined,
+        GOOGLE_CALLBACK_URL: undefined,
+      });
+      expect(strategy).toBeDefined();
     });
   });
 });

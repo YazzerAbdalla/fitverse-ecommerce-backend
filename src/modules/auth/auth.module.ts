@@ -1,3 +1,13 @@
+/**
+ * Auth module wiring: services, guards, strategies, token stores, and the
+ * startup-resolved token config. Exports shared guards + UsersService access.
+ *
+ * Responsibility (SRP): auth dependency wiring, nothing else.
+ * Used by: AppModule; Order/Cart/Products/Notifications/Inventory/
+ *   Reservation/Outbox modules (shared guards + UsersService scope).
+ * Depends on: UsersModule, TypeOrmModule (token entities), JwtModule,
+ *   PassportModule, ConfigModule.
+ */
 import { Logger, Module } from '@nestjs/common';
 import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
@@ -5,18 +15,23 @@ import { AuthService } from './auth.service';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PassportModule } from '@nestjs/passport';
-import { LocalStrategy } from './strateges/local.strategy';
-import { JwtStrategy } from './strateges/jwt.strategy';
-import { GoogleStrategy } from './strateges/google.strategy';
+import { LocalStrategy } from './strategies/local.strategy';
+import { GoogleStrategy } from './strategies/google.strategy';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PasswordResetToken } from './entities/password-reset-token.entity';
 import { OtpVerification } from './entities/otp-verification.entity';
-import { EmailVerificationToken } from './entities/email-verification-token.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { NoopWhatsAppProvider } from './providers/whatsapp.provider';
 import { NoopEmailProvider } from '../notifications/email.provider';
 import { SmtpEmailProvider } from '../notifications/smtp-email.provider';
 import { RateLimitGuard } from './guards/rate-limit.guard';
+import { JwtGuard } from './guards/jwt.guard';
+import { AUTH_TOKEN_CONFIG, resolveAuthTokenConfig } from './auth-token.config';
+import { RefreshTokenStore } from './stores/refresh-token.store';
+import { PasswordResetTokenStore } from './stores/password-reset-token.store';
+import { OtpStore } from './stores/otp.store';
+import { AuthEventPublisher } from './auth-event.publisher';
+import { SystemClock } from '../../common/clock';
 
 @Module({
   imports: [
@@ -25,7 +40,6 @@ import { RateLimitGuard } from './guards/rate-limit.guard';
       PasswordResetToken,
       OtpVerification,
       RefreshToken,
-      EmailVerificationToken,
     ]),
     JwtModule.registerAsync({
       global: true,
@@ -42,9 +56,22 @@ import { RateLimitGuard } from './guards/rate-limit.guard';
     AuthService,
     Logger,
     LocalStrategy,
-    JwtStrategy,
     GoogleStrategy,
     RateLimitGuard,
+    JwtGuard,
+    RefreshTokenStore,
+    PasswordResetTokenStore,
+    OtpStore,
+    AuthEventPublisher,
+    SystemClock,
+    {
+      // Parsed once at startup (T010): TTL/cooldown/cookie/OAuth settings with
+      // legacy-identical defaults. No hard-fail on missing keys (warn-once).
+      provide: AUTH_TOKEN_CONFIG,
+      inject: [ConfigService, Logger],
+      useFactory: (config: ConfigService, logger: Logger) =>
+        resolveAuthTokenConfig(config, logger),
+    },
     { provide: 'WHATSAPP_PROVIDER', useClass: NoopWhatsAppProvider },
     SmtpEmailProvider,
     NoopEmailProvider,
@@ -65,6 +92,15 @@ import { RateLimitGuard } from './guards/rate-limit.guard';
     },
   ],
   controllers: [AuthController],
-  exports: [AuthService, RateLimitGuard, 'EMAIL_PROVIDER'],
+  // UsersModule is re-exported so every AuthModule importer (order, cart,
+  // products, notifications, inventory, reservation, outbox) can resolve the
+  // unified JwtGuard's UsersService in its own scope (S-1 wiring).
+  exports: [
+    AuthService,
+    RateLimitGuard,
+    JwtGuard,
+    UsersModule,
+    'EMAIL_PROVIDER',
+  ],
 })
 export class AuthModule {}

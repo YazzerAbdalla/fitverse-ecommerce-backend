@@ -1,4 +1,14 @@
 import { ExecutionContext, Injectable, ValidationPipe } from '@nestjs/common';
+/**
+ * This guard is responsible for passport-local credential validation.
+ * It keeps its explicit LoginDto pre-validation (T031 proof-gate, 2026-10-03):
+ * the login handler reads `@Request()`, not `@Body() LoginDto`, so the
+ * global ValidationPipe never sees the payload — without this block,
+ * malformed logins would 401 (bad credentials) instead of 400 (bad input).
+ * Removing it changes the wire contract; revisit only with an amendment.
+ *
+ * Used by: AuthController login route.
+ */
 import { AuthGuard } from '@nestjs/passport';
 import { Request } from 'express';
 import { LoginDto } from '../dto/login.dto';

@@ -33,13 +33,20 @@ $script:Failed = 0
 $script:Steps = @()
 
 function Step([string]$Name, [scriptblock]$Body) {
+  Write-Output ("STEP  $Name")
   try {
     &$Body
     $script:Passed++
     $script:Steps += "PASS  $Name"
+    Write-Output ("PASS  $Name")
   } catch {
     $script:Failed++
     $script:Steps += "FAIL  $Name :: $($_.Exception.Message)"
+    Write-Output ("FAIL  $Name :: $($_.Exception.Message)")
+    Write-Output ''
+    Write-Output '==== e2e-auth-users summary (aborted) ===='
+    $script:Steps | ForEach-Object { Write-Output $_ }
+    Write-Output ("passed=$($script:Passed) failed=$($script:Failed)")
     throw
   }
 }
@@ -48,13 +55,28 @@ function Assert([bool]$Cond, [string]$Msg) {
   if (-not $Cond) { throw $Msg }
 }
 
+# Case-insensitive header lookup: PS 5.1 surfaces response headers as a
+# case-sensitive generic Dictionary, so direct ['Set-Cookie'] indexing
+# unreliably misses present keys. Enumerate Keys and compare with -ieq.
+function Get-Header($Headers, [string]$Name) {
+  if ($null -eq $Headers) { return $null }
+  foreach ($k in $Headers.Keys) {
+    if ($k -ieq $Name) { return $Headers[$k] }
+  }
+  return $null
+}
+
 # Low-level call: returns @{ Status=int; Body=obj; Headers=hashtable; Cookies=string }
+# Every request carries a unique X-Forwarded-For per run: per-IP rate buckets
+# stay empty on shared Redis (same isolation as the Jest baseline suite).
 function CallApi([string]$Method, [string]$Path, $Payload = $null, [hashtable]$ExtraHeaders = @{}) {
   $url = "$BaseUrl$Path"
+  $headers = @{ 'X-Forwarded-For' = $script:RunIp }
+  foreach ($k in $ExtraHeaders.Keys) { $headers[$k] = $ExtraHeaders[$k] }
   $params = @{
     Uri         = $url
     Method      = $Method
-    Headers     = $ExtraHeaders
+    Headers     = $headers
     ContentType = 'application/json'
   }
   if ($null -ne $Payload) { $params['Body'] = ($Payload | ConvertTo-Json -Depth 6) }
@@ -63,7 +85,7 @@ function CallApi([string]$Method, [string]$Path, $Payload = $null, [hashtable]$E
     $status = [int]$r.StatusCode
     $body = $null
     if ($r.Content) { $body = ($r.Content | ConvertFrom-Json) }
-    return @{ Status = $status; Body = $body; Headers = $r.Headers; RawCookies = ($r.Headers['Set-Cookie']) }
+    return @{ Status = $status; Body = $body; Headers = $r.Headers; RawCookies = (Get-Header $r.Headers 'Set-Cookie') }
   } catch {
     $resp = $_.Exception.Response
     if ($null -eq $resp) { throw "no HTTP response for $Method $Path :: $($_.Exception.Message)" }
@@ -85,7 +107,10 @@ function GetBodyMessage($Body) {
 }
 
 $ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$script:RunIp = ('10.99.' + ([Math]::Floor($ts / 256) % 256) + '.' + ($ts % 256))
 $email = "e2e-$ts@test.com"
+# Unique phone per run: the per-phone OTP bucket (5/h) must stay empty.
+$phone = ('+201' + ([string]$ts).Substring(([string]$ts).Length - 7))
 $pass = 'Password123!'
 $access = $null
 $refresh = $null
@@ -107,12 +132,14 @@ Step 'register duplicate 400' {
   Assert ($r.Status -eq 400) "expected 400, got $($r.Status)"
 }
 
-Step 'login 200 + pair + cookie' {
+Step 'login 201 + pair + cookie' {
   $r = CallApi 'POST' '/auth/login' @{ email = $email; password = $pass }
-  Assert ($r.Status -eq 200) "expected 200, got $($r.Status)"
+  Assert ($r.Status -eq 201) "expected 201, got $($r.Status)"
   Assert ($r.Body.accessToken.Length -gt 20) 'expected accessToken'
   Assert ($r.Body.refreshToken.Length -eq 64) 'expected 64-hex refreshToken'
-  Assert ($null -ne $r.RawCookies -and "$r.RawCookies" -like '*refresh_token*') 'expected refresh_token Set-Cookie'
+  # NOTE: subexpression $() is required — "$r.RawCookies" would interpolate
+  # only $r (the whole hashtable) plus a literal ".RawCookies".
+  Assert ($null -ne $r.RawCookies -and "$($r.RawCookies)" -like '*refresh_token*') 'expected refresh_token Set-Cookie'
   $script:access = $r.Body.accessToken
   $script:refresh = $r.Body.refreshToken
 }
@@ -136,9 +163,9 @@ Step 'PATCH /users/me/preferences 200' {
   Assert ($r2.Status -eq 200) 'expected 200 on revert'
 }
 
-Step 'refresh rotation 200 + old-token reuse 401 (theft nuke)' {
+Step 'refresh rotation 201 + old-token reuse 401 (theft nuke)' {
   $r = CallApi 'POST' '/auth/refresh' @{ refreshToken = $script:refresh }
-  Assert ($r.Status -eq 200) "expected 200, got $($r.Status)"
+  Assert ($r.Status -eq 201) "expected 201, got $($r.Status)"
   Assert ($r.Body.refreshToken.Length -eq 64) 'expected rotated 64-hex'
   $newRefresh = $r.Body.refreshToken
   $script:access = $r.Body.accessToken
@@ -147,10 +174,10 @@ Step 'refresh rotation 200 + old-token reuse 401 (theft nuke)' {
   $script:refresh = $newRefresh
 }
 
-Step 'forgot-password anti-enum 200 (known + unknown identical)' {
+Step 'forgot-password anti-enum 201 (known + unknown identical)' {
   $a = CallApi 'POST' '/auth/forgot-password' @{ email = $email }
   $b = CallApi 'POST' '/auth/forgot-password' @{ email = "nobody-$ts@test.com" }
-  Assert ($a.Status -eq 200 -and $b.Status -eq 200) "expected 200/200, got $($a.Status)/$($b.Status)"
+  Assert ($a.Status -eq 201 -and $b.Status -eq 201) "expected 201/201, got $($a.Status)/$($b.Status)"
   Assert ((GetBodyMessage $a.Body) -eq (GetBodyMessage $b.Body)) 'anti-enum: messages must match'
 }
 
@@ -164,32 +191,32 @@ Step 'verify-email garbage 400' {
   Assert ($r.Status -eq 400) "expected 400, got $($r.Status)"
 }
 
-Step 'resend-verification 200 then cooldown 429' {
+Step 'resend-verification 201 then cooldown 429' {
   $r = CallApi 'POST' '/auth/resend-verification' @{ email = $email }
-  Assert ($r.Status -eq 200) "expected 200, got $($r.Status)"
+  Assert ($r.Status -eq 201) "expected 201, got $($r.Status)"
   $r2 = CallApi 'POST' '/auth/resend-verification' @{ email = $email }
   Assert ($r2.Status -eq 429) "expected 429 cooldown, got $($r2.Status)"
 }
 
 Step 'OTP endpoints 501' {
-  $r = CallApi 'POST' '/auth/otp/request' @{ phoneNumber = '+201000000001' }
+  $r = CallApi 'POST' '/auth/otp/request' @{ phoneNumber = $phone }
   Assert ($r.Status -eq 501) "expected 501, got $($r.Status)"
 }
 
-Step 'logout 200 idempotent (twice)' {
+Step 'logout 201 idempotent (twice)' {
   $r = CallApi 'POST' '/auth/logout' @{ refreshToken = $script:refresh }
-  Assert ($r.Status -eq 200) "expected 200, got $($r.Status)"
+  Assert ($r.Status -eq 201) "expected 201, got $($r.Status)"
   $r2 = CallApi 'POST' '/auth/logout' @{ refreshToken = $script:refresh }
-  Assert ($r2.Status -eq 200) "expected 200 idempotent, got $($r2.Status)"
+  Assert ($r2.Status -eq 201) "expected 201 idempotent, got $($r2.Status)"
 }
 
 Step 'logout-all kills sessions (S-1 revocation check)' {
   $lr = CallApi 'POST' '/auth/login' @{ email = $email; password = $pass }
-  Assert ($lr.Status -eq 200) 're-login failed'
+  Assert ($lr.Status -eq 201) 're-login failed'
   $a2 = $lr.Body.accessToken
   $f2 = $lr.Body.refreshToken
   $lo = CallApi 'POST' '/auth/logout-all' $null @{ Authorization = "Bearer $a2" }
-  Assert ($lo.Status -eq 200) "expected 200, got $($lo.Status)"
+  Assert ($lo.Status -eq 201) "expected 201, got $($lo.Status)"
   $rf = CallApi 'POST' '/auth/refresh' @{ refreshToken = $f2 }
   Assert ($rf.Status -eq 401) "expected 401 refresh-after-nuke, got $($rf.Status)"
   $me = CallApi 'GET' '/users/me' $null @{ Authorization = "Bearer $a2" }
@@ -201,10 +228,16 @@ Step 'logout-all kills sessions (S-1 revocation check)' {
 }
 
 Step 'rate-limit headers present on success' {
-  $r = CallApi 'GET' '/users/me' $null @{ Authorization = "Bearer $script:access" }
-  Assert ($r.Status -eq 200) 'expected 200'
-  $hasLimit = ($null -ne $r.Headers['X-RateLimit-Limit']) -or ($null -ne $r.Headers['x-ratelimit-limit'])
+  # NOTE: all earlier sessions were nuked by logout-all (S-1), so re-login
+  # for a live token — the original $script:access is correctly 401 now.
+  # Header assertion targets the re-login POST (guarded by RateLimitGuard):
+  # GET /users/me is intentionally unthrottled, so it carries no headers.
+  $lr = CallApi 'POST' '/auth/login' @{ email = $email; password = $pass }
+  Assert ($lr.Status -eq 201) ("re-login for header check failed: got " + $lr.Status)
+  $hasLimit = ($null -ne (Get-Header $lr.Headers 'X-RateLimit-Limit'))
   Assert ($hasLimit) 'expected X-RateLimit-Limit header'
+  $r = CallApi 'GET' '/users/me' $null @{ Authorization = "Bearer $($lr.Body.accessToken)" }
+  Assert ($r.Status -eq 200) "expected 200, got $($r.Status)"
 }
 
 Write-Host ''

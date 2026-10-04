@@ -1,8 +1,15 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuthService } from './auth.service';
+import { VerificationCooldownError } from './verification-cooldown.error';
 import { UsersService } from '../users/users.service';
+import { RefreshTokenStore } from './stores/refresh-token.store';
+import { PasswordResetTokenStore } from './stores/password-reset-token.store';
+import { OtpStore } from './stores/otp.store';
+import { AuthEventPublisher } from './auth-event.publisher';
+import { SystemClock } from '../../common/clock';
+import { AUTH_TOKEN_CONFIG } from './auth-token.config';
 import { JwtService } from '@nestjs/jwt';
-import { BadRequestException, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { ConfigService } from '@nestjs/config';
@@ -11,6 +18,8 @@ import * as bcrypt from 'bcrypt';
 import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { ValidateResetTokenDto } from './dto/validate-reset-token.dto';
+import { UserRegisterDto } from './dto/user-register.dto';
 
 // Keep original smoke test and extend with T014/T015
 describe('AuthService', () => {
@@ -21,6 +30,7 @@ describe('AuthService', () => {
   let cacheManager: Record<string, jest.Mock>;
   let configService: Record<string, jest.Mock>;
   let logger: Record<string, jest.Mock>;
+  let eventPublisher: Record<string, jest.Mock>;
 
   // transaction helpers
   let mockManager: any;
@@ -28,6 +38,8 @@ describe('AuthService', () => {
   let mockUserRepo: any;
   let mockQueryBuilder: any;
   let mockCreateQueryBuilder: jest.Mock;
+  // Locked user row returned by the findUserByEmailForUpdate fake (per-test).
+  let lockedVerificationUser: any;
 
   beforeEach(async () => {
     // chained QB for invalidate priors / FOR UPDATE
@@ -68,6 +80,35 @@ describe('AuthService', () => {
       createNewUser: jest.fn(),
       findUserById: jest.fn(),
       findByGoogleId: jest.fn(),
+      findUserByIdForUpdate: jest.fn(),
+      updatePassword: jest.fn(),
+      incrementTokenVersion: jest.fn(),
+      setEmailVerified: jest.fn(),
+      setPhoneVerified: jest.fn(),
+      findUserByPhone: jest.fn(),
+      linkGoogleAccount: jest.fn(),
+      // Folded verification intents (B3): thin fakes through the mocked
+      // manager so call-shape assertions hold; real SQL proven on PG.
+      findUserByEmailForUpdate: jest.fn(async (manager: any, email: string) =>
+        lockedVerificationUser?.email === email ? lockedVerificationUser : null,
+      ),
+      issueEmailVerificationToken: jest.fn(
+        async (manager: any, userId: string, hash: string, exp: Date) => {
+          await manager.getRepository({ name: 'User' }).update(userId, {
+            emailVerificationTokenHash: hash,
+            emailVerificationExpiresAt: exp,
+            emailVerificationUsedAt: null,
+          });
+        },
+      ),
+      consumeEmailVerificationToken: jest.fn(
+        async (manager: any, userId: string, now: Date) => {
+          await manager.getRepository({ name: 'User' }).update(userId, {
+            emailVerificationUsedAt: now,
+            emailVerified: true,
+          });
+        },
+      ),
     };
     jwtService = { signAsync: jest.fn().mockResolvedValue('token') };
     logger = {
@@ -78,6 +119,7 @@ describe('AuthService', () => {
     };
     cacheManager = { get: jest.fn(), set: jest.fn(), del: jest.fn() };
     configService = { get: jest.fn().mockReturnValue('15m') };
+    eventPublisher = { emit: jest.fn() };
     dataSource = {
       transaction: jest.fn(async (cb: any) => cb(mockManager)),
       getRepository: jest.fn((entity: any) => {
@@ -102,12 +144,109 @@ describe('AuthService', () => {
             sendOtp: jest.fn().mockResolvedValue({ messageId: 'test' }),
           },
         },
+        {
+          provide: RefreshTokenStore,
+          useValue: {
+            findByHashForUpdate: jest.fn(),
+            revokeById: jest.fn(),
+            countActive: jest.fn(),
+            findOldestActive: jest.fn(),
+            create: jest.fn(),
+            revokeByHashWhereActive: jest.fn(),
+            revokeAllActive: jest.fn(),
+            revokeAllInTx: jest.fn(),
+            purgeExpired: jest.fn(),
+          },
+        },
+        // Functional fakes (US3): mirror the real stores through the mocked
+        // repos/manager so existing repo-level assertions keep proving the
+        // same SQL shapes; real behavior is proven by token-races on PG.
+        {
+          provide: PasswordResetTokenStore,
+          useValue: {
+            issue: jest.fn(
+              async (
+                manager: any,
+                userId: string,
+                tokenHash: string,
+                expiresAt: Date,
+              ) => {
+                await manager
+                  .createQueryBuilder()
+                  .update('PasswordResetToken')
+                  .set({ usedAt: new Date() })
+                  .where(
+                    'userId = :userId AND "usedAt" IS NULL AND "expiresAt" > NOW()',
+                    { userId },
+                  )
+                  .execute();
+                const repo = manager.getRepository('PasswordResetToken');
+                await repo.save(
+                  repo.create({ userId, tokenHash, expiresAt, usedAt: null }),
+                );
+              },
+            ),
+            findAdvisory: jest.fn(async (tokenHash: string, userId: string) =>
+              dataSource
+                .getRepository('PasswordResetToken')
+                .findOne({ where: { tokenHash, userId } }),
+            ),
+            findForUpdate: jest.fn(
+              async (manager: any, tokenHash: string, userId: string) =>
+                manager
+                  .getRepository('PasswordResetToken')
+                  .createQueryBuilder('t')
+                  .setLock('pessimistic_write')
+                  .where('t.tokenHash = :tokenHash AND t.userId = :userId', {
+                    tokenHash,
+                    userId,
+                  })
+                  .getOne(),
+            ),
+            consume: jest.fn(
+              async (manager: any, token: any, userId: string) => {
+                const repo = manager.getRepository('PasswordResetToken');
+                await repo.update(token.id, { usedAt: new Date() });
+                await manager
+                  .createQueryBuilder()
+                  .update('PasswordResetToken')
+                  .set({ usedAt: new Date() })
+                  .where(
+                    'userId = :userId AND id != :id AND "usedAt" IS NULL',
+                    { userId, id: token.id },
+                  )
+                  .execute();
+              },
+            ),
+          },
+        },
+        {
+          provide: OtpStore,
+          useValue: { issueOtp: jest.fn(), verifyAttempt: jest.fn() },
+        },
+        { provide: AuthEventPublisher, useValue: eventPublisher },
+        { provide: SystemClock, useValue: { now: () => new Date() } },
+        {
+          provide: AUTH_TOKEN_CONFIG,
+          useValue: {
+            refreshTokenTtlMs: 7 * 24 * 3600_000,
+            refreshCookieName: 'refresh_token',
+            refreshCookieSecure: false,
+            resetTokenTtlMs: 15 * 60_000,
+            emailVerificationTtlMs: 24 * 3600_000,
+            otpTtlMs: 5 * 60_000,
+            otpMaxAttempts: 3,
+            otpResendCooldownMs: 60_000,
+          },
+        },
       ],
     }).compile();
 
     service = module.get<AuthService>(AuthService);
-    // reset lastRawToken
+    // reset test hooks + locked-row fake
     service.lastRawToken = undefined;
+    service.lastVerificationToken = undefined;
+    lockedVerificationUser = null;
   });
 
   it('should be defined', () => {
@@ -352,24 +491,22 @@ describe('AuthService', () => {
         expect.stringContaining('tokenHash'),
         expect.objectContaining({ tokenHash, userId: user.id }),
       );
-      // bcrypt 10 rounds: real hash starts with $2b$10$ (cost 10)
-      const updateCall = mockUserRepo.update.mock.calls[0][1];
-      expect(updateCall.password).toBeDefined();
-      expect(updateCall.password).toMatch(/^\$2[ab]\$10\$/);
-      const matches = await bcrypt.compare(
-        'NewStrong123!',
-        updateCall.password,
-      );
-      expect(matches).toBe(true);
-      // user update with increment
-      expect(mockUserRepo.update).toHaveBeenCalledWith(
+      // bcrypt 10 rounds: real hash starts with $2b$10$ (cost 10).
+      // US2: the password write goes through UsersService.updatePassword —
+      // assert on that boundary (same hash + increment + stamp, same tx).
+      expect(usersService.updatePassword).toHaveBeenCalledWith(
         user.id,
+        expect.any(String),
+        undefined,
         expect.objectContaining({
-          password: expect.any(String),
-          tokenVersion: expect.any(Function),
           passwordChangedAt: expect.any(Date),
         }),
       );
+      const [uid, hash] = usersService.updatePassword.mock.calls[0];
+      expect(uid).toBe(user.id);
+      expect(hash).toMatch(/^\$2[ab]\$10\$/);
+      const matches = await bcrypt.compare('NewStrong123!', hash);
+      expect(matches).toBe(true);
       // token usedAt set
       expect(mockTokenRepo.update).toHaveBeenCalledWith(tokenRow.id, {
         usedAt: expect.any(Date),
@@ -481,6 +618,55 @@ describe('AuthService', () => {
       expect(errorsLong.length).toBeGreaterThan(0);
     });
 
+    it('A5 token floors: reset/validate DTOs accept 64hex, reject garbage (DTO level)', async () => {
+      // Same floor as VerifyEmailDto: Length(64) + hex match.
+      const valid = 'b'.repeat(64);
+      for (const Dto of [ResetPasswordDto, ValidateResetTokenDto]) {
+        const ok = plainToInstance(Dto, {
+          email: user.email,
+          token: valid,
+          ...(Dto === ResetPasswordDto
+            ? { newPassword: 'LongEnough123!' }
+            : {}),
+        });
+        expect(await validate(ok)).toEqual([]);
+        for (const garbage of [
+          'wrong',
+          'g'.repeat(64),
+          'a'.repeat(63),
+          'a'.repeat(65),
+        ]) {
+          const bad = plainToInstance(Dto, {
+            email: user.email,
+            token: garbage,
+            ...(Dto === ResetPasswordDto
+              ? { newPassword: 'LongEnough123!' }
+              : {}),
+          });
+          expect(await validate(bad).then((e) => e.length)).toBeGreaterThan(0);
+        }
+      }
+    });
+
+    it('A5 register floor: password <8 rejected, 8 accepted (DTO level)', async () => {
+      // Registration floor matches the reset newPassword floor (8).
+      const base = {
+        firstName: 'A',
+        lastName: 'B',
+        email: user.email,
+      };
+      const weak = plainToInstance(UserRegisterDto, {
+        ...base,
+        password: 'short7!',
+      });
+      expect(await validate(weak).then((e) => e.length)).toBeGreaterThan(0);
+      const ok = plainToInstance(UserRegisterDto, {
+        ...base,
+        password: 'LongEnough123!',
+      });
+      expect(await validate(ok)).toEqual([]);
+    });
+
     it('expired token via validateResetToken path also 400 (integration of both)', async () => {
       // simulate second use after success: token usedAt set
       const tokenRowValid = {
@@ -516,90 +702,73 @@ describe('AuthService', () => {
     } as any;
 
     beforeEach(() => {
-      mockUserRepo.findOne = jest.fn();
-      mockTokenRepo.findOne.mockReset?.();
-      mockQueryBuilder.execute.mockClear();
-      mockTokenRepo.create.mockClear();
-      mockTokenRepo.save.mockClear();
       dataSource.transaction.mockClear();
+      mockUserRepo.update.mockClear();
+      usersService.issueEmailVerificationToken.mockClear();
       cacheManager.get.mockResolvedValue(undefined);
       cacheManager.set.mockResolvedValue(undefined);
-      // EMAIL_VERIFICATION_TTL 24h for US1 (shared mock defaults to 15m for reset)
-      configService.get.mockImplementation((key: string) =>
-        key === 'EMAIL_VERIFICATION_TTL' ? '24h' : '15m',
-      );
     });
 
-    it('not found → void anti-enum, 0 transaction', async () => {
-      usersService.findUserByEmail.mockResolvedValue(null);
-      await expect(
-        service.requestEmailVerification('nobody@example.com'),
-      ).resolves.toBeUndefined();
-      expect(logger.debug).toHaveBeenCalledWith(
-        expect.stringContaining('nobody@example.com'),
-      );
-      expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
-    });
-
-    it('emailVerified true → void, 0 transaction, 0 insert', async () => {
-      usersService.findUserByEmail.mockResolvedValue({
-        ...user,
-        emailVerified: true,
-      });
-      await expect(
-        service.requestEmailVerification(user.email),
-      ).resolves.toBeUndefined();
-      expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
-    });
-
-    it('emailVerified false → UPDATE priors + INSERT 24h sha256 + emit once, EmailProvider.send not called directly', async () => {
-      usersService.findUserByEmail.mockResolvedValue({ ...user });
-      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+    // Folded contract (B4): the method takes the already-loaded User and
+    // overwrites its verification columns via UsersService — no token table,
+    // no lookup, no anti-enum here (resend owns anti-enum, T027 below).
+    it('issues for the given user → 1 tx + UsersService.issue with 64hex hash + 24h + hook + emit once', async () => {
+      const emitSpy = eventPublisher.emit;
       const before = Date.now();
-      await service.requestEmailVerification(user.email);
+      await service.requestEmailVerification({ ...user });
       const after = Date.now();
 
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-      // invalidate priors via UPDATE usedAt
-      expect(mockQueryBuilder.update).toHaveBeenCalled();
-      expect(mockQueryBuilder.set).toHaveBeenCalledWith(
-        expect.objectContaining({ usedAt: expect.any(Date) }),
-      );
-      // INSERT new token
-      expect(mockTokenRepo.create).toHaveBeenCalledTimes(1);
-      expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
-      const created = mockTokenRepo.create.mock.calls[0][0];
-      expect(created.userId).toBe(user.id);
-      expect(created.tokenHash).toMatch(/^[a-f0-9]{64}$/);
-      expect(created.usedAt).toBeNull();
-      // expiresAt ~24h
+      // Single live-token overwrite on the user row
+      expect(usersService.issueEmailVerificationToken).toHaveBeenCalledTimes(1);
+      const [managerArg, issuedUserId, issuedHash, issuedExp] =
+        usersService.issueEmailVerificationToken.mock.calls[0];
+      expect(managerArg).toBe(mockManager);
+      expect(issuedUserId).toBe(user.id);
+      expect(issuedHash).toMatch(/^[a-f0-9]{64}$/);
+      // expiresAt ~24h from tokenConfig
       const ttl = 24 * 3600 * 1000;
-      expect(created.expiresAt.getTime()).toBeGreaterThanOrEqual(
-        before + ttl - 5000,
-      );
-      expect(created.expiresAt.getTime()).toBeLessThanOrEqual(
-        after + ttl + 5000,
+      expect(issuedExp.getTime()).toBeGreaterThanOrEqual(before + ttl - 5000);
+      expect(issuedExp.getTime()).toBeLessThanOrEqual(after + ttl + 5000);
+      expect(mockUserRepo.update).toHaveBeenCalledWith(
+        user.id,
+        expect.objectContaining({
+          emailVerificationTokenHash: issuedHash,
+          emailVerificationExpiresAt: issuedExp,
+          emailVerificationUsedAt: null,
+        }),
       );
       // test hook captures raw, hash matches sha256(raw)
       const raw = service.lastVerificationToken!;
       expect(raw).toMatch(/^[a-f0-9]{64}$/);
-      expect(created.tokenHash).toBe(
+      expect(issuedHash).toBe(
         crypto.createHash('sha256').update(raw).digest('hex'),
       );
       // emit after commit exactly once; service never calls EmailProvider.send directly
       expect(emitSpy).toHaveBeenCalledTimes(1);
       expect(emitSpy).toHaveBeenCalledWith(
         'email.verification_requested',
-        expect.objectContaining({ userId: user.id, email: user.email }),
+        expect.objectContaining({
+          userId: user.id,
+          email: user.email,
+          rawToken: raw,
+        }),
       );
       expect((service as any).emailProvider).toBeUndefined();
-      emitSpy.mockRestore();
+      emitSpy.mockClear();
+    });
+
+    it('no verified-gate here: already-verified user still issues (resend owns anti-enum)', async () => {
+      await service.requestEmailVerification({
+        ...user,
+        emailVerified: true,
+      });
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(usersService.issueEmailVerificationToken).toHaveBeenCalledTimes(1);
     });
   });
 
-  // ===================== T020: verifyEmail FOR UPDATE (US1) =====================
+  // ===================== T020: verifyEmail FOR UPDATE on user row (US1) =====================
   describe('verifyEmail (T020 US1)', () => {
     const user = {
       id: 'user-1',
@@ -612,73 +781,85 @@ describe('AuthService', () => {
     const past = new Date(Date.now() - 60 * 1000);
 
     beforeEach(() => {
-      mockUserRepo.findOne = jest.fn().mockResolvedValue({ ...user });
-      mockUserRepo.update.mockClear();
-      mockTokenRepo.update = jest.fn(async () => ({ affected: 1 }));
-      mockQueryBuilder.setLock.mockClear();
-      mockQueryBuilder.where.mockClear();
-      mockQueryBuilder.getOne.mockReset();
       dataSource.transaction.mockClear();
+      mockUserRepo.update.mockClear();
+      usersService.findUserByEmailForUpdate.mockClear();
+      usersService.consumeEmailVerificationToken.mockClear();
     });
 
-    function mockVerifyRow(row: any) {
-      // service uses manager.getRepository(EmailVerificationToken).findOne({where, lock}) OR QB; support both
-      mockTokenRepo.findOne = jest.fn().mockResolvedValue(row);
-      mockQueryBuilder.getOne.mockResolvedValue(row);
+    // Locked user row backing the findUserByEmailForUpdate fake.
+    function mockLockedUser(row: any) {
+      lockedVerificationUser = { email: user.email, ...row };
     }
 
-    it('valid → 200 usedAt NOW + emailVerified true', async () => {
-      usersService.findUserByEmail.mockResolvedValue({ ...user });
-      const row = {
-        id: 'tok-1',
-        tokenHash,
-        userId: user.id,
-        expiresAt: future,
-        usedAt: null,
+    function liveRow(overrides: any = {}) {
+      return {
+        id: user.id,
+        email: user.email,
+        emailVerified: false,
+        emailVerificationTokenHash: tokenHash,
+        emailVerificationExpiresAt: future,
+        emailVerificationUsedAt: null,
+        ...overrides,
       };
-      mockVerifyRow(row);
+    }
+
+    it('valid → 200 + consume called (usedAt NOW + verified flag)', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      mockLockedUser(liveRow());
       const res = await service.verifyEmail({ email: user.email, token: raw });
       expect(res).toEqual({ verified: true, emailVerified: true });
-      // FOR UPDATE used (either findOne lock or QB setLock)
-      const usedForUpdate =
-        mockQueryBuilder.setLock.mock.calls.some(
-          (c: any[]) => c[0] === 'pessimistic_write',
-        ) ||
-        (mockTokenRepo.findOne.mock.calls.some((c: any[]) =>
-          JSON.stringify(c[0] ?? {}).includes('pessimistic_write'),
-        ) as boolean);
-      expect(usedForUpdate).toBe(true);
+      // Locked read scoped to the email before any write
+      expect(usersService.findUserByEmailForUpdate).toHaveBeenCalledWith(
+        mockManager,
+        user.email,
+      );
+      // Single-use consume in the same tx
+      expect(usersService.consumeEmailVerificationToken).toHaveBeenCalledTimes(
+        1,
+      );
+      const [managerArg, consumedUserId, consumedAt] =
+        usersService.consumeEmailVerificationToken.mock.calls[0];
+      expect(managerArg).toBe(mockManager);
+      expect(consumedUserId).toBe(user.id);
+      expect(consumedAt).toBeInstanceOf(Date);
+      expect(mockUserRepo.update).toHaveBeenCalledWith(
+        user.id,
+        expect.objectContaining({
+          emailVerificationUsedAt: consumedAt,
+          emailVerified: true,
+        }),
+      );
     });
 
-    it('usedAt NOT NULL → 400', async () => {
+    it('usedAt NOT NULL → 400, 0 consume', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
-      mockVerifyRow({
-        id: 'tok-1',
-        tokenHash,
-        userId: user.id,
-        expiresAt: future,
-        usedAt: new Date(),
-      });
+      mockLockedUser(liveRow({ emailVerificationUsedAt: new Date() }));
       await expect(
         service.verifyEmail({ email: user.email, token: raw }),
       ).rejects.toThrow(BadRequestException);
+      expect(usersService.consumeEmailVerificationToken).not.toHaveBeenCalled();
     });
 
-    it('expiresAt <= NOW → 400', async () => {
+    it('expiresAt <= NOW → 400, 0 consume', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
-      mockVerifyRow({
-        id: 'tok-1',
-        tokenHash,
-        userId: user.id,
-        expiresAt: past,
-        usedAt: null,
-      });
+      mockLockedUser(liveRow({ emailVerificationExpiresAt: past }));
       await expect(
         service.verifyEmail({ email: user.email, token: raw }),
       ).rejects.toThrow('Invalid or expired verification token');
+      expect(usersService.consumeEmailVerificationToken).not.toHaveBeenCalled();
     });
 
-    it('unknown email → 400 (no 404 leak)', async () => {
+    it('wrong hash → 400, 0 consume', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      mockLockedUser(liveRow({ emailVerificationTokenHash: 'f'.repeat(64) }));
+      await expect(
+        service.verifyEmail({ email: user.email, token: raw }),
+      ).rejects.toThrow(BadRequestException);
+      expect(usersService.consumeEmailVerificationToken).not.toHaveBeenCalled();
+    });
+
+    it('unknown email → 400 (no 404 leak), 0 transaction', async () => {
       usersService.findUserByEmail.mockResolvedValue(null);
       await expect(
         service.verifyEmail({ email: 'nobody@example.com', token: raw }),
@@ -688,13 +869,7 @@ describe('AuthService', () => {
 
     it('logs hashPrefix only, never raw', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
-      mockVerifyRow({
-        id: 'tok-1',
-        tokenHash,
-        userId: user.id,
-        expiresAt: future,
-        usedAt: null,
-      });
+      mockLockedUser(liveRow());
       await service.verifyEmail({ email: user.email, token: raw });
       const allLogs = [
         ...logger.log.mock.calls,
@@ -718,68 +893,77 @@ describe('AuthService', () => {
 
     beforeEach(() => {
       dataSource.transaction.mockClear();
-      mockTokenRepo.create.mockClear();
-      mockTokenRepo.save.mockClear();
+      mockUserRepo.update.mockClear();
+      usersService.issueEmailVerificationToken.mockClear();
       cacheManager.get.mockReset();
       cacheManager.set.mockReset();
       cacheManager.get.mockResolvedValue(undefined);
       cacheManager.set.mockResolvedValue(undefined);
-      configService.get.mockImplementation((key: string) =>
-        key === 'EMAIL_VERIFICATION_TTL' ? '24h' : '15m',
-      );
     });
 
-    it('cooldown key exists → 429, 0 transaction', async () => {
+    it('cooldown key exists → VerificationCooldownError, 0 transaction', async () => {
       cacheManager.get.mockResolvedValue('1');
+      // T030: the service throws the domain signal; the controller renders
+      // the identical 429 wire shape (proven at HTTP level by parity resend).
       await expect(service.resendVerification(user.email)).rejects.toThrow(
-        expect.objectContaining({ status: 429 }),
+        VerificationCooldownError,
       );
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+      expect(usersService.issueEmailVerificationToken).not.toHaveBeenCalled();
     });
 
-    it('not found → 200 anti-enum, 0 insert', async () => {
+    it('not found → 200 anti-enum, 0 issue', async () => {
       usersService.findUserByEmail.mockResolvedValue(null);
       const res = await service.resendVerification('nobody@example.com');
+      // Pinned contract (RP-AUTH): the long anti-enum message — same string
+      // whether the email exists or not and whether it is verified.
       expect(res).toEqual({
-        message: 'If an account exists, a verification email has been sent.',
+        message:
+          'This email is not registered or already verified. If an account exists, a verification email has been sent.',
       });
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+      expect(usersService.issueEmailVerificationToken).not.toHaveBeenCalled();
     });
 
-    it('verified true → 200 distinct, 0 insert', async () => {
+    it('verified true → 200 distinct, 0 issue', async () => {
       usersService.findUserByEmail.mockResolvedValue({
         ...user,
         emailVerified: true,
       });
       const res = await service.resendVerification(user.email);
       expect(res).toEqual({ message: 'Email already verified' });
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+      expect(usersService.issueEmailVerificationToken).not.toHaveBeenCalled();
     });
 
-    it('unverified → UPDATE priors + INSERT 24h + emit + cooldown set', async () => {
+    it('unverified → overwrite live hash + 24h + emit + cooldown set', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
-      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      const emitSpy = eventPublisher.emit;
       const res = await service.resendVerification(user.email);
       expect(res).toEqual({
         message: 'If an account exists, a verification email has been sent.',
       });
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-      expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
-      const created = mockTokenRepo.create.mock.calls[0][0];
-      expect(created.tokenHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(usersService.issueEmailVerificationToken).toHaveBeenCalledTimes(1);
+      const issuedHash =
+        usersService.issueEmailVerificationToken.mock.calls[0][2];
+      expect(issuedHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(issuedHash).toBe(
+        crypto
+          .createHash('sha256')
+          .update(service.lastVerificationToken!)
+          .digest('hex'),
+      );
       expect(emitSpy).toHaveBeenCalledTimes(1);
       expect(emitSpy).toHaveBeenCalledWith(
         'email.verification_requested',
         expect.objectContaining({ userId: user.id }),
       );
-      // cooldown SET NX EX 60 recorded via cache.set
+      // cooldown SET 60s recorded via cache.set
       expect(cacheManager.set).toHaveBeenCalledWith(
         expect.stringContaining('resend:cooldown:'),
         expect.anything(),
         expect.any(Number),
       );
-      emitSpy.mockRestore();
+      emitSpy.mockClear();
     });
   });
 
@@ -795,7 +979,7 @@ describe('AuthService', () => {
 
     it('existing user → INSERT 15m + emit auth.password_reset_requested once', async () => {
       usersService.findUserByEmail.mockResolvedValue(user);
-      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      const emitSpy = eventPublisher.emit;
       await service.requestPasswordReset(user.email);
       expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
       expect(emitSpy).toHaveBeenCalledTimes(1);
@@ -803,16 +987,53 @@ describe('AuthService', () => {
         'auth.password_reset_requested',
         expect.objectContaining({ userId: user.id, email: user.email }),
       );
-      emitSpy.mockRestore();
+      emitSpy.mockClear();
     });
 
     it('unknown email → 0 insert + 0 emit', async () => {
       usersService.findUserByEmail.mockResolvedValue(null);
-      const emitSpy = jest.spyOn(service as any, 'emitAuthEvent');
+      const emitSpy = eventPublisher.emit;
       await service.requestPasswordReset('nobody@example.com');
       expect(mockTokenRepo.save).not.toHaveBeenCalled();
       expect(emitSpy).not.toHaveBeenCalled();
-      emitSpy.mockRestore();
+      emitSpy.mockClear();
+    });
+  });
+
+  // ===================== A6: linkGoogleAccount maps 23505 → 409 =====================
+  describe('linkGoogleAccount double-link (A6)', () => {
+    const profile = {
+      googleId: 'google-dup-1',
+      email: 'dup@example.com',
+      firstName: 'Dup',
+      lastName: 'User',
+      verified: true,
+    };
+
+    it('unique violation on link → ConflictException (DB serializes, app maps)', async () => {
+      usersService.findByGoogleId.mockResolvedValue(null);
+      usersService.linkGoogleAccount.mockRejectedValue(
+        Object.assign(
+          new Error('duplicate key value violates unique constraint'),
+          {
+            code: '23505',
+          },
+        ),
+      );
+      await expect(
+        service.linkGoogleAccount('user-1', profile as any),
+      ).rejects.toThrow('Google account already linked');
+      await expect(
+        service.linkGoogleAccount('user-1', profile as any),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('non-unique error propagates unmapped', async () => {
+      usersService.findByGoogleId.mockResolvedValue(null);
+      usersService.linkGoogleAccount.mockRejectedValue(new Error('boom'));
+      await expect(
+        service.linkGoogleAccount('user-1', profile as any),
+      ).rejects.toThrow('boom');
     });
   });
 });

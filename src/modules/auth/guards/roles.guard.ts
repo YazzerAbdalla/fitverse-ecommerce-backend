@@ -7,13 +7,25 @@ import {
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 import { Observable } from 'rxjs';
-import { JwtPayloadProps } from '../types';
+import { JwtPayload } from '../types';
 import { UserRoles } from 'src/modules/users/enum/roles';
 import { ROLESKEY } from '../decorators/auth.decorator';
+/**
+ * Enforces the roles set by @Auth() against request.user.role.
+ * Empty roles (bare @Auth()) pass through: authenticated-only.
+ * Must run after JwtGuard (wired order in the Auth decorator).
+ */
 @Injectable()
 export class RolesGuard implements CanActivate {
   constructor(private reflector: Reflector) {}
 
+  /**
+   * Checks the caller's role against the route's required roles.
+   *
+   * @param context - Nest execution context (handler + class metadata).
+   * @returns True when authorized.
+   * @throws ForbiddenException when the role is missing or not allowed.
+   */
   canActivate(
     context: ExecutionContext,
   ): boolean | Promise<boolean> | Observable<boolean> {
@@ -22,11 +34,13 @@ export class RolesGuard implements CanActivate {
       [context.getHandler(), context.getClass()],
     );
 
-    if (!requiredRoles) return true;
+    // B4: bare @Auth() sets metadata to [] (truthy). Empty means
+    // authenticated-only — no role restriction — so pass through.
+    if (!requiredRoles || requiredRoles.length === 0) return true;
 
     const request = context
       .switchToHttp()
-      .getRequest<Request & { user: JwtPayloadProps }>();
+      .getRequest<Request & { user: JwtPayload }>();
 
     const role = request.user?.role;
 

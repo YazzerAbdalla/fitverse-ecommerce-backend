@@ -10,6 +10,9 @@ import { ReservationController } from './reservation.controller';
 import { ReservationExpirationProcessor } from './reservation-expiration.processor';
 import { ReservationExpirationService } from './reservation-expiration.service';
 import { OutboxModule } from '../outbox/outbox.module';
+// AuthModule (re-exports UsersModule): @Auth() JwtGuard needs UsersService
+// in this scope (S-1 wiring).
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
@@ -17,6 +20,7 @@ import { OutboxModule } from '../outbox/outbox.module';
     TypeOrmModule.forFeature([Reservation, ReservationItem]),
     BullModule.registerQueue({ name: 'reservation-expiration' }),
     OutboxModule,
+    AuthModule,
   ],
   controllers: [ReservationController],
   providers: [

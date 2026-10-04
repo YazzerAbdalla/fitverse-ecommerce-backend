@@ -5,9 +5,7 @@ import type { MigrationInterface, QueryRunner } from 'typeorm';
  * It was defined in code (NotificationLog entity) but never covered by any
  * migration file, so worker audit inserts fail-soft until this runs.
  */
-export class CreateNotificationLog1755900000008
-  implements MigrationInterface
-{
+export class CreateNotificationLog1755900000008 implements MigrationInterface {
   name = 'CreateNotificationLog1755900000008';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

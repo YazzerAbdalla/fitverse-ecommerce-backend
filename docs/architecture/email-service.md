@@ -1,25 +1,31 @@
 # Architecture — Email Service + Dual-Channel Notifications (Phase 18)
 
-**Spec**: `specs/014-email-service/spec.md` | **ADR**: `../decisions/ADR-email-service.md` | **Branch**: `014-email-service`
+**Spec**: `specs/014-email-service/spec.md` | **ADR**: `../decisions/ADR-email-service.md` (+ fold: `../decisions/0013-verification-token-fold.md`) | **Branch**: `014-email-service`
 
 Phase 16 made `emailVerified` + `PasswordResetToken` but never sent mail. Phase 18 wires sending and adds user-visible notifications, reusing `NotificationsModule` (no new top-level module).
+
+> Fold note (2026-10-04, ADR-0013): the verification token no longer lives in
+> an `email_verification_token` table. `User` carries the single live token
+> (`emailVerificationTokenHash/ExpiresAt/UsedAt`); issue overwrites, verify
+> consumes under user-row `FOR UPDATE`; history and the 7d purge are gone.
+> Read the flows below with "token row" replaced by "user columns".
 
 ## Flows
 
 ```text
 Register → COMMIT User(emailVerified false)
   → requestEmailVerification (fire-and-forget, never blocks 201):
-     tx UPDATE priors usedAt + INSERT EmailVerificationToken {sha256(raw), 24h}
+     tx overwrite User verification columns {sha256(raw), 24h, usedAt NULL}
      → after commit emit email.verification_requested {userId,email,rawToken}
   → Worker @EventPattern: SET NX dedup → lookup real email → EmailChannel.send
      + SystemChannel persist → Notification/Delivery DELIVERED → gateway broadcast → ACK
 
-Verify: GET|POST /auth/verify-email → FOR UPDATE (tokenHash,userId)
+Verify: GET|POST /auth/verify-email → user-row FOR UPDATE by email
   → valid: usedAt=NOW() + emailVerified=true → 200 {verified:true}
   → used/expired/wrong → 400 (concurrent same raw → 200+400)
 
 Resend: POST /auth/resend-verification → 60s cooldown SET NX EX 60 → 429 before tx
-  → !found → 200 anti-enum → verified → 200 distinct → else invalidate + new 24h + emit
+  → !found → 200 anti-enum → verified → 200 distinct → else overwrite live hash + new 24h + emit
 
 Reset: POST /auth/forgot-password (existing 15m token) → after commit emit
   auth.password_reset_requested → worker sends reset link (FRONTEND_URL)
@@ -51,4 +57,4 @@ History: `GET /notifications` + `unread-count` + `PATCH :id/read` + `read-all` (
 
 ## Config
 
-`EMAIL_PROVIDER=noop|smtp`, `EMAIL_FROM`, `SMTP_HOST/PORT/USER/PASS/SECURE`, `EMAIL_VERIFICATION_TTL=24h`, `EMAIL_RESET_TTL=15m`, `EMAIL_SALES_BATCH_SIZE=500`, `FRONTEND_URL`, `WS_AUTH`, `NOTIFICATION_HISTORY_PAGE_SIZE=20` — all via `ConfigService`, never hardcoded. Retention: verification tokens 7d (`purgeExpiredVerificationTokens`); `NotificationLog` indefinite.
+`EMAIL_PROVIDER=noop|smtp`, `EMAIL_FROM`, `SMTP_HOST/PORT/USER/PASS/SECURE`, `EMAIL_VERIFICATION_TTL=24h`, `EMAIL_RESET_TTL=15m`, `EMAIL_SALES_BATCH_SIZE=500`, `FRONTEND_URL`, `WS_AUTH`, `NOTIFICATION_HISTORY_PAGE_SIZE=20` — all via `ConfigService`, never hardcoded. Retention: verification columns need no purge (overwritten live value); `NotificationLog` indefinite.

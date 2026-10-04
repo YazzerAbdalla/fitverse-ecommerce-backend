@@ -1,6 +1,6 @@
 /**
  * T022 E2E GET|POST /auth/verify-email contract (supertest).
- * If DB/infra not available (or email_verification_token table missing),
+ * If DB/infra not available (or the folded verification columns are missing),
  * tests skip gracefully with warning.
  */
 import { Test, TestingModule } from '@nestjs/testing';
@@ -42,15 +42,15 @@ describe('Verify E2E T022 - GET|POST /auth/verify-email (supertest)', () => {
       dataSource = app.get(DataSource);
       authService = app.get(AuthService);
       await dataSource.query('SELECT 1');
-      // US1 table must exist (migration T008); otherwise skip gracefully
+      // Folded columns must exist (B2 migration); otherwise skip gracefully
       await dataSource.query(
-        'SELECT 1 FROM "email_verification_token" LIMIT 1',
+        'SELECT "emailVerificationTokenHash" FROM "user" LIMIT 1',
       );
     } catch (e: any) {
       skip = true;
       skipReason = e?.message || String(e);
       console.warn(
-        '[verify e2e] SKIP: E2E not available (DB or email_verification_token table missing). Error:',
+        '[verify e2e] SKIP: E2E not available (DB or folded verification columns missing). Error:',
         skipReason,
       );
       try {

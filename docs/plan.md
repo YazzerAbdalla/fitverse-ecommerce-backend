@@ -1269,6 +1269,13 @@ Preferences: `User` adds `marketingOptIn boolean default false` (opt-in at regis
 
 ## 18.2 Data model
 
+> As-built amendment (2026-10-04, `docs/decisions/0013-verification-token-fold.md`):
+> the `EmailVerificationToken` table below is folded into `User`
+> (`emailVerificationTokenHash/ExpiresAt/UsedAt`, single live token, history
+> dropped, purge job deleted). The table DDL in §18.2/18.8 and migration 0006
+> record what was true at the time; migration `1755900000010` backfills the
+> live token per user and drops the table.
+
 **Alter `User`:**
 
 ```text

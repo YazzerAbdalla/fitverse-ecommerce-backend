@@ -1,6 +1,7 @@
 /**
- * T021 Integration test EmailVerificationToken FOR UPDATE single-winner (real PG).
- * Real PostgreSQL required. If DB not available, tests skip gracefully with warning.
+ * B7 Integration test: email verification folded into User columns (real PG).
+ * Single live token per user (overwrite), FOR UPDATE on the user row,
+ * single-winner concurrent verify. Real PostgreSQL required; skips gracefully.
  */
 import { DataSource } from 'typeorm';
 import * as dotenv from 'dotenv';
@@ -9,14 +10,19 @@ import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import User from '../../users/entity/user.entity';
-import { EmailVerificationToken } from '../entities/email-verification-token.entity';
 import { PasswordResetToken } from '../entities/password-reset-token.entity';
 import { OtpVerification } from '../entities/otp-verification.entity';
+import { RefreshToken } from '../entities/refresh-token.entity';
 import { AuthService } from '../auth.service';
+import { RefreshTokenStore } from '../stores/refresh-token.store';
+import { PasswordResetTokenStore } from '../stores/password-reset-token.store';
+import { OtpStore } from '../stores/otp.store';
+import { AuthEventPublisher } from '../auth-event.publisher';
+import { SystemClock } from '../../../common/clock';
 
 dotenv.config();
 
-describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)', () => {
+describe('Auth Integration B7 - verifyEmail on User columns (real PG)', () => {
   let dataSource: DataSource;
   let skip = false;
   let skipReason = '';
@@ -32,12 +38,7 @@ describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)
       username: process.env.POSTGRES_USER || 'postgres',
       password: process.env.POSTGRES_PASSWORD || 'mysecretpassword',
       database: process.env.POSTGRES_DATABASE || 'test_ecommerce_auth',
-      entities: [
-        User,
-        EmailVerificationToken,
-        PasswordResetToken,
-        OtpVerification,
-      ],
+      entities: [User, RefreshToken, PasswordResetToken, OtpVerification],
       synchronize: true,
       dropSchema: true,
       logging: false,
@@ -69,29 +70,64 @@ describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)
           cooldownStore.delete(k);
         }),
       };
-      const configService = {
-        get: jest.fn((key: string) =>
-          key === 'EMAIL_VERIFICATION_TTL' ? '24h' : '15m',
-        ),
-      } as unknown as ConfigService;
+      const configService = {} as unknown as ConfigService;
       const whatsappMock: any = {
         sendOtp: jest.fn().mockResolvedValue({ messageId: 'test' }),
       };
+      const userRepo = () => dataSource.getRepository(User);
 
+      // Real-DB-backed UsersService shape (mirrors the production methods
+      // the folded verify flow calls).
       usersServiceMock = {
-        findUserByEmail: jest.fn(async (email: string) => {
-          return await dataSource
-            .getRepository(User)
-            .findOne({ where: { email } });
-        }),
-        findUserById: jest.fn(async (id: string) => {
-          return await dataSource
-            .getRepository(User)
-            .findOne({ where: { id } });
-        }),
-        createNewUser: jest.fn(async (data: any) => {
-          return await dataSource.getRepository(User).save(data);
-        }),
+        findUserByEmail: jest.fn(
+          async (email: string) =>
+            await userRepo().findOne({ where: { email } }),
+        ),
+        findUserByEmailForUpdate: jest.fn(
+          async (manager: any, email: string) =>
+            await manager
+              .getRepository(User)
+              .createQueryBuilder('u')
+              .setLock('pessimistic_write')
+              .where('u.email = :email', { email })
+              .getOne(),
+        ),
+        issueEmailVerificationToken: jest.fn(
+          async (
+            manager: any,
+            userId: string,
+            tokenHash: string,
+            expiresAt: Date,
+          ) =>
+            await manager.getRepository(User).update(userId, {
+              emailVerificationTokenHash: tokenHash,
+              emailVerificationExpiresAt: expiresAt,
+              emailVerificationUsedAt: null,
+            }),
+        ),
+        consumeEmailVerificationToken: jest.fn(
+          async (manager: any, userId: string, now: Date) =>
+            await manager.getRepository(User).update(userId, {
+              emailVerificationUsedAt: now,
+              emailVerified: true,
+            }),
+        ),
+        setEmailVerified: jest.fn(
+          async (userId: string, manager?: any) =>
+            await (manager ? manager.getRepository(User) : userRepo()).update(
+              userId,
+              { emailVerified: true },
+            ),
+        ),
+      };
+
+      const eventPublisher = {
+        emit: jest.fn(async () => undefined),
+      } as unknown as AuthEventPublisher;
+      const clock = new SystemClock();
+      const tokenConfig: any = {
+        emailVerificationTtlMs: 24 * 3600_000,
+        otpMaxAttempts: 3,
       };
 
       authService = new AuthService(
@@ -102,6 +138,12 @@ describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)
         cacheMock,
         configService,
         whatsappMock,
+        new RefreshTokenStore(dataSource, clock),
+        new PasswordResetTokenStore(dataSource, clock),
+        new OtpStore(dataSource, cacheMock, clock, tokenConfig),
+        eventPublisher,
+        clock,
+        tokenConfig,
       );
     } catch (e: any) {
       skip = true;
@@ -121,9 +163,7 @@ describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)
   afterAll(async () => {
     try {
       if (dataSource?.isInitialized) {
-        await dataSource
-          .query('TRUNCATE "email_verification_token", "user" CASCADE')
-          .catch(() => {});
+        await dataSource.query('TRUNCATE "user" CASCADE').catch(() => {});
         await dataSource.destroy();
       }
     } catch {
@@ -134,9 +174,7 @@ describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)
   beforeEach(async () => {
     if (skip || !dataSource?.isInitialized) return;
     cooldownStore.clear();
-    await dataSource
-      .query('TRUNCATE "email_verification_token", "user" CASCADE')
-      .catch(() => {});
+    await dataSource.query('TRUNCATE "user" CASCADE').catch(() => {});
   });
 
   it('should note skip gracefully when PG unavailable', () => {
@@ -157,11 +195,37 @@ describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)
     );
   }
 
+  it('issue overwrites: second issue replaces the live hash (no history rows)', async () => {
+    if (skip || !dataSource?.isInitialized) return;
+    const email = `overwrite_${Date.now()}@example.com`;
+    const user = await seedUser(email);
+    await authService.requestEmailVerification(user as any);
+    const firstRaw = authService.lastVerificationToken!;
+    expect(firstRaw).toMatch(/^[a-f0-9]{64}$/);
+
+    await authService.requestEmailVerification(user as any);
+    const secondRaw = authService.lastVerificationToken!;
+    expect(secondRaw).toMatch(/^[a-f0-9]{64}$/);
+    expect(secondRaw).not.toBe(firstRaw);
+
+    // Single column holds only the second hash; old raw is dead.
+    const row = await dataSource
+      .getRepository(User)
+      .findOneOrFail({ where: { email } });
+    expect(row.emailVerificationTokenHash).toBe(
+      crypto.createHash('sha256').update(secondRaw).digest('hex'),
+    );
+    expect(row.emailVerificationUsedAt).toBeNull();
+    await expect(
+      authService.verifyEmail({ email, token: firstRaw }),
+    ).rejects.toThrow('Invalid or expired verification token');
+  });
+
   it('concurrent same raw → one 200 one 400, usedAt set once', async () => {
     if (skip || !dataSource?.isInitialized) return;
     const email = `verify_${Date.now()}@example.com`;
-    await seedUser(email);
-    await authService.requestEmailVerification(email);
+    const user = await seedUser(email);
+    await authService.requestEmailVerification(user as any);
     const raw = authService.lastVerificationToken!;
     expect(raw).toMatch(/^[a-f0-9]{64}$/);
 
@@ -171,7 +235,7 @@ describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)
     ]);
     const fulfilled = results.filter((r) => r.status === 'fulfilled');
     const rejected = results.filter((r) => r.status === 'rejected');
-    // FOR UPDATE serializes — exactly one winner
+    // User-row FOR UPDATE serializes — exactly one winner
     expect(fulfilled.length).toBe(1);
     expect(rejected.length).toBe(1);
     expect((fulfilled[0] as any).value).toEqual({
@@ -183,23 +247,18 @@ describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)
     );
 
     // usedAt set exactly once, emailVerified true
-    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
-    const rows = await dataSource
-      .getRepository(EmailVerificationToken)
-      .find({ where: { tokenHash } });
-    expect(rows.length).toBe(1);
-    expect(rows[0].usedAt).not.toBeNull();
-    const user = await dataSource
+    const row = await dataSource
       .getRepository(User)
-      .findOne({ where: { email } });
-    expect(user!.emailVerified).toBe(true);
+      .findOneOrFail({ where: { email } });
+    expect(row.emailVerificationUsedAt).not.toBeNull();
+    expect(row.emailVerified).toBe(true);
   });
 
-  it('second use of same raw → 400, inventory/order untouched (no tables touched)', async () => {
+  it('second use of same raw → 400', async () => {
     if (skip || !dataSource?.isInitialized) return;
     const email = `reuse_${Date.now()}@example.com`;
-    await seedUser(email);
-    await authService.requestEmailVerification(email);
+    const user = await seedUser(email);
+    await authService.requestEmailVerification(user as any);
     const raw = authService.lastVerificationToken!;
     await authService.verifyEmail({ email, token: raw });
     await expect(
@@ -207,45 +266,50 @@ describe('Auth Integration T021 - verifyEmail FOR UPDATE single-winner (real PG)
     ).rejects.toThrow('Invalid or expired verification token');
   });
 
-  it('wrong email for same raw → 400 (userId mismatch, no leak)', async () => {
+  it('wrong email for same raw → 400 (no leak)', async () => {
     if (skip || !dataSource?.isInitialized) return;
     const email = `owner_${Date.now()}@example.com`;
     const other = `other_${Date.now()}@example.com`;
-    await seedUser(email);
+    const user = await seedUser(email);
     await seedUser(other);
-    await authService.requestEmailVerification(email);
+    await authService.requestEmailVerification(user as any);
     const raw = authService.lastVerificationToken!;
     await expect(
       authService.verifyEmail({ email: other, token: raw }),
     ).rejects.toThrow('Invalid or expired verification token');
   });
 
-  it('expired token → 400', async () => {
+  it('expired token → 400 with zero mutation', async () => {
     if (skip || !dataSource?.isInitialized) return;
     const email = `expired_${Date.now()}@example.com`;
     const user = await seedUser(email);
     const raw = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
-    const repo = dataSource.getRepository(EmailVerificationToken);
-    // Insert directly with past expiry (bypass CHECK via short-lived row: createdAt now, expiresAt past violates CHECK — use raw SQL to force)
-    await dataSource.query(
-      'INSERT INTO "email_verification_token"("id","userId","tokenHash","expiresAt","usedAt","createdAt") VALUES (gen_random_uuid(), $1, $2, NOW() - INTERVAL \'1 hour\', NULL, NOW() - INTERVAL \'2 hours\')',
-      [user.id, tokenHash],
-    );
+    // Stale live token: expiresAt in the past, never used.
+    await dataSource.getRepository(User).update(user.id, {
+      emailVerificationTokenHash: tokenHash,
+      emailVerificationExpiresAt: new Date(Date.now() - 60_000),
+      emailVerificationUsedAt: null,
+    });
     await expect(
       authService.verifyEmail({ email, token: raw }),
     ).rejects.toThrow('Invalid or expired verification token');
-    expect(repo).toBeDefined();
+    const row = await dataSource
+      .getRepository(User)
+      .findOneOrFail({ where: { email } });
+    // Zero mutation: still unverified, usedAt untouched (D4 stale-leave).
+    expect(row.emailVerified).toBe(false);
+    expect(row.emailVerificationUsedAt).toBeNull();
   });
 
-  it('EXPLAIN uses tokenHash index for the FOR UPDATE lookup', async () => {
+  it('EXPLAIN uses the email unique backing index for the FOR UPDATE lookup', async () => {
     if (skip || !dataSource?.isInitialized) return;
     const plan = await dataSource.query(
-      `EXPLAIN SELECT * FROM "email_verification_token" WHERE "tokenHash" = $1 AND "userId" = $2 FOR UPDATE`,
-      ['a'.repeat(64), '00000000-0000-0000-0000-000000000000'],
+      `EXPLAIN SELECT * FROM "user" WHERE "email" = $1 FOR UPDATE`,
+      ['nobody@example.com'],
     );
     const text = JSON.stringify(plan);
-    // Composite/single-column index scan expected (not Seq Scan)
+    // Unique-constraint backing index expected (not Seq Scan)
     expect(text).toMatch(/Index Scan|Bitmap Heap Scan/);
   });
 });

@@ -5,6 +5,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuthService } from './auth.service';
 import { UsersService } from '../users/users.service';
+import { RefreshTokenStore } from './stores/refresh-token.store';
+import { PasswordResetTokenStore } from './stores/password-reset-token.store';
+import { OtpStore } from './stores/otp.store';
+import { AuthEventPublisher } from './auth-event.publisher';
+import { SystemClock } from '../../common/clock';
+import { AUTH_TOKEN_CONFIG } from './auth-token.config';
 import { JwtService } from '@nestjs/jwt';
 import { Logger, UnauthorizedException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
@@ -96,8 +102,15 @@ describe('AuthService Refresh Token (Phase 17)', () => {
           provide: UsersService,
           useValue: {
             findUserByEmail: jest.fn(),
-            findUserById: jest.fn(),
+            findUserById: jest.fn().mockResolvedValue(user),
             findByGoogleId: jest.fn(),
+            findUserByIdForUpdate: jest.fn(),
+            updatePassword: jest.fn(),
+            incrementTokenVersion: jest.fn(),
+            setEmailVerified: jest.fn(),
+            setPhoneVerified: jest.fn(),
+            findUserByPhone: jest.fn(),
+            linkGoogleAccount: jest.fn(),
           },
         },
         {
@@ -114,6 +127,47 @@ describe('AuthService Refresh Token (Phase 17)', () => {
         { provide: CACHE_MANAGER, useValue: cacheMock },
         { provide: ConfigService, useValue: configService },
         { provide: 'WHATSAPP_PROVIDER', useValue: { sendOtp: jest.fn() } },
+        // Functional fake (US3): mirrors RefreshTokenStore through the mocked
+        // repos so delegation assertions keep proving the same shapes.
+        {
+          provide: RefreshTokenStore,
+          useValue: {
+            findByHashForUpdate: jest.fn(async () => mockQueryBuilder.getOne()),
+            revokeById: jest.fn(async (_m: any, id: string) =>
+              mockRefreshRepo.update(id, { revokedAt: new Date() }),
+            ),
+            countActive: jest.fn(async () => mockRefreshRepo.count()),
+            findOldestActive: jest.fn(
+              async () => (await mockRefreshRepo.find())?.[0] ?? null,
+            ),
+            create: jest.fn(async (row: any) =>
+              mockRefreshRepo.save(
+                mockRefreshRepo.create({ ...row, revokedAt: null }),
+              ),
+            ),
+            revokeByHashWhereActive: jest.fn(),
+            revokeAllActive: jest.fn(),
+            revokeAllInTx: jest.fn(),
+            purgeExpired: jest.fn(),
+          },
+        },
+        { provide: PasswordResetTokenStore, useValue: {} },
+        { provide: OtpStore, useValue: {} },
+        { provide: AuthEventPublisher, useValue: { emit: jest.fn() } },
+        { provide: SystemClock, useValue: { now: () => new Date() } },
+        {
+          provide: AUTH_TOKEN_CONFIG,
+          useValue: {
+            refreshTokenTtlMs: 7 * 24 * 3600_000,
+            refreshCookieName: 'refresh_token',
+            refreshCookieSecure: false,
+            resetTokenTtlMs: 15 * 60_000,
+            emailVerificationTtlMs: 24 * 3600_000,
+            otpTtlMs: 5 * 60_000,
+            otpMaxAttempts: 3,
+            otpResendCooldownMs: 60_000,
+          },
+        },
       ],
     }).compile();
     service = module.get<AuthService>(AuthService);
@@ -139,57 +193,37 @@ describe('AuthService Refresh Token (Phase 17)', () => {
     expect(diff).toBeLessThan(ttl + 5000);
   });
 
-  // T016 rotation
+  // T016 rotation (US3: service delegates to RefreshTokenStore — drive the
+  // store mock; the locked-lookup SQL itself is proven by token-races on PG)
   it('T016 refresh rotation FOR UPDATE single-winner', async () => {
     const raw = crypto.randomBytes(32).toString('hex');
     const hash = crypto.createHash('sha256').update(raw).digest('hex');
     const future = new Date(Date.now() + 7 * 24 * 3600 * 1000);
-    // active row
-    mockQueryBuilder.getOne.mockResolvedValueOnce({
-      id: 'rt-1',
-      userId: user.id,
-      tokenHash: hash,
-      expiresAt: future,
-      revokedAt: null,
-    });
-    mockUserRepo.findOne = jest.fn().mockResolvedValue(user);
-    mockRefreshRepo.count.mockResolvedValue(1);
-    // need to handle transaction manager getRepository for User findOne
-    mockManager.getRepository = jest.fn((entity: any) => {
-      if (entity && entity.name === 'User')
-        return {
-          findOne: jest.fn().mockResolvedValue(user),
-          update: jest.fn(),
-        } as any;
-      return mockRefreshRepo;
-    });
-    // also need User repo for refresh: use manager.getRepository(User).findOne
-    // Our mockQueryBuilder for RefreshToken already returns found, then we rewire findOne for User
-    // Patch: make manager.getRepository(User) return object with findOne
-    const realManagerGetRepo = mockManager.getRepository;
-    mockManager.getRepository = jest.fn((entity: any) => {
-      if (entity && entity.name === 'User') {
-        return { findOne: jest.fn().mockResolvedValue(user) } as any;
-      }
-      return mockRefreshRepo;
-    });
-    // Need to also mock transaction inner repo for RefreshToken count/find
-    mockRefreshRepo.count = jest.fn().mockResolvedValue(0);
-    mockRefreshRepo.find = jest.fn().mockResolvedValue([]);
-
-    // We need to re-mock transaction to handle refresh: our earlier mockQueryBuilder.getOne returns active row for first call
-    // For refresh, first SELECT ... FOR UPDATE returns active, second would be revoked? We'll test single call success, then second call revoked
+    const store = {
+      findByHashForUpdate: jest.fn().mockResolvedValue({
+        id: 'rt-1',
+        userId: user.id,
+        tokenHash: hash,
+        expiresAt: future,
+        revokedAt: null,
+      }),
+      revokeById: jest.fn(),
+      countActive: jest.fn().mockResolvedValue(0),
+      findOldestActive: jest.fn().mockResolvedValue(null),
+      create: jest.fn(),
+    };
+    (service as any).refreshTokens = store;
     const result = await service.refresh(raw);
     expect(result.accessToken).toBe('jwt-new');
     expect(result.refreshToken).toMatch(/^[a-f0-9]{64}$/);
     expect(result.refreshToken).not.toBe(raw);
-    // old revoked
-    expect(mockRefreshRepo.update).toHaveBeenCalledWith(
-      'rt-1',
-      expect.objectContaining({ revokedAt: expect.any(Date) }),
+    // old revoked via store
+    expect(store.revokeById).toHaveBeenCalledWith(expect.anything(), 'rt-1');
+    // new saved via store
+    expect(store.create).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: user.id }),
+      expect.anything(),
     );
-    // new saved
-    expect(mockRefreshRepo.save).toHaveBeenCalled();
   });
 
   it('T017 refresh expired 401', async () => {
@@ -213,12 +247,15 @@ describe('AuthService Refresh Token (Phase 17)', () => {
 
   it('T022 logout idempotent 200', async () => {
     const raw = crypto.randomBytes(32).toString('hex');
+    const expectedHash = crypto.createHash('sha256').update(raw).digest('hex');
     await service.logout(raw);
-    expect(mockRefreshRepo.createQueryBuilder).toHaveBeenCalled();
-    expect(mockQueryBuilder.update).toHaveBeenCalled();
+    // US3: revocation delegated to the store with the sha256 hash.
+    const store = (service as any).refreshTokens;
+    expect(store.revokeByHashWhereActive).toHaveBeenCalledWith(expectedHash);
     // second logout same raw should still 200 (not throw)
-    mockQueryBuilder.execute.mockResolvedValueOnce({ affected: 0 });
     await expect(service.logout(raw)).resolves.toBeUndefined();
+    // garbage shape still 200 anti-enum
+    await expect(service.logout('not-a-token')).resolves.toBeUndefined();
   });
 
   it('T026 parseTtlMs d suffix', async () => {

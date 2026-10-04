@@ -5,11 +5,15 @@ import { InventoryService } from './inventory.service';
 import { InventorySeeder } from './inventory.seeder';
 import { InventoryController } from './inventory.controller';
 import { ProductsModule } from '../products/products.module';
+// AuthModule (re-exports UsersModule): @Auth() JwtGuard needs UsersService
+// in this scope (S-1 wiring).
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Inventory]),
     forwardRef(() => ProductsModule),
+    AuthModule,
   ],
   controllers: [InventoryController],
   providers: [InventoryService, InventorySeeder],

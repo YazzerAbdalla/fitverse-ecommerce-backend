@@ -99,17 +99,17 @@ RabbitMQ    ◄──── async notifications (published AFTER the DB commit)
 
 ### Boundaries (enforce)
 
-* A module exposes business operations via its **service**. Other modules import
+- A module exposes business operations via its **service**. Other modules import
   the service (and the module must `exports: [Service]`) — they must **not**
   `@InjectRepository` of another module's entity.
 
-* `InventoryService` is the only place that should mutate `Inventory.stock`/
+- `InventoryService` is the only place that should mutate `Inventory.stock`/
   `reservedAmount` (`available` derived). `InventoryService` methods
   `decreaseStockForOrderMany`/`restoreStockForOrderMany` are called with an
   `EntityManager` passed in by the caller; the caller owns the transaction. See
   `docs/architecture/inventory-reservation.md`.
 
-* PostgreSQL is authoritative. Redis and RabbitMQ are infrastructure, never a
+- PostgreSQL is authoritative. Redis and RabbitMQ are infrastructure, never a
   source of truth for inventory or orders.
 
 ---
@@ -118,58 +118,58 @@ RabbitMQ    ◄──── async notifications (published AFTER the DB commit)
 
 Follow the existing structure under `src/modules/<name>/`:
 
-* **Module** — `imports` / `providers` / `controllers` / `exports`. Export any
+- **Module** — `imports` / `providers` / `controllers` / `exports`. Export any
   service another module needs.
 
-* **Controller / Resolver** — thin: parse input, call a service, return its
+- **Controller / Resolver** — thin: parse input, call a service, return its
   result. No business logic, no DB access.
 
-* **Service** — business logic + DB access via repositories or `DataSource`.
+- **Service** — business logic + DB access via repositories or `DataSource`.
   Inject `Logger` (already a pattern) for meaningful logs.
 
-* **Entity** — TypeORM entity (see Database Rules). GraphQL entities also carry
+- **Entity** — TypeORM entity (see Database Rules). GraphQL entities also carry
   `@ObjectType()`/`@Field()` decorators (code-first).
 
-* **DTO / Input** — `class-validator` + `class-transformer`. REST uses `*.dto.ts`;
+- **DTO / Input** — `class-validator` + `class-transformer`. REST uses `*.dto.ts`;
   GraphQL uses `*.input.ts` + `*.args.ts`. Always annotate fields; the global
   pipe strips/forbids unknown properties.
 
-* **Repositories** — `@InjectRepository(Entity)` + `Repository<Entity>`. Use
+- **Repositories** — `@InjectRepository(Entity)` + `Repository<Entity>`. Use
   `DataSource` (injected) when you need transactions or raw locking.
 
-* **Guards** — `JwtGuard` (auth) + `RolesGuard` (authorization). Apply with the
+- **Guards** — `JwtGuard` (auth) + `RolesGuard` (authorization). Apply with the
   `Auth(...roles)` decorator. Do not hand-roll auth in controllers.
 
-* **Interceptors / Filters / Pipes / Middleware** — global ones already exist
+- **Interceptors / Filters / Pipes / Middleware** — global ones already exist
   (validation, exceptions). Add new global ones only with a clear reason.
 
-* **Transactions** — wrap multi-step writes in
+- **Transactions** — wrap multi-step writes in
   `dataSource.transaction(async manager => …)` and do **all** writes through
   `manager` (repositories obtained via `manager.getRepository`). See
   `products.service.ts:updateMany` for the pessimistic-lock pattern.
 
-* **Error handling** — throw Nest HTTP exceptions
+- **Error handling** — throw Nest HTTP exceptions
   (`BadRequestException`, `NotFoundException`, `ConflictException`,
   `ForbiddenException`, `UnauthorizedException`). The global filter serializes
   them; do not `try/catch` to return plain objects for expected errors.
 
-* **Validation** — rely on DTO decorators + the global pipe. Quantities/prices
+- **Validation** — rely on DTO decorators + the global pipe. Quantities/prices
   coming from clients are never trusted; re-check invariants in the service.
 
-* **Logging** — use the injected `Logger`, not `console.log`. (A leftover
+- **Logging** — use the injected `Logger`, not `console.log`. (A leftover
   `console.log` exists in `auth.service.ts` — remove it when touching that file.)
 
-* **Configuration** — read via `ConfigService` / `process.env`. Never hardcode
+- **Configuration** — read via `ConfigService` / `process.env`. Never hardcode
   hosts, secrets, or URLs.
 
-* **Database access** — only through repositories / `EntityManager`. No raw SQL
+- **Database access** — only through repositories / `EntityManager`. No raw SQL
   unless justified; if used, keep it in a repository/service and document why.
 
 ### Code Documentation — JSDoc / Comments (Required)
 
 All new and modified code **must** be documented. This is not optional.
 
-* **Class-level JSDoc (required)** — every `Service`, `Controller`/`Resolver`,
+- **Class-level JSDoc (required)** — every `Service`, `Controller`/`Resolver`,
   `Entity`, `Guard`, `Interceptor`, `Filter`, and `Module` gets a
   `/** ... */` block immediately above the class declaration. For services,
   use the form:
@@ -187,10 +187,10 @@ Controllers/resolvers/entities follow the same pattern
 (e.g. `/** This controller exposes ... */`,
 `/** This entity represents ... */`).
 
-* **Method-level JSDoc (required)** — every **public** method (and any
+- **Method-level JSDoc (required)** — every **public** method (and any
   non-trivial `private`/`protected` method) gets a `/** ... */` block with:
-  `@param`, `@returns`, and `@throws` where applicable. Describe *what* the
-  method does, not *how* it is implemented. Example:
+  `@param`, `@returns`, and `@throws` where applicable. Describe _what_ the
+  method does, not _how_ it is implemented. Example:
 
 ```ts
 /**
@@ -209,17 +209,17 @@ async reserve(
 ): Promise<Inventory> { ... }
 ```
 
-* **Complex conditions & formulas (required inline comments)** — any
+- **Complex conditions & formulas (required inline comments)** — any
   non-trivial branching, guard, or calculation must have a short `//`
-  comment explaining the *intent/business rule*, not just restating the code.
+  comment explaining the _intent/business rule_, not just restating the code.
   Examples that require a comment:
 
-  * `if`/`while` with ≥2 predicates, negations, or null/edge-case checks
-  * availability / stock arithmetic (`available = stock - reservedAmount`)
-  * pagination (`skip = (page - 1) * limit`)
-  * expiration/TTL (`expiresAt = now + ttlMs`)
-  * pricing/discount/tax formulas
-  * optimistic/pessimistic lock predicates
+  - `if`/`while` with ≥2 predicates, negations, or null/edge-case checks
+  - availability / stock arithmetic (`available = stock - reservedAmount`)
+  - pagination (`skip = (page - 1) * limit`)
+  - expiration/TTL (`expiresAt = now + ttlMs`)
+  - pricing/discount/tax formulas
+  - optimistic/pessimistic lock predicates
 
   Example:
 
@@ -232,37 +232,59 @@ if (available < requestedQty) {
 }
 ```
 
-* **Style** — use `/** ... */` (JSDoc) for class/method docs, `//` for inline
+### Variable & Function Naming Clarity Rules (Required)
+
+All function, method, variable, parameter, and property names **must be explicit, self-explanatory, and unambiguous**. Do not rely on service or class context to justify short or generic names.
+
+- **Function/Method Names** — Must clearly state the domain entity and exact action being performed. Avoid single-word or generic verbs (`issue`, `consume`, `process`, `handle`).
+- ❌ `issue()` ➔ ✅ `issueNewToken()` / `issueVerificationToken()`
+- ❌ `consume()` ➔ ✅ `markVerificationTokenAsUsed()` / `consumeVerificationToken()`
+- ❌ `cancel()` ➔ ✅ `cancelReservation()`
+
+- **Parameter & Variable Names** — Parameter and variable names must clearly state what they represent or store. Never use cryptic, truncated, or vague names (`means`, `res`, `data`, `item`, `val`).
+- ❌ `means` ➔ ✅ `rawHashPair`
+- ❌ `id` (when ambiguous) ➔ ✅ `verificationTokenId` / `reservationId`
+- ❌ `pair` ➔ ✅ `tokenHashPair`
+
+- **Style** — use `/** ... */` (JSDoc) for class/method docs, `//` for inline
   condition/formula explanations. Keep comments concise and factual — no
   chain-of-thought, no redundant restatement of obvious code, no emojis unless
   requested. Update comments when you change the code they describe.
 
-* **Verification** — code review (`skills/code-review/SKILL.md`) must reject PRs
+- **Verification** — code review (`skills/code-review/SKILL.md`) must reject PRs
   missing required JSDoc or unexplained complex logic. Treat missing docs as a
   lint failure.
+
+### Type Safety & Documentation Lookup Rules (Required)
+
+To maintain strong type safety and codebase integrity across TypeScript/NestJS, strict typing rules apply to all code:
+
+- **Strict Prohibition of `any**` — Never use `any` as a type annotation, return type, variable, parameter, or type assertion (e.g., `as any`). Avoid implicit `any` and unsafe casts (`as unknown as TargetType` without proper validation or guard checks).
+- **Proper Alternatives to `any**` — Use explicit TypeScript interfaces/types, generic constraints (`T`), discriminated unions, or `unknown` (with type narrowing / type guards via `instanceof`, `typeof`, or custom type predicates) when handling truly dynamic data.
+- **Documentation & Type Definition Lookup** — When integrating external packages, NestJS modules, or third-party libraries, **do not guess signatures or opt for quick `any` escapes**. Search the library’s official documentation or its `@types` definitions to import and apply the accurate, idiomatic types (e.g., proper Express/Fastify request types, TypeORM query runner/entity manager types, NestJS execution context types).
 
 ---
 
 ## 4. Database Rules (PostgreSQL + TypeORM)
 
-* **Naming** — TypeORM defaults: table name = entity class name (e.g. `Product`,
+- **Naming** — TypeORM defaults: table name = entity class name (e.g. `Product`,
   `User`, `Cart`, `Order`, `OrderItem`). Columns are `camelCase` (mapped to
   `snake_case` only if configured — it is **not** configured here, so columns
   are camelCase in the DB too). Keep this consistent; do not mix.
 
-* **Primary keys** — `@PrimaryGeneratedColumn('uuid')` (UUIDv4) everywhere.
+- **Primary keys** — `@PrimaryGeneratedColumn('uuid')` (UUIDv4) everywhere.
 
-* **Foreign keys** — define via relations (`@ManyToOne`/`@OneToMany`/`@OneToOne`
+- **Foreign keys** — define via relations (`@ManyToOne`/`@OneToMany`/`@OneToOne`
   with `@JoinColumn` on the owning side). Let TypeORM create the FK columns.
 
-* **Relationships** — add only what is needed for navigation/queries. Don't add
+- **Relationships** — add only what is needed for navigation/queries. Don't add
   bidirectional relations just because the ORM supports them.
 
-* **Indexing** — add `@Index()` for real access patterns (e.g. `User.email`,
+- **Indexing** — add `@Index()` for real access patterns (e.g. `User.email`,
   `Product.name`). Don't index every column. Candidates for future
   inventory/reservation tables are listed in `docs/plan.md` §26.
 
-* **Constraints** — enforce invariants in the DB, not only in code
+- **Constraints** — enforce invariants in the DB, not only in code
   (`@Check`, `@Unique`, `NOT NULL`). Examples: `Inventory` has
   `@Check('"stock" >= 0')`, `@Check('"reservedAmount" >= 0')`,
   `@Check('"reservedAmount" <= "stock"')`, `@Unique(['productId'])`;
@@ -271,22 +293,22 @@ if (available < requestedQty) {
   `@Unique(['name'])`; `Reservation` has composite `@Index(['status','expiresAt'])`
   for future expiration cleanup.
 
-* **Transactions** — mandatory for any write touching multiple related rows
+- **Transactions** — mandatory for any write touching multiple related rows
   (reservation + inventory, order + inventory). Use `EntityManager` inside
   `dataSource.transaction`.
 
-* **Concurrency** — prevent overselling with **pessimistic row locking**
+- **Concurrency** — prevent overselling with **pessimistic row locking**
   (`lock: { mode: 'pessimistic_write' }`) on the inventory/product row inside the
   transaction, exactly like `products.service.ts:updateMany`.
 
-* **Avoid N+1** — use `relations` in `find*` or `leftJoinAndSelect` for needed
+- **Avoid N+1** — use `relations` in `find*` or `leftJoinAndSelect` for needed
   associations; don't loop-query per item. `CartItem.product` is
   `eager: true` by design.
 
-* **Soft deletion** — not currently used. Don't add it casually; if a feature
+- **Soft deletion** — not currently used. Don't add it casually; if a feature
   needs it, document the decision in `docs/decisions/`.
 
-* **Migrations** — `data-source.ts` configures
+- **Migrations** — `data-source.ts` configures
   `migrations: ['src/migration/**/*.ts']` but **none exist yet**;
   `synchronize: true` is on (dev shortcut). Before production,
   `synchronize` must be turned off and real migrations introduced.
@@ -302,58 +324,58 @@ REST conventions (auth / cart / order). GraphQL conventions (products) follow
 
 NestJS + Apollo code-first; fields are typed with `@Field()`.
 
-* **REST routes** — noun resources, HTTP verbs: `POST` create, `GET` read,
+- **REST routes** — noun resources, HTTP verbs: `POST` create, `GET` read,
   `PATCH`/`PUT` update, `DELETE` remove. Current examples:
   `POST /auth/login`, `POST /auth/register`, `GET /cart`,
   `POST /cart/items`, `GET /order`.
 
-* **Status codes** — `200/201` success, `400` bad input, `401` unauthenticated,
+- **Status codes** — `200/201` success, `400` bad input, `401` unauthenticated,
   `403` forbidden, `404` not found, `409` conflict (e.g. insufficient stock /
   duplicate), `422` validation, `500` unexpected.
 
-* **Error body (REST)** — `{ statusCode, message, timestamp }` (from
+- **Error body (REST)** — `{ statusCode, message, timestamp }` (from
   `AllExceptionsFilter`). GraphQL errors are surfaced as `GraphQLError` with
   `extensions.code`.
 
-* **Auth** — protected routes use `@Auth(...roles)` (applies `JwtGuard` +
+- **Auth** — protected routes use `@Auth(...roles)` (applies `JwtGuard` +
   `RolesGuard`). Current user via `@CurrentUser('prop')` or `@CurrentUser()`.
 
-* **Pagination** — offset-based: `{ page, limit }` →
+- **Pagination** — offset-based: `{ page, limit }` →
   `skip=(page-1)*limit`, return
   `{ data, meta:{ totalItems, itemCount, itemsPerPage, totalPages, currentPage } }`
   (see `products.service.ts:findAll`, `dto/pagination.dto.ts`). Reuse this shape.
 
-* **Filtering / sorting** — not yet implemented on listings; add as DTO fields
+- **Filtering / sorting** — not yet implemented on listings; add as DTO fields
   and document the query pattern when you do.
 
-* **Validation** — all bodies go through the global `ValidationPipe`; DTOs must
+- **Validation** — all bodies go through the global `ValidationPipe`; DTOs must
   declare every accepted field. Unknown fields are rejected.
 
 ---
 
 ## 6. Testing Rules
 
-* **Unit tests** — `*.spec.ts` next to the code (Jest, `ts-jest`). Mock
+- **Unit tests** — `*.spec.ts` next to the code (Jest, `ts-jest`). Mock
   collaborators (repositories, other services) via `Test.createTestingModule`.
   Current specs are mostly smoke tests ("should be defined"); upgrade them as
   you build real logic.
 
-* **Integration tests** — use a **real PostgreSQL** (or test container) for
+- **Integration tests** — use a **real PostgreSQL** (or test container) for
   transactions, locking, constraints, and repository behavior. Don't assert
   business consistency against mocks.
 
-* **E2E tests** — `test/app.e2e-spec.ts` via
+- **E2E tests** — `test/app.e2e-spec.ts` via
   `jest --config ./test/jest-e2e.json` and `supertest`. Cover full flows
   (register → add to cart → checkout → order).
 
-* **What to mock** — external infrastructure (Redis, RabbitMQ) and other
+- **What to mock** — external infrastructure (Redis, RabbitMQ) and other
   modules' services. **What not to mock** — the DB when you are testing
   consistency, locking, or transactions.
 
-* **Concurrency tests** — explicitly test "two users reserve the last available
+- **Concurrency tests** — explicitly test "two users reserve the last available
   unit simultaneously → only one succeeds" for any inventory/reservation code.
 
-* **Naming** — `describe(Service)`, `it('should <behavior>')`. Match the existing
+- **Naming** — `describe(Service)`, `it('should <behavior>')`. Match the existing
   style.
 
 Run: `npm run test`, `npm run test:e2e`, `npm run test:cov`.
@@ -362,22 +384,22 @@ Run: `npm run test`, `npm run test:e2e`, `npm run test:cov`.
 
 ## 7. Git Rules
 
-* **Branch naming** — Spec Kit's git extension uses **sequential numbered
+- **Branch naming** — Spec Kit's git extension uses **sequential numbered
   branches** (`001-feature-name`, …) once enabled; follow that when a spec
   exists. Otherwise `feat/...`, `fix/...`, `chore/...`.
 
-* **Commit conventions** — imperative subject (`add inventory entity`, not
+- **Commit conventions** — imperative subject (`add inventory entity`, not
   `added inventory entity`). Keep commits focused; reference the spec/feature id
   when one exists.
 
-* **PR expectations** — describe the change, link the spec, note verification run
+- **PR expectations** — describe the change, link the spec, note verification run
   (`lint`/`test`/`build`). Include test coverage for behavior changes.
 
-* **Never commit** — `.env`, secrets, `node_modules`, `dist`, `coverage`,
+- **Never commit** — `.env`, secrets, `node_modules`, `dist`, `coverage`,
   `.specify/templates` working drafts (specs live under feature dirs). `.env` is
   already git-ignored; keep it that way.
 
-* **Secrets** — never store secrets in source. They come from `.env` / the
+- **Secrets** — never store secrets in source. They come from `.env` / the
   deployment environment. The committed `.env` contains a dev `JWT_SECRET`;
   do not reuse it anywhere real.
 
@@ -387,40 +409,44 @@ Run: `npm run test`, `npm run test:e2e`, `npm run test:cov`.
 
 ### Never
 
-* invent APIs, routes, or DB fields without justification
-* rewrite unrelated code "for style"
-* add dependencies unprompted
-* bypass a transaction when consistency requires one
-* ignore concurrency / overselling risks
-* edit committed migrations
-* store secrets in source control
-* claim tests passed or work is complete without running/verifying
-* leave `Service`/`Controller`/`Resolver`/`Entity`/`Guard` classes or public
+- invent APIs, routes, or DB fields without justification
+- rewrite unrelated code "for style"
+- add dependencies unprompted
+- bypass a transaction when consistency requires one
+- ignore concurrency / overselling risks
+- edit committed migrations
+- store secrets in source control
+- claim tests passed or work is complete without running/verifying
+- leave `Service`/`Controller`/`Resolver`/`Entity`/`Guard` classes or public
   methods without JSDoc (`/** ... */`) — see §3 Code Documentation
-* leave complex conditions (multi-predicate `if`/`while`, negations,
+- leave complex conditions (multi-predicate `if`/`while`, negations,
   edge-case guards) or formulas (stock/availability, pagination, TTL/expiration,
   pricing) without an inline `//` intent comment
-* introduce abstractions solely to satisfy SOLID/DRY mechanically; every
+- introduce abstractions solely to satisfy SOLID/DRY mechanically; every
   abstraction must have a clear responsibility and a real maintenance benefit
-* extract duplicated code solely because it looks similar; first determine
+- extract duplicated code solely because it looks similar; first determine
   whether the duplicated logic represents the same business rule and is likely
   to evolve together
+- use `any` or loose type overrides (`as any`) to bypass TypeScript compiler checks.
+- guess function signatures or parameter types for third-party packages instead of checking their official documentation/type declarations.
 
 ### Always
 
-* read `AGENTS.md` + relevant `skills/` + existing code before changing anything
-* follow the specification (Spec Kit) as the source of truth
-* reuse existing abstractions (`Auth`, `InventoryService`, `Logger`, filters)
-* prefer small, reviewable changes
-* consider failure, concurrency, and DB consistency
-* add/update tests for behavior changes
-* update `plan.md` after implementing any phase
-* update `docs/` and `docs/decisions/` when an architecture decision is made
-* document every new/modified `Service`/`Controller`/`Resolver`/`Entity`/`Guard`
+- read `AGENTS.md` + relevant `skills/` + existing code before changing anything
+- follow the specification (Spec Kit) as the source of truth
+- reuse existing abstractions (`Auth`, `InventoryService`, `Logger`, filters)
+- prefer small, reviewable changes
+- use strongly typed interfaces, DTOs, entity types, or type guards with `unknown` instead of falling back to `any`.
+- reference official online documentation or library type declarations (`@types/*`) to use precise and idiomatic TypeScript types.
+- consider failure, concurrency, and DB consistency
+- add/update tests for behavior changes
+- update `plan.md` after implementing any phase
+- update `docs/` and `docs/decisions/` when an architecture decision is made
+- document every new/modified `Service`/`Controller`/`Resolver`/`Entity`/`Guard`
   with class-level `/** This service is responsible for ... */` and every public
   method with `/** ... @param @returns @throws */` JSDoc; add `//` comments for
   all complex conditions and formulas (see §3 Code Documentation)
-* verify (`lint`, `build`, `test`) before declaring done
+- verify (`lint`, `build`, `test`) before declaring done
 
 ### Clean Architecture / Refactoring Rules
 
@@ -431,26 +457,26 @@ or existing code structure, the agent **must read and apply**:
 
 The skill is the repository-wide reference for:
 
-* SOLID principles
-* DRY and duplication analysis
-* separation of concerns
-* dependency direction
-* module boundaries
-* high cohesion / low coupling
-* explicit dependencies
-* dependency inversion
-* testability
-* repository boundaries
-* service responsibilities
-* configuration boundaries
-* error handling boundaries
-* side-effect isolation
-* database-access discipline
-* transaction boundaries
-* concurrency-sensitive refactoring
-* messaging/background-job boundaries
-* logging boundaries
-* clean-code practices
+- SOLID principles
+- DRY and duplication analysis
+- separation of concerns
+- dependency direction
+- module boundaries
+- high cohesion / low coupling
+- explicit dependencies
+- dependency inversion
+- testability
+- repository boundaries
+- service responsibilities
+- configuration boundaries
+- error handling boundaries
+- side-effect isolation
+- database-access discipline
+- transaction boundaries
+- concurrency-sensitive refactoring
+- messaging/background-job boundaries
+- logging boundaries
+- clean-code practices
 
 When refactoring:
 
@@ -655,14 +681,14 @@ Maintainability
 
 Do not treat the following as goals by themselves:
 
-* fewer files
-* fewer lines
-* fewer classes
-* fewer methods
-* fewer database queries
-* more abstractions
-* more interfaces
-* more design patterns
+- fewer files
+- fewer lines
+- fewer classes
+- fewer methods
+- fewer database queries
+- more abstractions
+- more interfaces
+- more design patterns
 
 A refactor is successful when the resulting architecture makes behavior,
 ownership, dependencies, invariants, and failure modes easier to understand
@@ -672,34 +698,34 @@ and safely change.
 
 ## 10. Where to Look
 
-* Narrative design + inventory/reservation/order rationale:
+- Narrative design + inventory/reservation/order rationale:
   [`docs/plan.md`](./docs/plan.md)
 
-* Architecture detail:
+- Architecture detail:
   [`docs/architecture/`](./docs/architecture)
 
-* Database detail:
+- Database detail:
   [`docs/database/`](./docs/database)
 
-* API conventions:
+- API conventions:
   [`docs/api/conventions.md`](./docs/api/conventions.md)
 
-* Decisions (ADRs + open questions):
+- Decisions (ADRs + open questions):
   [`docs/decisions/`](./docs/decisions)
 
-* Inventory / reservation intended design:
+- Inventory / reservation intended design:
   [`docs/architecture/inventory-reservation.md`](./docs/architecture/inventory-reservation.md)
 
-* Task playbooks:
+- Task playbooks:
   [`skills/`](./skills)
 
-* **Clean architecture / SOLID / DRY / refactoring principles:**
+- **Clean architecture / SOLID / DRY / refactoring principles:**
   [`skills/clean-architecture/SKILL.md`](./skills/clean-architecture/SKILL.md)
 
-* **Spec-driven development playbook:**
+- **Spec-driven development playbook:**
   [`skills/spec-driven-development/SKILL.md`](./skills/spec-driven-development/SKILL.md)
 
-* **Code review rules:**
+- **Code review rules:**
   [`skills/code-review/SKILL.md`](./skills/code-review/SKILL.md)
 
 ---

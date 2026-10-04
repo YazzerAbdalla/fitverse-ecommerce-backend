@@ -61,7 +61,7 @@ export class NotificationsGateway {
       if (!sub) {
         throw new Error('missing sub');
       }
-      // TokenVersion revocation is enforced on HTTP via JwtStrategy; WS checks sub presence only (documented gap).
+      // TokenVersion revocation is enforced on HTTP via JwtGuard; WS checks sub presence only (documented gap).
       await this.joinUserRoom(client, String(sub));
     } catch (e: any) {
       this.logger.warn(

@@ -12,7 +12,7 @@ import type { Queue } from 'bullmq';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 import { CreateSalesNotificationDto } from './dto/create-sales-notification.dto';
-import type { JwtPayloadProps } from '../auth/types';
+import type { JwtPayload } from '../auth/types';
 import { UserRoles } from '../users/enum/roles';
 import { Product } from '../products/entities/product.entity';
 
@@ -40,7 +40,7 @@ export class NotificationService {
    */
   async sendSalesCampaign(
     dto: CreateSalesNotificationDto,
-    actor: JwtPayloadProps,
+    actor: JwtPayload,
   ): Promise<{ jobId: string }> {
     // Admin-only gate: non-Admin callers never reach BullMQ (no job enqueued)
     if (!actor || actor.role !== UserRoles.Admin) {

@@ -2,6 +2,9 @@ import { ApiProperty } from '@nestjs/swagger';
 import { IsEnum, IsOptional, Length, Matches } from 'class-validator';
 import { OtpPurpose } from '../entities/otp-verification.entity';
 
+/**
+ * WhatsApp OTP verification (deferred: controller returns 501 until provider setup).
+ */
 export class VerifyOtpDto {
   @Matches(/^\+[1-9]\d{1,14}$/)
   @ApiProperty({ example: '+201012345678' })

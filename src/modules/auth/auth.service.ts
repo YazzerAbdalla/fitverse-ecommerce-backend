@@ -1,41 +1,82 @@
+/**
+ * Auth orchestration: transaction boundaries + delegation to intent-based
+ * stores, UsersService, and AuthEventPublisher. No broker/cache I/O in tx.
+ *
+ * Responsibility (SRP): auth use-case orchestration, nothing else.
+ * Used by: AuthController, LocalStrategy, GoogleStrategy flows.
+ * Depends on: UsersService, JwtService, DataSource, Cache, ConfigService,
+ *   WHATSAPP_PROVIDER, token stores, AuthEventPublisher, Clock, AUTH_TOKEN_CONFIG.
+ */
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import {
   BadRequestException,
   ConflictException,
   HttpException,
-  HttpStatus,
   Inject,
   Injectable,
+  InternalServerErrorException,
   Logger,
-  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import * as crypto from 'crypto';
-import { lastValueFrom } from 'rxjs';
-import { ClientProxy } from '@nestjs/microservices';
+import type { Cache } from 'cache-manager';
+import * as crypto from 'crypto'; // randomInt only (OTP digits have no port)
+import { DataSource } from 'typeorm';
+import { SystemClock } from '../../common/clock';
+import { generateHex } from '../../common/secure-token';
+import { sha256Hex } from '../../common/token-hasher';
+import User, { AuthProvider } from '../users/entity/user.entity';
 import { UsersService } from '../users/users.service';
+import { toSafeUser } from '../users/dto/safe-user-response.dto';
+import { AuthEventPublisher } from './auth-event.publisher';
+import type { AuthTokenConfig } from './auth-token.config';
+import { AUTH_TOKEN_CONFIG } from './auth-token.config';
 import { UserRegisterDto } from './dto/user-register.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
-import User, { AuthProvider } from '../users/entity/user.entity';
-import { JwtService } from '@nestjs/jwt';
-import { JwtPayloadProps } from './types';
-import { DataSource, IsNull } from 'typeorm';
-import { PasswordResetToken } from './entities/password-reset-token.entity';
-import { EmailVerificationToken } from './entities/email-verification-token.entity';
-import {
-  OtpVerification,
-  OtpPurpose,
-} from './entities/otp-verification.entity';
-import { RefreshToken } from './entities/refresh-token.entity';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
-import { ConfigService } from '@nestjs/config';
+import { OtpPurpose } from './entities/otp-verification.entity';
 import type { WhatsAppProvider } from './providers/whatsapp.provider';
-import { GoogleProfile } from './strateges/google.strategy';
+import { OtpStore } from './stores/otp.store';
+import { PasswordResetTokenStore } from './stores/password-reset-token.store';
+import { RefreshTokenStore } from './stores/refresh-token.store';
+import { VerificationCooldownError } from './verification-cooldown.error';
+import { GoogleProfile } from './strategies/google.strategy';
+import { JwtPayload } from './types';
 
 /**
- * This service is responsible for authentication domain (registration, login, refresh, logout).
- * It handles JWT issuance, refresh token rotation with PG FOR UPDATE, and enforces hash/storage invariants.
+ * Minimal Redis counter surface behind the cache-manager Keyv escape hatch.
+ * cache-manager v7 types `Cache.stores: Keyv[]` with no singular `store` and
+ * no `.client`; the ioredis client is only reachable via untyped internals.
+ */
+interface RedisCounterClient {
+  incr(key: string): Promise<number>;
+  expire(key: string, seconds: number): Promise<unknown>;
+}
+
+/**
+ * Structural view of CACHE_MANAGER internals for best-effort counters.
+ * Covers both the legacy singular `store` and the v7 `stores[0]` (Keyv)
+ * shapes; every level is optional so absence means counter skipped (fail-open).
+ */
+type CacheWithStoreClient = {
+  store?: {
+    client?: RedisCounterClient;
+    store?: { client?: RedisCounterClient };
+  };
+  stores?: Array<{
+    client?: RedisCounterClient;
+    store?: { client?: RedisCounterClient };
+  }>;
+  client?: RedisCounterClient;
+};
+
+/**
+ * This service is responsible for auth orchestration (register, login,
+ * refresh, logout, password-reset, verification, OTP, Google).
+ * It owns transaction boundaries and delegates persistence to intent-based
+ * stores, user writes to UsersService, and post-commit events to
+ * AuthEventPublisher. It performs no broker/cache I/O inside transactions.
  */
 @Injectable()
 export class AuthService {
@@ -48,26 +89,38 @@ export class AuthService {
     private readonly configService: ConfigService,
     @Inject('WHATSAPP_PROVIDER')
     private readonly whatsappProvider: WhatsAppProvider,
-    @Optional()
-    @Inject('NOTIFICATION_SERVICE')
-    private readonly notificationClient?: ClientProxy,
+    private readonly refreshTokens: RefreshTokenStore,
+    private readonly resetTokens: PasswordResetTokenStore,
+    private readonly otpStore: OtpStore,
+    private readonly eventPublisher: AuthEventPublisher,
+    private readonly clock: SystemClock,
+    @Inject(AUTH_TOKEN_CONFIG) private readonly tokenConfig: AuthTokenConfig,
   ) {}
 
   private saltOrRounds = 10;
 
+  // Resend cooldown: 60s per email (Redis SET, fail-open). Named so the TTL
+  // arithmetic below states its unit (ms) and reason once.
+  private readonly resendCooldownMs = 60_000;
+
   // For testing: allow capturing raw tokens
   public lastRawToken?: string;
-  public lastOtp?: string;
-  /**
-   * Test hook (014 US1): last raw email-verification token issued by
-   * requestEmailVerification/resendVerification. Set after commit, never logged.
-   */
   public lastVerificationToken?: string;
+  public lastOtp?: string;
 
+  /**
+   * Registers a new local user and fires the verification email after commit.
+   * The response never carries credential material (D3 + B6 SafeUser shape).
+   *
+   * @param userRegisterDto - Validated registration payload.
+   * @returns Message plus the client-safe user projection.
+   * @throws BadRequestException on duplicate email; ConflictException or
+   *   InternalServerErrorException passthrough from user creation.
+   */
   async register(userRegisterDto: UserRegisterDto) {
     const { email, password } = userRegisterDto;
     this.logger.debug(`Register attempt for ${email}`);
-    // Check if this email already exist
+    // DB-READ: Check if this email already exist
     const isEmailExist = await this.usersService.findUserByEmail(email);
     if (isEmailExist) {
       this.logger.error(`User try to use duplicated email ${email}`);
@@ -76,23 +129,69 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(password, this.saltOrRounds);
 
-    const newUser = { ...userRegisterDto, password: hashedPassword };
+    const newUser: Partial<User> = {
+      ...userRegisterDto,
+      password: hashedPassword,
+    };
 
-    await this.usersService.createNewUser(newUser);
+    let savedUser: User | null = null;
 
-    this.logger.log(`New user with email ${email} had registered successfuly`);
+    // DB-Write Create new user
+    try {
+      savedUser = await this.usersService.createNewUser(newUser);
+
+      this.logger.log(
+        `New user with email ${email} had registered successfuly`,
+      );
+    } catch (error: unknown) {
+      if (
+        error instanceof ConflictException ||
+        error instanceof BadRequestException
+      ) {
+        this.logger.error(
+          'The email is already exist, please use another email',
+        );
+        throw new ConflictException(
+          'The email is already exist, please use another email',
+        );
+      }
+
+      if (error instanceof InternalServerErrorException) {
+        this.logger.error('Internal server error while creating new user');
+        throw new InternalServerErrorException(
+          'Internal server error while creating new user',
+        );
+      }
+    }
 
     // Fire-and-forget verification email after commit — never blocks 201 (spec FR-005, edge: DB down after User commit)
-    this.requestEmailVerification(email).catch((e: any) => {
-      // Registration already committed; recovery via POST /auth/resend-verification
-      this.logger.error(
-        `requestEmailVerification after register failed email=${email}: ${e?.message ?? e}`,
-      );
-    });
+    this.requestEmailVerification(savedUser!).catch(
+      (error: InternalServerErrorException) => {
+        // Registration already committed; recovery via POST /auth/resend-verification
+        this.logger.error(
+          `requestEmailVerification after register failed email=${email}:`,
+          error,
+        );
+      },
+    );
 
-    return { message: 'User created successfuly.', data: newUser };
+    // D3 + B6: same message as before; data is the shared SafeUserResponseDto
+    // allow-list (no password/token material by construction). Additive delta
+    // vs the old DTO-spread: data now also carries id/role/provider/flags.
+    return {
+      message: 'User created successfuly.',
+      data: toSafeUser(savedUser!),
+    };
   }
 
+  /**
+   * Validates local credentials for the passport-local strategy.
+   *
+   * @param email - Login email.
+   * @param password - Plaintext password to compare (bcrypt).
+   * @returns The user without password hash, or null (unknown user, OAuth-only
+   *   account, or mismatch — all map to the same 401 downstream).
+   */
   async userValidation(
     email: string,
     password: string,
@@ -105,23 +204,29 @@ export class AuthService {
     );
 
     if (isSamePasswordHash) {
-      const { password, ...filteredUser } = isUserExist;
-      return filteredUser;
+      const { password: _blank, ...safeUser } = isUserExist;
+      return safeUser;
     }
 
     return null;
   }
 
   /**
-   * This service is responsible for auth domain (login, refresh, logout, password-reset, OTP, Google).
-   * It handles token issuance and enforces PG authoritative refresh storage.
+   * Logs in with validated credentials (local strategy validated first).
+   * Issues the short-lived access token plus a capped single-use-rotation
+   * refresh token.
+   *
+   * @param loginPrincipal - Validated user row (password already checked).
+   * @returns Message plus the access/refresh pair.
    */
+  async login(loginPrincipal: Partial<User>) {
+    const { id, email, firstName, lastName, role, tokenVersion } =
+      loginPrincipal;
 
-  //Generate the jwt for user after validation his credentionals
-  async login(user: Partial<User>) {
-    const { id, email, firstName, lastName, role, tokenVersion } = user as any;
     const fullName = firstName + ' ' + lastName;
-    const payload: JwtPayloadProps = {
+
+    // Create the accessToken payload with tokenVersion for revocation
+    const payload: JwtPayload = {
       sub: id,
       email,
       fullName,
@@ -129,10 +234,10 @@ export class AuthService {
       tokenVersion: typeof tokenVersion === 'number' ? tokenVersion : 0,
     };
 
-    const accessToken = await this.jwtService.signAsync(payload as any);
+    const accessToken = await this.jwtService.signAsync(payload);
 
     // Issue refresh token (Phase 17)
-    const refreshToken = await this.createRefreshTokenForUser(id);
+    const refreshToken = await this.createRefreshTokenForUser(id!);
 
     // Log with hashed prefix only, never rawRefresh
     const prefix = refreshToken.slice(0, 6);
@@ -154,75 +259,57 @@ export class AuthService {
    * @throws UnauthorizedException if user not found (rare).
    */
   private async createRefreshTokenForUser(userId: string): Promise<string> {
-    const raw = crypto.randomBytes(32).toString('hex');
-    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
-    const ttl = this.configService.get<string>('REFRESH_TOKEN_TTL') || '7d';
-    const expiresAt = new Date(Date.now() + this.parseTtlMs(ttl));
+    const raw = generateHex();
+    const tokenHash = sha256Hex(raw);
+    // Lifetime from startup-resolved config (was per-access read + parse).
+    const expiresAt = new Date(
+      this.clock.now().getTime() + this.tokenConfig.refreshTokenTtlMs,
+    );
 
-    const repo = this.dataSource.getRepository(RefreshToken);
-    // Enforce cap 5 active LRU — revoke oldest if needed
-    // Count active tokens for user
-    const activeCount = await repo.count({
-      where: { userId, revokedAt: IsNull() },
-    });
-    // If active >=5, revoke oldest active token (FOR UPDATE style — simple UPDATE oldest)
+    // Enforce cap 5 active LRU — revoke oldest if needed (store-owned reads).
+    const activeCount = await this.refreshTokens.countActive(userId);
     if (activeCount >= 5) {
       // Find oldest active token
-      const oldest = await repo.find({
-        where: { userId, revokedAt: IsNull() },
-        order: { createdAt: 'ASC' },
-        take: 1,
-      });
-      if (oldest[0]) {
+      const oldest = await this.refreshTokens.findOldestActive(userId);
+      if (oldest) {
         // Revoke oldest — single-winner via UPDATE WHERE revokedAt IS NULL
-        await repo.update(oldest[0].id, { revokedAt: new Date() });
+        await this.refreshTokens.revokeById(undefined, oldest.id);
         this.logger.log(
-          `Refresh cap evicted oldest userId=${userId} tokenId=${oldest[0].id}`,
+          `Refresh cap evicted oldest userId=${userId} tokenId=${oldest.id}`,
         );
       }
     }
 
     try {
-      const entity = repo.create({
-        userId,
-        user: { id: userId },
-        tokenHash,
-        expiresAt,
-        revokedAt: null,
-      });
-      await repo.save(entity);
-    } catch (e: any) {
+      await this.refreshTokens.create({ userId, tokenHash, expiresAt });
+    } catch (error: unknown) {
       // Handle partial unique collision (prob negligible) — retry once
-      if (this.isUniqueViolation(e)) {
+      if (this.isUniqueViolation(error)) {
         this.logger.warn(
           `Refresh tokenHash collision userId=${userId} retry once`,
         );
-        const retryRaw = crypto.randomBytes(32).toString('hex');
-        const retryHash = crypto
-          .createHash('sha256')
-          .update(retryRaw)
-          .digest('hex');
-        const retryEntity = repo.create({
+        const retryRaw = generateHex();
+        const retryHash = sha256Hex(retryRaw);
+        await this.refreshTokens.create({
           userId,
           tokenHash: retryHash,
           expiresAt,
-          revokedAt: null,
         });
-        await repo.save(retryEntity);
         return retryRaw;
       }
-      throw e;
+      throw error;
     }
     return raw;
   }
 
   /**
    * Refreshes accessToken using opaque refresh token with single-use rotation.
-   * @param rawRefresh - Raw 64 hex refresh token from body or cookie.
+   * @param rawRefresh - Raw 64 hex refresh token from body or cookie
+   *   (undefined when neither transport carried one → 401, same as garbage).
    * @returns New pair {accessToken, refreshToken} and emailVerified flag.
    * @throws UnauthorizedException if invalid/expired/revoked.
    */
-  async refresh(rawRefresh: string): Promise<{
+  async refresh(rawRefresh: string | undefined): Promise<{
     accessToken: string;
     refreshToken: string;
     emailVerified: boolean;
@@ -234,81 +321,60 @@ export class AuthService {
     if (!/^[0-9a-f]{64}$/.test(rawRefresh)) {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(rawRefresh)
-      .digest('hex');
+    const tokenHash = sha256Hex(rawRefresh);
     const prefix = tokenHash.slice(0, 6);
 
-    let result: {
+    let rotatedPair: {
       accessToken: string;
       refreshToken: string;
       emailVerified: boolean;
     } | null = null;
 
     await this.dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(RefreshToken);
-      // FOR UPDATE lookup — single-winner serialization
-      const found = await repo
-        .createQueryBuilder('rt')
-        .setLock('pessimistic_write')
-        .where('rt.tokenHash = :tokenHash', { tokenHash })
-        .getOne();
+      // FOR UPDATE lookup — single-winner serialization (store-owned).
+      const foundRefreshToken = await this.refreshTokens.findByHashForUpdate(
+        manager,
+        tokenHash,
+      );
 
       // Not found → 401 (no userId, no theft nuke)
-      if (!found) {
+      if (!foundRefreshToken) {
         throw new UnauthorizedException('Invalid or expired refresh token');
       }
 
-      // Load user
-      const userRepo = manager.getRepository(User);
-      const user = await userRepo.findOne({ where: { id: found.userId } });
-      if (!user) {
+      // Load user through the users boundary (US2: no direct user repo here).
+      const refreshUser = await this.usersService.findUserById(
+        foundRefreshToken.userId,
+        manager,
+      );
+      if (!refreshUser) {
         throw new UnauthorizedException('Invalid or expired refresh token');
       }
 
       // Revoked already → theft detection (reuse of rotated token)
       // This is single-use rotation: old token should be revokedAt NOT NULL after first refresh
-      if (found.revokedAt) {
+      if (foundRefreshToken.revokedAt) {
         // Theft: revoke all remaining active tokens for this user (outside rows already revoked)
-        // Do bulk revoke before throwing 401 — must be observable
-        // Use manager for bulk revoke
-        await manager
-          .createQueryBuilder()
-          .update(RefreshToken)
-          .set({ revokedAt: new Date() })
-          .where('userId = :userId AND "revokedAt" IS NULL', {
-            userId: found.userId,
-          })
-          .execute();
+        // Do bulk revoke before throwing 401 — must be observable.
+        // Store-owned own-tx nuke (B5): the 401 below rolls the outer tx back.
+        await this.refreshTokens.revokeAllActive(foundRefreshToken.userId);
         this.logger.warn(
-          `refresh reuse theft detected userId=${found.userId} hashPrefix=${prefix}`,
+          `refresh reuse theft detected userId=${foundRefreshToken.userId} hashPrefix=${prefix}`,
         );
-        // Optional counter increment (best-effort, fail-open)
+        // Optional theft counter (best-effort, fail-open, observability only).
+        // cache-manager exposes no incr; reach the ioredis client via the
+        // Keyv escape hatch (singular `store` or v7 `stores[0]`).
         try {
-          const cache: any = this.cache as any;
-          if (cache && cache.store && cache.store.client) {
-            // ioredis via keyv — use incr
-          }
-          // Use generic cache incr if available
-          if (typeof (this.cache as any).get === 'function') {
-            // Use INCR via store
-            const key = `idempotency:duplicate:skipped:refresh`;
-            // Try INCR pattern — cache-manager doesn't expose incr directly, use store
-            // Best-effort via CACHE_MANAGER set NX counter
-          }
-        } catch {
-          // ignore — theft counter is observability only
-        }
-        try {
-          // Best-effort INCR via cache manager if supports store
-          const c: any = this.cache;
-          if (c && c.store && typeof c.store.client?.incr === 'function') {
-            await c.store.client.incr(`idempotency:duplicate:skipped:refresh`);
-            await c.store.client.expire(
-              `idempotency:duplicate:skipped:refresh`,
-              86400,
-            );
+          const cacheWithStore = this.cache as unknown as CacheWithStoreClient;
+          const key = `idempotency:duplicate:skipped:refresh`;
+          const keyvStore = cacheWithStore.store ?? cacheWithStore.stores?.[0];
+          const redisClient =
+            keyvStore?.client ??
+            keyvStore?.store?.client ??
+            cacheWithStore.client;
+          if (redisClient && typeof redisClient.incr === 'function') {
+            await redisClient.incr(key);
+            await redisClient.expire(key, 86400);
           }
         } catch {
           // fail-open for theft counter
@@ -318,79 +384,83 @@ export class AuthService {
 
       // Expired → 401 (no theft nuke, no bulk revoke)
       // expiresAt <= now is expired
-      if (found.expiresAt.getTime() <= Date.now()) {
+      if (foundRefreshToken.expiresAt.getTime() <= this.clock.now().getTime()) {
         throw new UnauthorizedException('Invalid or expired refresh token');
       }
 
       // Active branch — rotate: revoke old + insert new + sign new accessToken
       // Revoke old token
-      await repo.update(found.id, { revokedAt: new Date() });
+      await this.refreshTokens.revokeById(manager, foundRefreshToken.id);
 
-      // Cap 5 LRU before insert — count active excluding the just-revoked old
-      const activeCount = await repo.count({
-        where: { userId: found.userId, revokedAt: null as any },
-      });
+      // Cap 5 LRU before insert — count active excluding the just-revoked old.
+      const activeCount = await this.refreshTokens.countActive(
+        foundRefreshToken.userId,
+        manager,
+      );
       if (activeCount >= 5) {
-        const oldest = await repo.find({
-          where: { userId: found.userId, revokedAt: null as any },
-          order: { createdAt: 'ASC' },
-          take: 1,
-        });
-        if (oldest[0] && oldest[0].id !== found.id) {
-          await repo.update(oldest[0].id, { revokedAt: new Date() });
+        const oldest = await this.refreshTokens.findOldestActive(
+          foundRefreshToken.userId,
+          manager,
+        );
+        if (oldest && oldest.id !== foundRefreshToken.id) {
+          await this.refreshTokens.revokeById(manager, oldest.id);
           this.logger.log(
-            `Refresh cap evicted oldest on rotation userId=${found.userId} tokenId=${oldest[0].id}`,
+            `Refresh cap evicted oldest on rotation userId=${foundRefreshToken.userId} tokenId=${oldest.id}`,
           );
         }
       }
 
-      const newRaw = crypto.randomBytes(32).toString('hex');
-      const newHash = crypto.createHash('sha256').update(newRaw).digest('hex');
-      const ttl = this.configService.get<string>('REFRESH_TOKEN_TTL') || '7d';
-      const newExpiresAt = new Date(Date.now() + this.parseTtlMs(ttl));
-      const newEntity = repo.create({
-        userId: found.userId,
-        tokenHash: newHash,
-        expiresAt: newExpiresAt,
-        revokedAt: null,
-      } as any);
-      await repo.save(newEntity);
+      const newRaw = generateHex();
+      const newHash = sha256Hex(newRaw);
+      const newExpiresAt = new Date(
+        this.clock.now().getTime() + this.tokenConfig.refreshTokenTtlMs,
+      );
+      await this.refreshTokens.create(
+        {
+          userId: foundRefreshToken.userId,
+          tokenHash: newHash,
+          expiresAt: newExpiresAt,
+        },
+        manager,
+      );
 
       // Sign new accessToken with current tokenVersion
-      const payload: JwtPayloadProps = {
-        sub: user.id,
-        email: user.email,
-        fullName: `${user.firstName} ${user.lastName}`,
-        role: user.role,
+      const payload: JwtPayload = {
+        sub: refreshUser.id,
+        email: refreshUser.email,
+        fullName: `${refreshUser.firstName} ${refreshUser.lastName}`,
+        role: refreshUser.role,
         tokenVersion:
-          typeof user.tokenVersion === 'number' ? user.tokenVersion : 0,
+          typeof refreshUser.tokenVersion === 'number'
+            ? refreshUser.tokenVersion
+            : 0,
       };
-      const newAccessToken = await this.jwtService.signAsync(payload as any);
+      const newAccessToken = await this.jwtService.signAsync(payload);
 
       // Determine emailVerified for header
-      const emailVerified = !!user.emailVerified;
+      const emailVerified = !!refreshUser.emailVerified;
 
       if (!emailVerified) {
         this.logger.warn(
-          `refresh unverified email userId=${user.id} hashPrefix=${prefix}`,
+          `refresh unverified email userId=${refreshUser.id} hashPrefix=${prefix}`,
         );
       } else {
         this.logger.log(
-          `refresh rotated userId=${user.id} hashPrefix=${prefix} -> newPrefix=${newHash.slice(0, 6)}`,
+          `refresh rotated userId=${refreshUser.id} hashPrefix=${prefix} -> newPrefix=${newHash.slice(0, 6)}`,
         );
       }
 
-      result = {
+      rotatedPair = {
         accessToken: newAccessToken,
         refreshToken: newRaw,
         emailVerified,
       };
     });
 
-    if (!result) {
+    if (!rotatedPair) {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
-    return result;
+    return rotatedPair;
   }
 
   /**
@@ -407,18 +477,9 @@ export class AuthService {
       // Invalid shape → still 200 anti-enum per spec
       return;
     }
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(rawRefresh)
-      .digest('hex');
-    const repo = this.dataSource.getRepository(RefreshToken);
-    // Idempotent UPDATE where revokedAt IS NULL — 0 rows is still 200
-    await repo
-      .createQueryBuilder()
-      .update(RefreshToken)
-      .set({ revokedAt: new Date() })
-      .where('tokenHash = :tokenHash AND "revokedAt" IS NULL', { tokenHash })
-      .execute();
+    const tokenHash = sha256Hex(rawRefresh);
+    // Idempotent UPDATE where revokedAt IS NULL — 0 rows is still 200 (store-owned).
+    await this.refreshTokens.revokeByHashWhereActive(tokenHash);
     this.logger.log(`logout revoked prefix=${tokenHash.slice(0, 6)}`);
   }
 
@@ -429,25 +490,20 @@ export class AuthService {
    */
   async logoutAll(userId: string): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
-      const userRepo = manager.getRepository(User);
-      const user = await userRepo
-        .createQueryBuilder('u')
-        .setLock('pessimistic_write')
-        .where('u.id = :userId', { userId })
-        .getOne();
-      if (!user) throw new UnauthorizedException('User not found');
+      // Locked read + nuke owned by UsersService (US2); same lock, same 404.
+      const lockedUser = await this.usersService.findUserByIdForUpdate(
+        manager,
+        userId,
+      );
+      if (!lockedUser) throw new UnauthorizedException('User not found');
       // Increment tokenVersion atomically
-      await userRepo.update(userId, {
-        tokenVersion: () => '"tokenVersion" + 1',
-        passwordChangedAt: new Date(),
+      await this.usersService.incrementTokenVersion(userId, {
+        manager,
+        passwordChangedAt: this.clock.now(),
       });
-      // Bulk revoke all active refresh tokens
-      await manager
-        .createQueryBuilder()
-        .update(RefreshToken)
-        .set({ revokedAt: new Date() })
-        .where('userId = :userId AND "revokedAt" IS NULL', { userId })
-        .execute();
+      // Bulk revoke all active refresh tokens (commits with this tx — no
+      // rollback follows here, so the in-tx variant applies).
+      await this.refreshTokens.revokeAllInTx(manager, userId);
     });
     this.logger.log(`logout-all revoked all for userId=${userId}`);
   }
@@ -457,77 +513,35 @@ export class AuthService {
    * @returns Number of rows deleted.
    */
   async purgeExpiredTokens(): Promise<number> {
-    const result = await this.dataSource
-      .createQueryBuilder()
-      .delete()
-      .from(RefreshToken)
-      .where(
-        `("revokedAt" IS NOT NULL AND "revokedAt" < NOW() - INTERVAL '7 days') OR ("revokedAt" IS NULL AND "expiresAt" < NOW() - INTERVAL '7 days')`,
-      )
-      .execute();
-    const count = result.affected || 0;
+    const count = await this.refreshTokens.purgeExpired();
     if (count > 0) this.logger.log(`RefreshToken purge deleted ${count} rows`);
     return count;
   }
 
-  /**
-   * Purges used/expired EmailVerificationToken rows older than 7 days.
-   * Intended to be called by a nightly job (BullMQ repeat or ops cron), never in the request path.
-   * @returns Number of rows deleted.
-   */
-  async purgeExpiredVerificationTokens(): Promise<number> {
-    // Retention 7d per spec clarification: used tokens and long-expired actives are audit-dead
-    const result = await this.dataSource
-      .createQueryBuilder()
-      .delete()
-      .from(EmailVerificationToken)
-      .where(
-        `("usedAt" IS NOT NULL AND "usedAt" < NOW() - INTERVAL '7 days') OR ("expiresAt" < NOW() - INTERVAL '7 days')`,
-      )
-      .execute();
-    const count = result.affected || 0;
-    if (count > 0)
-      this.logger.log(`EmailVerificationToken purge deleted ${count} rows`);
-    return count;
-  }
-
   // ============ Phase 16: Forgot Password & Recovery Token ============
+  /**
+   * Starts a password reset: anti-enumeration void for unknown emails,
+   * otherwise issues a single-use 15m token (priors invalidated) and emits
+   * the send event after commit.
+   *
+   * @param email - Account email (never leaked on miss).
+   * @returns Void.
+   */
   async requestPasswordReset(email: string): Promise<void> {
     const user = await this.usersService.findUserByEmail(email);
     if (!user) {
       this.logger.debug(`forgot-password: email not found ${email}`);
       return;
     }
-    const rawToken = crypto.randomBytes(32).toString('hex');
+    const rawToken = generateHex();
     this.lastRawToken = rawToken;
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
-    const ttl = this.configService.get<string>('RESET_TOKEN_TTL') || '15m';
-    const expiresAt = new Date(Date.now() + this.parseTtlMs(ttl));
+    const tokenHash = sha256Hex(rawToken);
+    const expiresAt = new Date(
+      this.clock.now().getTime() + this.tokenConfig.resetTokenTtlMs,
+    );
 
     await this.dataSource.transaction(async (manager) => {
-      await manager
-        .createQueryBuilder()
-        .update(PasswordResetToken)
-        .set({ usedAt: new Date() })
-        .where(
-          'userId = :userId AND "usedAt" IS NULL AND "expiresAt" > NOW()',
-          {
-            userId: user.id,
-          },
-        )
-        .execute();
-      const repo = manager.getRepository(PasswordResetToken);
-      await repo.save(
-        repo.create({
-          userId: user.id,
-          tokenHash,
-          expiresAt,
-          usedAt: null,
-        }),
-      );
+      await this.resetTokens.issue(manager, user.id, tokenHash, expiresAt);
     });
     // Publish after commit (US3 wired: replaces TODO Logger-only publish).
     // Never inside dataSource.transaction above — broker I/O stays outside the tx.
@@ -541,155 +555,152 @@ export class AuthService {
       this.logger.log(
         `Password reset token created for ${email}, expires ${expiresAt.toISOString()}`,
       );
-      await this.emitAuthEvent('auth.password_reset_requested', resetPayload);
-    } catch (e: any) {
+      await this.eventPublisher.emit(
+        'auth.password_reset_requested',
+        resetPayload,
+      );
+    } catch (error: unknown) {
       // Fire-and-forget after commit — 200 anti-enum already decided, never throw to caller
+      if (
+        error instanceof InternalServerErrorException ||
+        error instanceof HttpException
+      ) {
+        return this.logger.error(
+          `Failed to emit password reset event email=${email}:`,
+          error,
+        );
+      }
       this.logger.error(
-        `Failed to emit password reset event email=${email}: ${e?.message ?? e}`,
+        `Failed to emit password reset event email=${email}:`,
+        error,
       );
     }
   }
 
+  /**
+   * Advisory pre-check for reset-token validity (UX only, unlocked read).
+   * S-2: this is NOT the authority — resetPassword revalidates hash/expiry/
+   * use inside its own transaction holding FOR UPDATE and is the sole decider.
+   * A "valid" answer here can still 400 at reset time under concurrency.
+   */
   async validateResetToken(email: string, rawToken: string): Promise<User> {
     const user = await this.usersService.findUserByEmail(email);
     if (!user) throw new BadRequestException('Invalid or expired token.');
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
-    const repo = this.dataSource.getRepository(PasswordResetToken);
-    const token = await repo.findOne({
-      where: { tokenHash, userId: user.id },
-    });
-    if (!token || token.usedAt || token.expiresAt.getTime() <= Date.now()) {
+    const tokenHash = sha256Hex(rawToken);
+    // Advisory read (S-2): no lock, UX pre-check only.
+    const token = await this.resetTokens.findAdvisory(tokenHash, user.id);
+    if (
+      !token ||
+      token.usedAt ||
+      token.expiresAt.getTime() <= this.clock.now().getTime()
+    ) {
       throw new BadRequestException('Invalid or expired token.');
     }
     return user;
   }
 
-  async resetPassword(dto: {
+  /**
+   * Consumes a reset token and changes the password as one atomic unit.
+   * S-2 authority: hash/expiry/use are revalidated here inside the
+   * transaction holding FOR UPDATE — validateResetToken's answer is advisory
+   * only. Single-winner under concurrency (second consume 400s).
+   */
+  async resetPassword(resetPasswordDto: {
     email: string;
     token: string;
     newPassword: string;
   }): Promise<void> {
-    if (dto.newPassword === dto.email) {
+    if (resetPasswordDto.newPassword === resetPasswordDto.email) {
       throw new BadRequestException('Password must not equal email');
     }
-    const user = await this.usersService.findUserByEmail(dto.email);
+    const user = await this.usersService.findUserByEmail(
+      resetPasswordDto.email,
+    );
     if (!user) throw new BadRequestException('Invalid or expired token.');
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(dto.token)
-      .digest('hex');
+    const tokenHash = sha256Hex(resetPasswordDto.token);
 
     await this.dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(PasswordResetToken);
-      const token = await repo
-        .createQueryBuilder('t')
-        .setLock('pessimistic_write')
-        .where('t.tokenHash = :tokenHash AND t.userId = :userId', {
-          tokenHash,
-          userId: user.id,
-        })
-        .getOne();
-      if (!token || token.usedAt || token.expiresAt.getTime() <= Date.now()) {
+      // S-2 authority: revalidated under FOR UPDATE (store-owned lookup).
+      const token = await this.resetTokens.findForUpdate(
+        manager,
+        tokenHash,
+        user.id,
+      );
+      if (
+        !token ||
+        token.usedAt ||
+        token.expiresAt.getTime() <= this.clock.now().getTime()
+      ) {
         throw new BadRequestException('Invalid or expired token.');
       }
-      const hashed = await bcrypt.hash(dto.newPassword, this.saltOrRounds);
-      const userRepo = manager.getRepository(User);
-      await userRepo.update(user.id, {
-        password: hashed,
-        tokenVersion: () => '"tokenVersion" + 1',
-        passwordChangedAt: new Date(),
+      const hashed = await bcrypt.hash(
+        resetPasswordDto.newPassword,
+        this.saltOrRounds,
+      );
+      // Password write owned by UsersService (US2): same hash + increment +
+      // passwordChangedAt, inside this transaction.
+      await this.usersService.updatePassword(user.id, hashed, undefined, {
+        manager,
+        passwordChangedAt: this.clock.now(),
       });
-      await repo.update(token.id, { usedAt: new Date() });
-      // invalidate other active tokens
-      await manager
-        .createQueryBuilder()
-        .update(PasswordResetToken)
-        .set({ usedAt: new Date() })
-        .where('userId = :userId AND id != :id AND "usedAt" IS NULL', {
-          userId: user.id,
-          id: token.id,
-        })
-        .execute();
+      await this.resetTokens.consume(manager, token, user.id);
     });
-    this.logger.log(`Password reset successful for ${dto.email}`);
+    this.logger.log(`Password reset successful for ${resetPasswordDto.email}`);
   }
 
   // ============ Phase 18 (014 US1/US2): Email verification ============
+  // NOTE (US4): TTL parsing moved to the shared parseDurationMs port and all
+  // lifetimes come from startup-resolved AuthTokenConfig — the three private
+  // parsers below were deleted after the rewire (identical outputs proven by
+  // src/common/ports.spec.ts).
 
   /**
-   * Emits an auth domain event after the DB commit (publish-after-commit).
-   * Never call inside dataSource.transaction — broker I/O stays outside the tx.
-   * Fail-open: logs and resolves, never throws to the caller (register stays 201).
-   * @param eventType - Event name (email.verification_requested, auth.password_reset_requested, auth.email_verified).
-   * @param payload - Event payload (may contain rawToken once; never logged raw).
-   * @returns Void.
+   * Checks the per-email resend cooldown (before any transaction).
+   * Fail-open: cache errors behave as "no cooldown", with a warn log.
+   *
+   * @param normalizedEmail - Lowercased email (cooldown key scope).
+   * @returns True when the cooldown is active (caller denies), false otherwise.
    */
-  public async emitAuthEvent(
-    eventType: string,
-    payload: Record<string, unknown>,
-  ): Promise<void> {
+  private async isResendCooldownActive(
+    normalizedEmail: string,
+  ): Promise<boolean> {
+    const key = `resend:cooldown:${normalizedEmail}`;
     try {
-      if (this.notificationClient) {
-        // Bounded wait so a down broker can never hang the request path
-        const obs = this.notificationClient.emit(eventType, payload);
-        await Promise.race([
-          lastValueFrom(obs),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('emit timeout 2000ms')), 2000),
-          ),
-        ]);
-      }
-      // Hash prefix only in logs — rawToken is never logged
-      const userId = (payload as any)?.userId ?? 'unknown';
-      this.logger.log(`auth event emitted type=${eventType} userId=${userId}`);
-      // TODO (T026 worker): EmailWorker/NotificationWorker consumes
-      // email.verification_requested + auth.password_reset_requested via the
-      // BullMQ 'notification' queue and calls EmailProvider.send (owned by another task).
-    } catch (e: any) {
-      // Async after commit never rolls back business — log only
-      this.logger.error(
-        `Failed to emit auth event type=${eventType}: ${e?.message ?? e}`,
+      const existing = await (
+        this.cache as unknown as {
+          get(k: string): Promise<unknown>;
+        }
+      ).get(key);
+      return !!existing;
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Resend cooldown check fail-open for ${normalizedEmail}:`,
+        error,
       );
+      return false;
     }
   }
 
   /**
-   * Parses a TTL string with s/m/h/d suffixes.
-   * @param ttl - TTL string (e.g. '24h', '15m', '604800000').
-   * @param fallbackMs - Fallback when invalid.
-   * @param key - Config key name for the warn log.
-   * @returns Milliseconds.
+   * Arms the per-email resend cooldown after a successful issue (fail-open).
+   *
+   * @param normalizedEmail - Lowercased email (cooldown key scope).
+   * @returns Void.
    */
-  private parseTtlWithDefault(
-    ttl: string,
-    fallbackMs: number,
-    key: string,
-  ): number {
-    if (ttl.endsWith('m')) return parseInt(ttl, 10) * 60_000;
-    if (ttl.endsWith('s')) return parseInt(ttl, 10) * 1000;
-    if (ttl.endsWith('h')) return parseInt(ttl, 10) * 3600_000;
-    if (ttl.endsWith('d')) return parseInt(ttl, 10) * 24 * 3600_000;
-    const numeric = parseInt(ttl, 10);
-    if (!isNaN(numeric) && String(numeric) === ttl) return numeric;
-    this.logger.warn(`Invalid TTL "${key}=${ttl}", fallback ${fallbackMs}ms`);
-    return fallbackMs;
-  }
-
-  /**
-   * Resolves the email-verification TTL (default 24h).
-   * @returns Milliseconds until a verification token expires.
-   */
-  private getVerificationTtlMs(): number {
-    const raw =
-      this.configService.get<string>('EMAIL_VERIFICATION_TTL') || '24h';
-    return this.parseTtlWithDefault(
-      raw,
-      24 * 3600_000,
-      'EMAIL_VERIFICATION_TTL',
-    );
+  private async markResendCooldown(normalizedEmail: string): Promise<void> {
+    const key = `resend:cooldown:${normalizedEmail}`;
+    try {
+      await (
+        this.cache as unknown as {
+          set(k: string, v: string, ttlMs: number): Promise<unknown>;
+        }
+      ).set(key, '1', this.resendCooldownMs);
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Resend cooldown set fail-open for ${normalizedEmail}:`,
+        error,
+      );
+    }
   }
 
   /**
@@ -698,68 +709,32 @@ export class AuthService {
    * @param email - User email to verify.
    * @returns Void.
    */
-  async requestEmailVerification(email: string): Promise<void> {
-    const user = await this.usersService.findUserByEmail(email);
-    // Anti-enumeration: same void whether or not the email exists
-    if (!user) {
-      this.logger.debug(`requestEmailVerification: email not found ${email}`);
-      return;
-    }
-    // Already verified → no new token, no email (resend returns the distinct message)
-    if ((user as any).emailVerified) {
-      return;
-    }
-    const raw = crypto.randomBytes(32).toString('hex');
-    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
-    const expiresAt = new Date(Date.now() + this.getVerificationTtlMs());
+  async requestEmailVerification(user: User): Promise<void> {
+    const { email } = user;
+
+    const expiresAt = new Date(
+      this.clock.now().getTime() + this.tokenConfig.emailVerificationTtlMs,
+    );
+
+    // Mint outside the tx (pure crypto); only the column overwrite is transactional.
+    const rawVerificationToken = generateHex();
+    const verificationTokenHash = sha256Hex(rawVerificationToken);
 
     await this.dataSource.transaction(async (manager) => {
-      // Invalidate prior active tokens so only one link is live at a time
-      await manager
-        .createQueryBuilder()
-        .update(EmailVerificationToken)
-        .set({ usedAt: new Date() })
-        .where('userId = :userId AND "usedAt" IS NULL', { userId: user.id })
-        .execute();
-      const repo = manager.getRepository(EmailVerificationToken);
-      try {
-        await repo.save(
-          repo.create({
-            userId: user.id,
-            tokenHash,
-            expiresAt,
-            usedAt: null,
-          }),
-        );
-      } catch (e: any) {
-        // Negligible hash-collision retry once (edge: UQ 23505), else propagate
-        if (this.isUniqueViolation(e)) {
-          this.logger.warn(
-            `EmailVerificationToken hash collision userId=${user.id} hashPrefix=${tokenHash.slice(0, 6)} retry once`,
-          );
-          const retryRaw = crypto.randomBytes(32).toString('hex');
-          const retryHash = crypto
-            .createHash('sha256')
-            .update(retryRaw)
-            .digest('hex');
-          await repo.save(
-            repo.create({
-              userId: user.id,
-              tokenHash: retryHash,
-              expiresAt,
-              usedAt: null,
-            }),
-          );
-          this.lastVerificationToken = retryRaw;
-          return;
-        }
-        throw e;
-      }
-      this.lastVerificationToken = raw;
+      // Single live token: overwrite the user columns (prior link dies here).
+      await this.usersService.issueEmailVerificationToken(
+        manager,
+        user.id,
+        verificationTokenHash,
+        expiresAt,
+      );
     });
-    // Publish after commit — outside dataSource.transaction (constitution async rule)
-    const rawForEvent = this.lastVerificationToken ?? raw;
-    await this.emitAuthEvent('email.verification_requested', {
+    // Publish after commit — outside dataSource.transaction (constitution async rule).
+    const rawForEvent = rawVerificationToken;
+    // Test hook (same pattern as lastRawToken): E2E/integration capture the
+    // raw without reading email bodies.
+    this.lastVerificationToken = rawForEvent;
+    await this.eventPublisher.emit('email.verification_requested', {
       userId: user.id,
       email,
       rawToken: rawForEvent,
@@ -774,51 +749,53 @@ export class AuthService {
    * @throws BadRequestException 400 for unknown email, missing/used/expired token (no 404 leak).
    */
   async verifyEmail(
-    dto: VerifyEmailDto,
+    verifyEmailDto: VerifyEmailDto,
   ): Promise<{ verified: boolean; emailVerified: boolean }> {
-    const user = await this.usersService.findUserByEmail(dto.email);
+    const advisoryUser = await this.usersService.findUserByEmail(
+      verifyEmailDto.email,
+    );
     // Do not 404-leak existence — unknown email is the same 400 as a bad token
-    if (!user) {
+    if (!advisoryUser) {
       throw new BadRequestException('Invalid or expired verification token');
     }
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(dto.token)
-      .digest('hex');
-    const hashPrefix = tokenHash.slice(0, 6);
+    // Hash via the shared port (same digest the issue path stored).
+    const presentedTokenHash = sha256Hex(verifyEmailDto.token);
+    const hashPrefix = presentedTokenHash.slice(0, 6);
 
     await this.dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(EmailVerificationToken);
-      // FOR UPDATE lookup scoped to (tokenHash, userId) — concurrent same raw serializes here
-      const found = await repo
-        .createQueryBuilder('t')
-        .setLock('pessimistic_write')
-        .where('t.tokenHash = :tokenHash AND t.userId = :userId', {
-          tokenHash,
-          userId: user.id,
-        })
-        .getOne();
-      // Single-use or expired or wrong-user hash → 400 without mutating
-      if (!found || found.usedAt || found.expiresAt.getTime() <= Date.now()) {
+      // FOR UPDATE on the user row — concurrent same-raw verifies serialize
+      // here; the winner consumes, losers see usedAt/hash-mismatch → 400.
+      const lockedUser = await this.usersService.findUserByEmailForUpdate(
+        manager,
+        verifyEmailDto.email,
+      );
+      // Never issued (null hash), wrong hash, already used, or expired →
+      // 400 with zero mutation.
+      if (
+        !lockedUser ||
+        lockedUser.emailVerificationTokenHash !== presentedTokenHash ||
+        lockedUser.emailVerificationUsedAt ||
+        !lockedUser.emailVerificationExpiresAt ||
+        lockedUser.emailVerificationExpiresAt.getTime() <=
+          this.clock.now().getTime()
+      ) {
         throw new BadRequestException('Invalid or expired verification token');
       }
-      found.usedAt = new Date();
-      await repo.save(found);
-      // Set verified once (idempotent flag, no toggle)
-      if (!(user as any).emailVerified) {
-        await manager
-          .getRepository(User)
-          .update(user.id, { emailVerified: true });
-      }
+      // Single-use consume + verified flag in one update (UsersService owns it).
+      await this.usersService.consumeEmailVerificationToken(
+        manager,
+        lockedUser.id,
+        this.clock.now(),
+      );
     });
     // Hash prefix only — raw token is never logged
     this.logger.log(
-      `email verified userId=${user.id} hashPrefix=${hashPrefix}`,
+      `email verified userId=${advisoryUser.id} hashPrefix=${hashPrefix}`,
     );
     // Optional post-commit event — outside the tx, fail-open
-    await this.emitAuthEvent('auth.email_verified', {
-      userId: user.id,
-      email: dto.email,
+    await this.eventPublisher.emit('auth.email_verified', {
+      userId: advisoryUser.id,
+      email: verifyEmailDto.email,
     });
     return { verified: true, emailVerified: true };
   }
@@ -827,87 +804,61 @@ export class AuthService {
    * Re-sends the verification email with anti-enumeration and a 60s per-email cooldown.
    * @param email - User email to re-send to.
    * @returns Anti-enum 200 message, or distinct already-verified 200.
-   * @throws HttpException 429 when the 60s cooldown is still active (before any transaction).
+   * @throws VerificationCooldownError when the 60s cooldown is still active
+   *   (before any transaction; the controller renders the 429 wire shape).
    */
   async resendVerification(email: string): Promise<{ message: string }> {
-    const normalized = email.toLowerCase();
-    const cooldownKey = `resend:cooldown:${normalized}`;
-    // 60s cooldown prevents burst re-sends — checked before any DB transaction
-    try {
-      const existing = await (this.cache as any).get(cooldownKey);
-      if (existing) {
-        // Cooldown active → 429 immediately, 0 transaction calls
-        const ex: any = new HttpException(
-          'Too Many Requests',
-          HttpStatus.TOO_MANY_REQUESTS,
-        );
-        ex.options = {
-          headers: {
-            'Retry-After': '60',
-            'X-RateLimit-Limit': '3',
-            'X-RateLimit-Remaining': '0',
-          },
-        };
-        throw ex;
-      }
-    } catch (e: any) {
-      // Re-throw intentional 429; fail open on Redis errors
-      if (e instanceof HttpException && e.getStatus() === 429) throw e;
-      this.logger.warn(
-        `Resend cooldown check fail-open for ${normalized}: ${e?.message ?? e}`,
-      );
+    const normalizedEmail = email.toLowerCase();
+    // 60s cooldown prevents burst re-sends — checked before any DB
+    // Cache-Read: if the cooldown is active, throw before any DB transaction (0 calls).
+    if (await this.isResendCooldownActive(normalizedEmail)) {
+      // Cooldown active → deny immediately, 0 transaction calls.
+      throw new VerificationCooldownError(60);
     }
 
+    // DB-Read: find user by email
     const user = await this.usersService.findUserByEmail(email);
     // Anti-enumeration: same message whether or not the email exists
     if (!user) {
       this.logger.debug(`resendVerification anti-enum email=${email}`);
       return {
-        message: 'If an account exists, a verification email has been sent.',
+        message:
+          'This email is not registered or already verified. If an account exists, a verification email has been sent.',
       };
     }
     // Verified users get a distinct message and no new token/email
-    if ((user as any).emailVerified) {
+    if (user.emailVerified) {
       return { message: 'Email already verified' };
     }
 
-    const raw = crypto.randomBytes(32).toString('hex');
-    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
-    const expiresAt = new Date(Date.now() + this.getVerificationTtlMs());
+    const expiresAt = new Date(
+      this.clock.now().getTime() + this.tokenConfig.emailVerificationTtlMs,
+    );
+
+    // Mint outside the tx; only the column overwrite is transactional.
+    const rawVerificationToken = generateHex();
+    const verificationTokenHash = sha256Hex(rawVerificationToken);
 
     await this.dataSource.transaction(async (manager) => {
-      // Invalidate priors so the old link dies exactly when the new one is born
-      // (a racing verifyEmail on the old raw serializes on FOR UPDATE and sees usedAt → 400)
-      await manager
-        .createQueryBuilder()
-        .update(EmailVerificationToken)
-        .set({ usedAt: new Date() })
-        .where('userId = :userId AND "usedAt" IS NULL', { userId: user.id })
-        .execute();
-      const repo = manager.getRepository(EmailVerificationToken);
-      await repo.save(
-        repo.create({
-          userId: user.id,
-          tokenHash,
-          expiresAt,
-          usedAt: null,
-        }),
+      // Overwrite the live token so the old link dies exactly when the new
+      // one is born (a racing verifyEmail on the old raw serializes on the
+      // user FOR UPDATE and sees a hash mismatch → 400).
+      await this.usersService.issueEmailVerificationToken(
+        manager,
+        user.id,
+        verificationTokenHash,
+        expiresAt,
       );
-      this.lastVerificationToken = raw;
     });
-    // Arm the 60s cooldown after a successful issue (fail-open on Redis errors)
-    try {
-      await (this.cache as any).set(cooldownKey, '1', 60_000);
-    } catch (e: any) {
-      this.logger.warn(
-        `Resend cooldown set fail-open for ${normalized}: ${e?.message ?? e}`,
-      );
-    }
+    // Arm the 60s cooldown after a successful issue (fail-open).
+    await this.markResendCooldown(normalizedEmail);
+    // Test hook (same pattern as lastRawToken).
+    this.lastVerificationToken = rawVerificationToken;
     // Publish after commit — outside dataSource.transaction
-    await this.emitAuthEvent('email.verification_requested', {
+    await this.eventPublisher.emit('email.verification_requested', {
       userId: user.id,
       email,
-      rawToken: raw,
+      rawToken: rawVerificationToken,
       expiresAt: expiresAt.toISOString(),
     });
     return {
@@ -918,184 +869,98 @@ export class AuthService {
   // ============ Phase 16: WhatsApp OTP — TODO (Future) DEFERRED per 2026-09-16 ============
   // Logic remains implemented but controller returns 501 until WhatsApp Business setup.
   // Password-only login is enforced in V1. Re-enable by removing 501 guard in auth.controller.ts.
+  /**
+   * Issues a 6-digit OTP (deferred path: controller currently returns 501).
+   *
+   * @param dto - {phoneNumber, purpose} (phone falls back to the caller's own).
+   * @param currentUser - Authenticated caller, if any.
+   * @returns Seconds until expiry.
+   * @throws BadRequestException on missing/invalid phone or unsupported purpose.
+   */
   async requestWhatsAppOtp(
-    dto: { phoneNumber?: string; purpose?: OtpPurpose },
+    requestOtpDto: { phoneNumber?: string; purpose?: OtpPurpose },
     currentUser?: Partial<User>,
   ): Promise<{ expiresIn: number }> {
-    let phone = dto.phoneNumber;
-    if (!phone && (currentUser as any)?.phoneNumber)
-      phone = (currentUser as any).phoneNumber;
+    let phone = requestOtpDto.phoneNumber;
+    if (!phone && currentUser?.phoneNumber) phone = currentUser.phoneNumber;
+
     if (!phone) throw new BadRequestException('phoneNumber is required');
     const e164 = /^\+[1-9]\d{1,14}$/;
     if (!e164.test(phone))
       throw new BadRequestException('Invalid phoneNumber, must be E.164');
-    const purpose = (dto.purpose as OtpPurpose) || OtpPurpose.Login;
+    const purpose = (requestOtpDto.purpose as OtpPurpose) || OtpPurpose.Login;
     if ((purpose as unknown as string) === 'reset_password') {
       throw new BadRequestException(
         'purpose reset_password not supported in V1',
       );
     }
-    // cooldown 60s via Redis SET NX EX
-    const cooldownKey = `otp:cooldown:${phone}`;
-    try {
-      const exists = await (this.cache as any).get(cooldownKey);
-      if (exists)
-        throw new BadRequestException(
-          'Resend cooldown active, try in 60 seconds',
-        );
-    } catch (e) {
-      this.logger.warn(`Redis cooldown check fail-open: ${e}`);
-    }
     const otp = crypto.randomInt(100000, 999999).toString();
     this.lastOtp = otp;
-    const codeHash = crypto.createHash('sha256').update(otp).digest('hex');
-    const ttlMs = this.parseTtlMs(
-      this.configService.get<string>('OTP_TTL') || '5m',
+    const codeHash = sha256Hex(otp);
+    const ttlMs = this.tokenConfig.otpTtlMs;
+    const expiresAt = new Date(this.clock.now().getTime() + ttlMs);
+    // State owned by OtpStore (cooldown gate, Redis record, PG audit).
+    // Provider send stays here: external I/O after state, fail-open.
+    const user = phone ? await this.usersService.findUserByPhone(phone) : null;
+    await this.otpStore.issueOtp(
+      phone,
+      purpose,
+      { codeHash, expiresAt },
+      ttlMs,
+      user?.id ?? null,
     );
-    const expiresAt = new Date(Date.now() + ttlMs);
-    const cacheKey = `otp:whatsapp:${phone}`;
-    try {
-      await (this.cache as any).set(
-        cacheKey,
-        {
-          hash: codeHash,
-          attempts: 0,
-          createdAt: Date.now(),
-          expiresAt: expiresAt.getTime(),
-          purpose,
-        },
-        ttlMs,
-      );
-      await (this.cache as any).set(cooldownKey, '1', 60_000);
-    } catch (e) {
-      this.logger.warn(`Redis set fail-open: ${e}`);
-    }
-    // persist to PG
-    try {
-      const repo = this.dataSource.getRepository(OtpVerification);
-      const user = phone ? await this.findUserByPhone(phone) : null;
-      await repo.save(
-        repo.create({
-          phoneNumber: phone,
-          userId: user?.id || null,
-          purpose,
-          codeHash,
-          expiresAt,
-          attempts: 0,
-          verifiedAt: null,
-        } as any),
-      );
-    } catch (e) {
-      this.logger.warn(`PG OtpVerification save failed: ${e}`);
-    }
     try {
       await this.whatsappProvider.sendOtp(
         phone,
         otp,
         Math.round(ttlMs / 60000),
       );
-    } catch (e) {
-      this.logger.error(`WhatsApp send failed for ${phone}: ${e}`);
+    } catch (error: unknown) {
+      this.logger.error(`WhatsApp send failed for ${phone}:`, error);
     }
     return { expiresIn: Math.round(ttlMs / 1000) };
   }
 
-  async verifyWhatsAppOtp(dto: {
+  /**
+   * Verifies an OTP attempt and continues post-verification orchestration
+   * (flag set or passwordless login). State machine lives in OtpStore.
+   *
+   * @param dto - {phoneNumber, otp, purpose}.
+   * @returns Verification result or fresh login pair (purpose-dependent).
+   * @throws BadRequestException on invalid/expired OTP or too many attempts.
+   */
+  async verifyWhatsAppOtp(verifyOtpDto: {
     phoneNumber: string;
     otp: string;
     purpose?: OtpPurpose;
-  }): Promise<any> {
-    const phone = dto.phoneNumber;
-    const purpose = (dto.purpose as OtpPurpose) || OtpPurpose.Login;
-    const codeHash = crypto.createHash('sha256').update(dto.otp).digest('hex');
-    const cacheKey = `otp:whatsapp:${phone}`;
-    let redisData: any = null;
-    let redisAvailable = true;
-    try {
-      redisData = await (this.cache as any).get(cacheKey);
-    } catch (e) {
-      redisAvailable = false;
-      this.logger.warn(`Redis get fail-open, fallback to DB: ${e}`);
-    }
-
-    // Redis path
-    if (redisAvailable && redisData) {
-      // increment attempts on every attempt per B2 choice B
-      redisData.attempts = (redisData.attempts || 0) + 1;
-      const attemptsOk = redisData.attempts <= 3;
-      const notExpired = redisData.expiresAt > Date.now();
-      const hashOk = this.timingSafeEqual(redisData.hash, codeHash);
-      if (!notExpired) {
-        try {
-          await (this.cache as any).del(cacheKey);
-        } catch {
-          void 0;
-        }
-        throw new BadRequestException('Invalid or expired OTP');
-      }
-      if (!attemptsOk) {
-        try {
-          await (this.cache as any).del(cacheKey);
-        } catch {
-          void 0;
-        }
-        throw new BadRequestException('Too many attempts, request new OTP');
-      }
-      if (!hashOk) {
-        try {
-          await (this.cache as any).set(
-            cacheKey,
-            redisData,
-            redisData.expiresAt - Date.now(),
-          );
-        } catch {
-          void 0;
-        }
-        // also increment PG attempts
-        await this.incrementOtpAttempts(phone);
-        throw new BadRequestException('Invalid or expired OTP');
-      }
-      // success: delete Redis, update PG, mark phoneVerified / issue JWT
-      try {
-        await (this.cache as any).del(cacheKey);
-      } catch {
-        void 0;
-      }
-      await this.markOtpVerified(phone, purpose);
-      return this.handleOtpSuccess(phone, purpose);
-    }
-
-    // Fallback DB path (Q4)
-    const repo = this.dataSource.getRepository(OtpVerification);
-    const latest = await repo.find({
-      where: { phoneNumber: phone },
-      order: { createdAt: 'DESC' },
-      take: 1,
-    });
-    const row = latest[0];
-    if (!row || row.verifiedAt || row.expiresAt.getTime() <= Date.now()) {
-      throw new BadRequestException('Invalid or expired OTP');
-    }
-    // increment attempts on every attempt per B2
-    row.attempts += 1;
-    await repo.save(row);
-    if (row.attempts > 3)
-      throw new BadRequestException('Too many attempts, request new OTP');
-    if (!this.timingSafeEqual(row.codeHash, codeHash)) {
-      throw new BadRequestException('Invalid or expired OTP');
-    }
-    row.verifiedAt = new Date();
-    await repo.save(row);
-    return this.handleOtpSuccess(phone, purpose);
+  }): Promise<
+    | { verified: boolean }
+    | { message: string; accessToken: string; refreshToken: string }
+  > {
+    const phone = verifyOtpDto.phoneNumber;
+    const purpose = (verifyOtpDto.purpose as OtpPurpose) || OtpPurpose.Login;
+    const codeHash = sha256Hex(verifyOtpDto.otp);
+    // State machine owned by OtpStore (Redis primary, PG fallback). The
+    // purpose for post-verification orchestration stays the verify call's
+    // (legacy: dto.purpose || Login), not the stored record's.
+    await this.otpStore.verifyAttempt(phone, codeHash, purpose);
+    return this.completeOtpVerification(phone, purpose);
   }
 
-  private async handleOtpSuccess(phone: string, purpose: OtpPurpose) {
-    const user = await this.findUserByPhone(phone);
+  /**
+   * Completes a verified OTP: marks the phone verified and either returns
+   * the verified flag (verify_phone purpose) or a fresh login pair.
+   *
+   * @param phone - Verified E.164 phone number.
+   * @param purpose - OTP purpose driving the post-verification branch.
+   * @returns Verified flag or login pair.
+   * @throws BadRequestException when no user owns the phone (login purpose).
+   */
+  private async completeOtpVerification(phone: string, purpose: OtpPurpose) {
+    const user = await this.usersService.findUserByPhone(phone);
     if (purpose === OtpPurpose.VerifyPhone) {
       if (user) {
-        await this.dataSource
-          .getRepository(User)
-          .update(user.id, { phoneVerified: true });
+        await this.usersService.setPhoneVerified(user.id);
       }
       return { verified: true };
     }
@@ -1106,143 +971,111 @@ export class AuthService {
       throw new BadRequestException('No user found with this phone number');
     }
     if (!target.phoneVerified) {
-      await this.dataSource
-        .getRepository(User)
-        .update(target.id, { phoneVerified: true });
+      await this.usersService.setPhoneVerified(target.id);
     }
     return this.login(target);
   }
 
-  private async findUserByPhone(phone: string): Promise<User | null> {
-    return await this.dataSource
-      .getRepository(User)
-      .findOne({ where: { phoneNumber: phone } });
-  }
-
-  private async incrementOtpAttempts(phone: string) {
-    try {
-      const repo = this.dataSource.getRepository(OtpVerification);
-      const rows = await repo.find({
-        where: { phoneNumber: phone },
-        order: { createdAt: 'DESC' },
-        take: 1,
-      });
-      if (rows[0]) {
-        rows[0].attempts += 1;
-        await repo.save(rows[0]);
-      }
-    } catch {
-      void 0;
-    }
-  }
-
-  private async markOtpVerified(phone: string, purpose: OtpPurpose) {
-    try {
-      const repo = this.dataSource.getRepository(OtpVerification);
-      const rows = await repo.find({
-        where: { phoneNumber: phone, purpose },
-        order: { createdAt: 'DESC' },
-        take: 1,
-      });
-      if (rows[0]) {
-        rows[0].verifiedAt = new Date();
-        rows[0].attempts += 1;
-        await repo.save(rows[0]);
-      }
-    } catch {
-      void 0;
-    }
-  }
-
-  private timingSafeEqual(a: string, b: string): boolean {
-    try {
-      const bufA = Buffer.from(a, 'utf8');
-      const bufB = Buffer.from(b, 'utf8');
-      if (bufA.length !== bufB.length) return false;
-      return crypto.timingSafeEqual(bufA, bufB);
-    } catch {
-      return a === b;
-    }
-  }
-
   // ============ Phase 16: Google OAuth ============ (Phase 17 extends to issue refresh)
-  async handleGoogleLogin(
-    profile: GoogleProfile,
-  ): Promise<{ user: User; accessToken: string; refreshToken: string }> {
+  /**
+   * Signs in with a verified Google profile: existing Google link returns,
+   * verified-email match auto-links, otherwise a Google user is created.
+   *
+   * @param profile - Verified Google profile (email, names, googleId).
+   * @returns User plus fresh access/refresh pair.
+   * @throws BadRequestException on unverified provider email.
+   */
+  async loginWithGoogle(profile: GoogleProfile): Promise<{
+    user: Partial<User>;
+    accessToken: string;
+    refreshToken: string;
+  }> {
     if (!profile.verified)
       throw new BadRequestException('Google email not verified');
-    const user = await this.usersService.findByGoogleId(profile.googleId);
-    if (user) {
-      const { accessToken, refreshToken } = await this.login(user);
-      return { user, accessToken, refreshToken };
+    const googleLinkedUser = await this.usersService.findByGoogleId(
+      profile.googleId,
+    );
+    if (googleLinkedUser) {
+      const { accessToken, refreshToken } = await this.login(googleLinkedUser);
+      return { user: googleLinkedUser, accessToken, refreshToken };
     }
     const existingByEmail = await this.usersService.findUserByEmail(
       profile.email,
     );
     if (existingByEmail) {
-      // auto-link per Q1
+      // auto-link per Q1 — write owned by UsersService (US2), 409 mapping kept here.
       try {
-        await this.dataSource.getRepository(User).update(existingByEmail.id, {
-          googleId: profile.googleId,
-          provider: AuthProvider.Google,
-        });
-      } catch (e: any) {
-        if (this.isUniqueViolation(e))
+        await this.usersService.linkGoogleAccount(
+          existingByEmail.id,
+          profile.googleId,
+        );
+      } catch (error: unknown) {
+        if (this.isUniqueViolation(error))
           throw new ConflictException('Google account already linked');
-        throw e;
+        throw error;
       }
       const updated = await this.usersService.findUserById(existingByEmail.id);
-      const { accessToken, refreshToken } = await this.login(updated as any);
+      const { accessToken, refreshToken } = await this.login(updated!);
       return { user: updated!, accessToken, refreshToken };
     }
-    const repo = this.dataSource.getRepository(User);
-    const created = repo.create({
-      email: profile.email,
-      firstName: profile.firstName || 'Google',
-      lastName: profile.lastName || 'User',
-      googleId: profile.googleId,
-      provider: AuthProvider.Google,
-      password: null,
-      phoneVerified: false,
-      emailVerified: profile.verified,
-    } as any);
-    let saved: User;
+    // Google-create owned by UsersService (US2): same fields, same 409 mapping.
+    let saved: Partial<User>;
     try {
-      saved = await repo.save(created as any);
-    } catch (e: any) {
-      if (this.isUniqueViolation(e))
+      saved = await this.usersService.createNewUser({
+        email: profile.email,
+        firstName: profile.firstName || 'Google',
+        lastName: profile.lastName || 'User',
+        googleId: profile.googleId,
+        provider: AuthProvider.Google,
+        password: null,
+        phoneVerified: false,
+        emailVerified: profile.verified,
+      });
+    } catch (error: unknown) {
+      if (
+        (error instanceof HttpException ||
+          error instanceof ConflictException ||
+          error instanceof BadRequestException) &&
+        this.isUniqueViolation(error)
+      )
         throw new ConflictException('Google account already linked');
-      throw e;
+      throw error;
     }
     const { accessToken, refreshToken } = await this.login(saved);
     return { user: saved, accessToken, refreshToken };
   }
 
-  private parseTtlMs(ttl: string): number {
-    // Support s/m/h/d suffixes (Phase 17 adds 'd' for 7d)
-    if (ttl.endsWith('m')) return parseInt(ttl, 10) * 60_000;
-    if (ttl.endsWith('s')) return parseInt(ttl, 10) * 1000;
-    if (ttl.endsWith('h')) return parseInt(ttl, 10) * 3600_000;
-    if (ttl.endsWith('d')) return parseInt(ttl, 10) * 24 * 3600_000;
-    // Numeric fallback (e.g., "604800000")
-    const numeric = parseInt(ttl, 10);
-    if (!isNaN(numeric) && String(numeric) === ttl) return numeric;
-    this.logger.warn(`Invalid TTL "${ttl}", fallback 15m`);
-    return 15 * 60_000;
-  }
+  /**
+   * Matches driver unique-violation errors (PG 23505, duplicate/unique text).
+   * Auth-domain 409 mapping stays with the orchestrator; stores never call it.
+   *
+   * @param error - Caught error from a persistence write.
+   * @returns True when the error is a unique-violation, false otherwise.
+   */
+  private isUniqueViolation(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
 
-  private isUniqueViolation(e: any): boolean {
-    const msg = e?.message || '';
-    const code = e?.code;
+    const code = 'code' in error ? error.code : undefined;
+    const message = error.message;
+
     return (
       code === '23505' ||
-      msg.includes('duplicate') ||
-      msg.includes('UNIQUE') ||
-      msg.includes('UQ_user_googleId') ||
-      msg.includes('unique')
+      message.includes('duplicate') ||
+      message.includes('UNIQUE') ||
+      message.includes('UQ_user_googleId') ||
+      message.includes('unique')
     );
   }
 
+  /**
+   * Links a Google identity to the current user (verified provider email only).
+   *
+   * @param userId - Owner user id (from the payload subject, S-1).
+   * @param profile - Verified Google profile.
+   * @returns The linked user.
+   * @throws BadRequestException on unverified email; ConflictException on
+   *   double-link.
+   */
   async linkGoogleAccount(
     userId: string,
     profile: GoogleProfile,
@@ -1252,15 +1085,13 @@ export class AuthService {
     const existing = await this.usersService.findByGoogleId(profile.googleId);
     if (existing && existing.id !== userId)
       throw new ConflictException('Google account already linked');
+    // Write owned by UsersService (US2); 409 mapping kept here.
     try {
-      await this.dataSource.getRepository(User).update(userId, {
-        googleId: profile.googleId,
-        provider: AuthProvider.Google,
-      });
-    } catch (e: any) {
-      if (this.isUniqueViolation(e))
+      await this.usersService.linkGoogleAccount(userId, profile.googleId);
+    } catch (error: unknown) {
+      if (this.isUniqueViolation(error))
         throw new ConflictException('Google account already linked');
-      throw e;
+      throw error;
     }
     return (await this.usersService.findUserById(userId))!;
   }

@@ -28,7 +28,7 @@ export class UserRegisterDto {
   email!: string;
 
   @IsNotEmpty()
-  @MinLength(4)
+  @MinLength(8)
   @ApiProperty({ example: 'Yasser@123' })
   password!: string;
 

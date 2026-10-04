@@ -46,6 +46,13 @@ export default class User {
 
   @Column({ type: 'varchar', nullable: true })
   @Index('IDX_user_phoneNumber')
+  // Partial unique mirrors migration 0000/0011 (UQ_user_phoneNumber WHERE
+  // "phoneNumber" IS NOT NULL): many NULLs allowed, one row per value.
+  // synchronize is off, so this emits no DDL — the migration owns it.
+  @Index('UQ_user_phoneNumber', {
+    unique: true,
+    where: '"phoneNumber" IS NOT NULL',
+  })
   phoneNumber!: string | null;
 
   @Column({ default: false })
@@ -53,6 +60,12 @@ export default class User {
 
   @Column({ type: 'varchar', nullable: true })
   @Index('IDX_user_googleId')
+  // Partial unique mirrors migration 0000/0011 (UQ_user_googleId WHERE
+  // "googleId" IS NOT NULL): many NULLs allowed, one row per value.
+  @Index('UQ_user_googleId', {
+    unique: true,
+    where: '"googleId" IS NOT NULL',
+  })
   googleId!: string | null;
 
   @Column({ type: 'enum', enum: AuthProvider, default: AuthProvider.Local })
@@ -66,6 +79,19 @@ export default class User {
 
   @Column({ default: false })
   emailVerified!: boolean;
+
+  // Single live email-verification token (1:1, folded from the
+  // email_verification_token table). Only one link is live at a time:
+  // issue overwrites these columns, verify consumes them. Never serialized
+  // to clients — SafeUserResponseDto excludes them by construction.
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  emailVerificationTokenHash!: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  emailVerificationExpiresAt!: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  emailVerificationUsedAt!: Date | null;
 
   @Column({ default: false })
   marketingOptIn!: boolean;

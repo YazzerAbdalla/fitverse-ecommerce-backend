@@ -50,6 +50,46 @@ const DEFAULT_LIMITS: Record<string, { max: number; windowMs: number }> = {
   'POST /admin/notifications/test-email': { max: 10, windowMs: 3600_000 },
 };
 
+/** Single fixed-window bucket resolved for a request. */
+interface RateLimitBucket {
+  routeKey: string;
+  dim: string;
+  value: string;
+  max: number;
+  windowMs: number;
+}
+
+/** Minimal request view used for route-key + dimension resolution. */
+interface RateLimitRequest {
+  method?: string;
+  path?: string;
+  route?: { path?: string };
+  headers?: Record<string, string | string[] | undefined>;
+  ip?: string;
+  user?: { sub?: string };
+  body?: Record<string, unknown>;
+  cookies?: Record<string, string>;
+}
+
+/** Minimal response view used for rate-limit headers. */
+interface RateLimitResponse {
+  setHeader(name: string, value: string): void;
+}
+
+/** 429 header carrier read by AllExceptionsFilter (HttpException exposes no options member). */
+interface RateLimitHeadersCarrier {
+  options?: { headers?: Record<string, string> };
+}
+
+/**
+ * Minimal typed surface of the cache used for fixed-window counters.
+ * cache-manager's Cache type exposes no set-with-TTL generically, so the
+ * single documented cast lives in `counterCache()` instead of at each call.
+ */
+interface RateLimitCounterCache {
+  set(key: string, value: number, ttlMs: number): Promise<unknown>;
+}
+
 /**
  * This guard is responsible for distributed per-route rate limiting (Redis shared, fail-open).
  * It handles IP and per-email/phone/user buckets via the shared CACHE_MANAGER (createKeyv REDIS_URL),
@@ -135,16 +175,16 @@ export class RateLimitGuard implements CanActivate {
           bucket.value,
         );
         const count = ((await this.cache.get<number>(key)) || 0) + 1;
-        await (this.cache as any).set(key, count, bucket.windowMs);
+        await this.counterCache().set(key, count, bucket.windowMs);
 
         if (count > bucket.max) {
-          throw this.tooMany(key, bucket.max, bucket.windowMs);
+          throw this.tooMany(bucket.max, bucket.windowMs);
         }
 
         // On success, set headers for primary bucket only (first)
         // to avoid overwriting; remaining reflects this bucket
         if (bucket === limits[0]) {
-          const res: any = this.extractResponse(context);
+          const res = this.extractResponse(context);
           if (res && typeof res.setHeader === 'function') {
             res.setHeader('X-RateLimit-Limit', String(bucket.max));
             res.setHeader(
@@ -171,11 +211,14 @@ export class RateLimitGuard implements CanActivate {
    * @param context - Execution context.
    * @returns Route key like `POST /auth/login` or `products:mutation`.
    */
-  private resolveRouteKey(req: any, context: ExecutionContext): string {
+  private resolveRouteKey(
+    req: RateLimitRequest,
+    context: ExecutionContext,
+  ): string {
     // GraphQL mutations: map to products:mutation bucket if field is product mutation
     try {
       const gqlCtx = GqlExecutionContext.create(context);
-      const info: any = gqlCtx.getInfo?.();
+      const info = gqlCtx.getInfo?.();
       const fieldName: string | undefined = info?.fieldName;
       const productMutations = new Set([
         'createProduct',
@@ -211,7 +254,7 @@ export class RateLimitGuard implements CanActivate {
 
     const raw = `${method} ${path}`.trim();
     // Direct match
-    if ((DEFAULT_LIMITS as any)[raw]) return raw;
+    if (DEFAULT_LIMITS[raw]) return raw;
     // Fallback for routeKey with method+path but path may be /order/checkout vs /order
     return raw;
   }
@@ -224,14 +267,8 @@ export class RateLimitGuard implements CanActivate {
    */
   private getLimitsForRoute(
     routeKey: string,
-    req: any,
-  ): Array<{
-    routeKey: string;
-    dim: string;
-    value: string;
-    max: number;
-    windowMs: number;
-  }> {
+    req: RateLimitRequest,
+  ): RateLimitBucket[] {
     const makeBucket = (
       rk: string,
       dim: string,
@@ -242,7 +279,7 @@ export class RateLimitGuard implements CanActivate {
 
     // Auth dual buckets handled separately
     if (routeKey === 'POST /auth/refresh') {
-      const buckets: any[] = [];
+      const buckets: RateLimitBucket[] = [];
       const ip = this.extractIp(req);
       const ipMax = this.getEffectiveMax(
         routeKey,
@@ -299,7 +336,7 @@ export class RateLimitGuard implements CanActivate {
       return [makeBucket(routeKey, dim, value, max, windowMs)];
     }
     if (routeKey === 'POST /auth/forgot-password') {
-      const buckets: any[] = [];
+      const buckets: RateLimitBucket[] = [];
       const ip = this.extractIp(req);
       const ipMax = this.getEffectiveMax(
         routeKey,
@@ -310,9 +347,10 @@ export class RateLimitGuard implements CanActivate {
         DEFAULT_LIMITS[routeKey].windowMs,
       );
       buckets.push(makeBucket(routeKey, 'ip', ip, ipMax, ipWin));
-      // per-email only if body.email present
-      if (req.body?.email) {
-        const email = String(req.body.email).toLowerCase();
+      // per-email only if body.email is a non-empty string (keys are strings;
+      // non-string garbage still counts the IP bucket, then 400s at validation)
+      if (typeof req.body?.email === 'string' && req.body.email) {
+        const email = req.body.email.toLowerCase();
         const emailKey = 'POST /auth/forgot-password:email';
         const emailMax = this.getEffectiveMax(
           emailKey,
@@ -327,9 +365,10 @@ export class RateLimitGuard implements CanActivate {
       return buckets;
     }
     if (routeKey === 'POST /auth/otp/request') {
-      const buckets: any[] = [];
+      const buckets: RateLimitBucket[] = [];
+      // per-phone only for string phones (same key-string rule as email above)
       const phone = req.body?.phoneNumber;
-      if (phone) {
+      if (typeof phone === 'string' && phone) {
         const phoneMax = this.getEffectiveMax(
           routeKey,
           DEFAULT_LIMITS[routeKey].max,
@@ -338,9 +377,7 @@ export class RateLimitGuard implements CanActivate {
           routeKey,
           DEFAULT_LIMITS[routeKey].windowMs,
         );
-        buckets.push(
-          makeBucket(routeKey, 'phone', String(phone), phoneMax, phoneWin),
-        );
+        buckets.push(makeBucket(routeKey, 'phone', phone, phoneMax, phoneWin));
       }
       const ip = this.extractIp(req);
       const ipKey = 'POST /auth/otp/request:ip';
@@ -353,7 +390,7 @@ export class RateLimitGuard implements CanActivate {
       return buckets;
     }
     if (routeKey === 'POST /auth/resend-verification') {
-      const buckets: any[] = [];
+      const buckets: RateLimitBucket[] = [];
       const ip = this.extractIp(req);
       const ipMax = this.getEffectiveMax(
         routeKey,
@@ -364,9 +401,9 @@ export class RateLimitGuard implements CanActivate {
         DEFAULT_LIMITS[routeKey].windowMs,
       );
       buckets.push(makeBucket(routeKey, 'ip', ip, ipMax, ipWin));
-      // Per-email bucket only when body.email present (dual-bucket: either 429 before FOR UPDATE)
-      if (req.body?.email) {
-        const email = String(req.body.email).toLowerCase();
+      // Per-email bucket only when body.email is a string (same key rule)
+      if (typeof req.body?.email === 'string' && req.body.email) {
+        const email = req.body.email.toLowerCase();
         const emailKey = 'POST /auth/resend-verification:email';
         const emailMax = this.getEffectiveMax(
           emailKey,
@@ -414,12 +451,22 @@ export class RateLimitGuard implements CanActivate {
     }
 
     // Standard single-bucket auth routes
-    const def = (DEFAULT_LIMITS as any)[routeKey];
+    const def = DEFAULT_LIMITS[routeKey];
     if (!def) return [];
     const ip = this.extractIp(req);
     const max = this.getEffectiveMax(routeKey, def.max);
     const windowMs = this.getEffectiveWindow(routeKey, def.windowMs);
     return [makeBucket(routeKey, 'ip', ip, max, windowMs)];
+  }
+
+  /**
+   * Typed view of the injected cache for fixed-window counters
+   * (single documented cast).
+   *
+   * @returns The cache as a counter port.
+   */
+  private counterCache(): RateLimitCounterCache {
+    return this.cache;
   }
 
   /**
@@ -442,11 +489,12 @@ export class RateLimitGuard implements CanActivate {
    * @param req - Request.
    * @returns IP string.
    */
-  private extractIp(req: any): string {
-    const header = req.headers?.['x-forwarded-for'] as string | undefined;
+  private extractIp(req: RateLimitRequest): string {
+    const header = req.headers?.['x-forwarded-for'];
     // x-forwarded-for may be "a,b,c" -> take first trimmed
-    if (header) {
-      const first = header.split(',')[0]?.trim();
+    const firstHeader = Array.isArray(header) ? header[0] : header;
+    if (firstHeader) {
+      const first = firstHeader.split(',')[0]?.trim();
       if (first) return first;
     }
     return req.ip || 'unknown';
@@ -457,10 +505,10 @@ export class RateLimitGuard implements CanActivate {
    * @param context - Execution context.
    * @returns Request object.
    */
-  private extractRequest(context: ExecutionContext): any {
+  private extractRequest(context: ExecutionContext): RateLimitRequest {
     try {
       const gqlCtx = GqlExecutionContext.create(context);
-      const gqlReq = gqlCtx.getContext()?.req;
+      const gqlReq = gqlCtx.getContext()?.req as RateLimitRequest | undefined;
       if (gqlReq) return gqlReq;
     } catch {
       // ignore
@@ -473,7 +521,7 @@ export class RateLimitGuard implements CanActivate {
    * @param context - Execution context.
    * @returns Response or null.
    */
-  private extractResponse(context: ExecutionContext): any {
+  private extractResponse(context: ExecutionContext): RateLimitResponse | null {
     try {
       const gqlCtx = GqlExecutionContext.create(context);
       const gqlCtxObj = gqlCtx.getContext();
@@ -482,7 +530,7 @@ export class RateLimitGuard implements CanActivate {
       // ignore
     }
     try {
-      return context.switchToHttp().getResponse();
+      return context.switchToHttp().getResponse<RateLimitResponse>();
     } catch {
       return null;
     }
@@ -596,22 +644,18 @@ export class RateLimitGuard implements CanActivate {
 
   /**
    * Creates 429 exception with B1 headers.
-   * @param _key - Key for logging (not used in header).
    * @param limit - Limit that was exceeded.
    * @param windowMs - Window for Retry-After.
    * @returns HttpException 429.
    */
-  private tooMany(
-    _key: string,
-    limit: number,
-    windowMs: number = 3600_000,
-  ): HttpException {
+  private tooMany(limit: number, windowMs: number = 3600_000): HttpException {
+    // Retry-After in seconds, rounded UP so the client never retries early.
     const retryAfter = String(Math.ceil(windowMs / 1000));
-    const ex: any = new HttpException(
+    const ex = new HttpException(
       'Too Many Requests',
       HttpStatus.TOO_MANY_REQUESTS,
     );
-    ex.options = {
+    (ex as unknown as RateLimitHeadersCarrier).options = {
       headers: {
         'Retry-After': retryAfter,
         'X-RateLimit-Limit': String(limit),

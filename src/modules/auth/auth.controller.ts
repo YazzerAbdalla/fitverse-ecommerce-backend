@@ -1,9 +1,19 @@
+/**
+ * Auth HTTP endpoints: transport, validation, cookies/headers, 429 shaping.
+ * No business logic, no persistence — delegates to AuthService.
+ *
+ * Responsibility (SRP): auth HTTP transport, nothing else.
+ * Used by: AuthModule (route registration).
+ * Depends on: AuthService, RateLimitGuard/GoogleAuthGuard,
+ *   AUTH_TOKEN_CONFIG (cookie shaping).
+ */
 import {
   Body,
   Controller,
   Get,
   HttpException,
   HttpStatus,
+  Inject,
   Post,
   Query,
   Req,
@@ -27,7 +37,6 @@ import { ValidateResetTokenDto } from './dto/validate-reset-token.dto';
 import { RequestOtpDto } from './dto/request-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RateLimitGuard } from './guards/rate-limit.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { RefreshTokenDto, LogoutDto } from './dto/refresh-token.dto';
@@ -35,6 +44,10 @@ import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { ConfigService } from '@nestjs/config';
 import { Auth } from './decorators/auth.decorator';
+import { AUTH_TOKEN_CONFIG } from './auth-token.config';
+import type { AuthTokenConfig } from './auth-token.config';
+import { VerificationCooldownError } from './verification-cooldown.error';
+import { GoogleProfile } from './strategies/google.strategy';
 
 /**
  * This controller exposes auth endpoints for register/login/refresh/logout and Google OAuth.
@@ -46,31 +59,23 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly configService: ConfigService,
+    @Inject(AUTH_TOKEN_CONFIG) private readonly tokenConfig: AuthTokenConfig,
   ) {}
 
   private getRefreshCookieName(): string {
-    return (
-      this.configService.get<string>('REFRESH_TOKEN_COOKIE_NAME') ||
-      'refresh_token'
-    );
+    return this.tokenConfig.refreshCookieName;
   }
 
   private getRefreshCookieOptions() {
-    const ttl = this.configService.get<string>('REFRESH_TOKEN_TTL') || '7d';
-    // Parse TTL to ms for maxAge (reuse parse logic — simple fallback 7d)
-    let maxAge = 7 * 24 * 3600 * 1000;
-    if (ttl.endsWith('d')) maxAge = parseInt(ttl, 10) * 24 * 3600 * 1000;
-    else if (ttl.endsWith('h')) maxAge = parseInt(ttl, 10) * 3600 * 1000;
-    else if (ttl.endsWith('m')) maxAge = parseInt(ttl, 10) * 60_000;
-    else if (ttl.endsWith('s')) maxAge = parseInt(ttl, 10) * 1000;
-    const secure =
-      this.configService.get<string>('REFRESH_TOKEN_COOKIE_SECURE') === 'true';
+    // Cookie lifetime tracks the refresh-token TTL from startup-resolved
+    // config (was triple-duplicated inline math; value-identical in all
+    // cases including the non-numeric-suffix quirk, proven by ports.spec).
     return {
       httpOnly: true,
-      secure,
+      secure: this.tokenConfig.refreshCookieSecure,
       sameSite: 'strict' as const,
       path: '/auth',
-      maxAge,
+      maxAge: this.tokenConfig.refreshTokenTtlMs,
     };
   }
 
@@ -81,8 +86,8 @@ export class AuthController {
     const bodyRaw = dto?.refreshToken;
     if (bodyRaw) return bodyRaw;
     const cookieName = this.getRefreshCookieName();
-    const cookies = (req as any).cookies || {};
-    if (cookies[cookieName]) return cookies[cookieName];
+    const cookies = req.cookies || {};
+    if (cookies[cookieName]) return cookies[cookieName] as string;
     // Fallback parse header manually if cookieParser not present
     const header = req.headers.cookie;
     if (header) {
@@ -98,32 +103,39 @@ export class AuthController {
   @Post('/register')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Register new user' })
-  @ApiResponse({ status: 201 })
+  @ApiBody({ type: UserRegisterDto })
+  @ApiResponse({ status: 201, description: 'User created' })
+  @ApiResponse({
+    status: 400,
+    description: 'Validation error / duplicate email',
+  })
+  @ApiResponse({ status: 409, description: 'Email conflict (race)' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
-  async register(@Body() userResgisterDto: UserRegisterDto) {
-    return await this.authService.register(userResgisterDto);
+  /** Registers a new user and triggers the verification email (fire-and-forget). */
+  async register(@Body() userRegisterDto: UserRegisterDto) {
+    return await this.authService.register(userRegisterDto);
   }
 
   @Post('/login')
   @UseGuards(RateLimitGuard, LocalAuthGuard)
   @ApiBody({ type: LoginDto })
   @ApiResponse({ status: 200, description: 'Login success with refresh' })
+  @ApiResponse({ status: 400, description: 'Validation error' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Logs in with password credentials; sets the HttpOnly refresh cookie. */
   async login(
     @Request() req: ExpressRequest & { user: Partial<User> },
     @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     const user: Partial<User> = req.user;
-    console.log('🚀 ~ AuthController ~ login ~ user:', user);
     const result = await this.authService.login(user);
-    console.log('🚀 ~ AuthController ~ login ~ result:', result);
 
     // Set HttpOnly refresh cookie for browser clients
     res.cookie(
@@ -137,10 +149,14 @@ export class AuthController {
   @Post('/forgot-password')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Request password reset (anti-enumeration)' })
+  @ApiBody({ type: ForgotPasswordDto })
+  @ApiResponse({ status: 200, description: 'Neutral success (always)' })
+  @ApiResponse({ status: 400, description: 'Validation error' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Requests a password reset (anti-enumeration: always the neutral success). */
   async forgotPassword(@Body() dto: ForgotPasswordDto) {
     await this.authService.requestPasswordReset(dto.email);
     return { message: 'If an account exists, a reset link has been sent.' };
@@ -149,10 +165,14 @@ export class AuthController {
   @Post('/validate-reset-token')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Validate reset token' })
+  @ApiBody({ type: ValidateResetTokenDto })
+  @ApiResponse({ status: 200, description: '{ valid: true }' })
+  @ApiResponse({ status: 400, description: 'Invalid token / validation error' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Advisory reset-token pre-check (non-authoritative UX helper). */
   async validateResetToken(@Body() dto: ValidateResetTokenDto) {
     await this.authService.validateResetToken(dto.email, dto.token);
     return { valid: true };
@@ -161,10 +181,14 @@ export class AuthController {
   @Post('/reset-password')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Reset password with token (single-use)' })
+  @ApiBody({ type: ResetPasswordDto })
+  @ApiResponse({ status: 200, description: 'Password reset' })
+  @ApiResponse({ status: 400, description: 'Invalid token / validation error' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Consumes a reset token and changes the password (single-use authority). */
   async resetPassword(@Body() dto: ResetPasswordDto) {
     await this.authService.resetPassword(dto);
     return { message: 'Password reset successful.' };
@@ -179,6 +203,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Verifies an email link token (query transport). */
   async verifyEmailGet(@Query() dto: VerifyEmailDto) {
     return await this.authService.verifyEmail(dto);
   }
@@ -186,12 +211,14 @@ export class AuthController {
   @Post('/verify-email')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Verify email via body' })
+  @ApiBody({ type: VerifyEmailDto })
   @ApiResponse({ status: 200, description: 'Email verified' })
   @ApiResponse({ status: 400, description: 'Invalid or expired token' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Verifies an email token (body transport). */
   async verifyEmailPost(@Body() dto: VerifyEmailDto) {
     return await this.authService.verifyEmail(dto);
   }
@@ -199,13 +226,37 @@ export class AuthController {
   @Post('/resend-verification')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Resend verification email (anti-enumeration)' })
+  @ApiBody({ type: ResendVerificationDto })
   @ApiResponse({ status: 200, description: 'Anti-enum message' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 60 or 3600',
   })
+  /** Resends verification honoring cooldown + anti-enumeration; renders 429 on cooldown. */
   async resendVerification(@Body() dto: ResendVerificationDto) {
-    return await this.authService.resendVerification(dto.email);
+    try {
+      return await this.authService.resendVerification(dto.email);
+    } catch (e) {
+      // T030: domain cooldown signal → identical 429 wire shape as before
+      // (status, body, Retry-After + rate-limit headers); nothing else changes.
+      if (e instanceof VerificationCooldownError) {
+        const ex = new HttpException(
+          'Too Many Requests',
+          HttpStatus.TOO_MANY_REQUESTS,
+          {
+            cause: {
+              headers: {
+                'Retry-After': String(e.retryAfterSec),
+                'X-RateLimit-Limit': '3',
+                'X-RateLimit-Remaining': '0',
+              },
+            },
+          },
+        );
+        throw ex;
+      }
+      throw e;
+    }
   }
 
   // TODO (Future) — WhatsApp OTP deferred per 2026-09-16, password-only login in V1
@@ -215,11 +266,14 @@ export class AuthController {
   @ApiOperation({
     summary: 'Request WhatsApp OTP (login / verify_phone) — TODO Future (501)',
   })
+  @ApiBody({ type: RequestOtpDto })
+  @ApiResponse({ status: 501, description: 'WhatsApp OTP not enabled' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
-  async requestOtp(
+  /** Deferred WhatsApp OTP request (501 until provider setup). */
+  requestOtp(
     @Body() _dto: RequestOtpDto,
     @CurrentUser() _user?: Partial<User>,
   ) {
@@ -233,11 +287,14 @@ export class AuthController {
   @Post('/otp/verify')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Verify WhatsApp OTP — TODO Future (501)' })
+  @ApiBody({ type: VerifyOtpDto })
+  @ApiResponse({ status: 501, description: 'WhatsApp OTP not enabled' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
-  async verifyOtp(@Body() _dto: VerifyOtpDto) {
+  /** Deferred WhatsApp OTP verify (501 until provider setup). */
+  verifyOtp(@Body() _dto: VerifyOtpDto) {
     throw new HttpException(
       'WhatsApp OTP not enabled — password login only. TODO future.',
       HttpStatus.NOT_IMPLEMENTED,
@@ -251,6 +308,7 @@ export class AuthController {
     summary:
       'Refresh accessToken via refreshToken (body or HttpOnly cookie) — rotation',
   })
+  @ApiBody({ type: RefreshTokenDto })
   @ApiResponse({ status: 200, description: 'Rotated pair' })
   @ApiResponse({ status: 401, description: 'Invalid or expired refresh token' })
   @ApiResponse({ status: 400, description: 'Validation error' })
@@ -258,13 +316,14 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Rotates a refresh token (body or cookie transport); sets the new cookie. */
   async refresh(
     @Body() dto: RefreshTokenDto,
     @Req() req: ExpressRequest,
     @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     const raw = this.resolveRefreshRaw(dto, req);
-    const result = await this.authService.refresh(raw as string);
+    const result = await this.authService.refresh(raw);
     res.cookie(
       this.getRefreshCookieName(),
       result.refreshToken,
@@ -282,11 +341,13 @@ export class AuthController {
   @Post('/logout')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Logout single refresh token (idempotent 200)' })
+  @ApiBody({ type: LogoutDto })
   @ApiResponse({ status: 200, description: 'Logged out' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Revokes one refresh token (idempotent success). */
   async logout(@Body() dto: LogoutDto, @Req() req: ExpressRequest) {
     const raw = this.resolveRefreshRaw(dto, req);
     await this.authService.logout(raw);
@@ -295,7 +356,7 @@ export class AuthController {
 
   @Post('/logout-all')
   @Auth()
-  @UseGuards(RateLimitGuard, JwtAuthGuard)
+  @UseGuards(RateLimitGuard)
   @ApiOperation({
     summary: 'Logout all sessions (tokenVersion++ + bulk revoke)',
   })
@@ -305,14 +366,18 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
-  async logoutAll(@CurrentUser() user: Partial<User>) {
-    await this.authService.logoutAll((user as any).id);
+  /** Revokes all sessions via tokenVersion++ plus bulk revoke. */
+  async logoutAll(@CurrentUser() user: Partial<User> & { sub: string }) {
+    // S-1: JwtGuard is the sole path, so the payload shape ({sub}) always holds.
+    const userId = user.sub;
+    await this.authService.logoutAll(userId);
     return { message: 'All sessions revoked' };
   }
 
   @Get('/google')
   @UseGuards(GoogleAuthGuard)
   @ApiOperation({ summary: 'Initiate Google OAuth (302)' })
+  /** Initiates Google OAuth (passport redirect). */
   async googleAuth() {}
 
   @Get('/google/callback')
@@ -322,12 +387,13 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  /** Completes Google OAuth; returns the pair plus refresh cookie. */
   async googleCallback(
-    @Request() req: ExpressRequest & { user: any },
+    @Request() req: ExpressRequest & { user: GoogleProfile },
     @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     const profile = req.user;
-    const result = await this.authService.handleGoogleLogin(profile);
+    const result = await this.authService.loginWithGoogle(profile);
     // Set refresh cookie same as login
     res.cookie(
       this.getRefreshCookieName(),
@@ -341,14 +407,20 @@ export class AuthController {
   }
 
   @Get('/google/link')
-  @UseGuards(JwtAuthGuard, GoogleAuthGuard)
+  @Auth()
+  @UseGuards(GoogleAuthGuard)
   @ApiOperation({ summary: 'Link Google to current user' })
+  /** Links the Google identity to the current user. */
   async googleLink(
-    @CurrentUser() user: Partial<User>,
-    @Request() req: ExpressRequest & { user: any },
+    @CurrentUser() user: Partial<User> & { sub: string },
+    @Request()
+    req: ExpressRequest & {
+      user: Partial<User> & { sub: string } & Partial<GoogleProfile>;
+    },
   ) {
-    const profile = req.user;
-    await this.authService.linkGoogleAccount((user as any).id, profile);
+    const profile = req.user as GoogleProfile;
+    // S-1: JwtGuard payload always carries sub (no entity-shape fallback).
+    await this.authService.linkGoogleAccount(user.sub, profile);
     return { message: 'Google linked.' };
   }
 }
