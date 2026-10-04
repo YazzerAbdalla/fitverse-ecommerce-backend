@@ -48,6 +48,7 @@ import { Auth } from './decorators/auth.decorator';
 import { AUTH_TOKEN_CONFIG } from './auth-token.config';
 import type { AuthTokenConfig } from './auth-token.config';
 import { VerificationCooldownError } from './stores/verification-token.store';
+import { GoogleProfile } from './strategies/google.strategy';
 
 /**
  * This controller exposes auth endpoints for register/login/refresh/logout and Google OAuth.
@@ -86,8 +87,8 @@ export class AuthController {
     const bodyRaw = dto?.refreshToken;
     if (bodyRaw) return bodyRaw;
     const cookieName = this.getRefreshCookieName();
-    const cookies = (req as any).cookies || {};
-    if (cookies[cookieName]) return cookies[cookieName];
+    const cookies = req.cookies || {};
+    if (cookies[cookieName]) return cookies[cookieName] as string;
     // Fallback parse header manually if cookieParser not present
     const header = req.headers.cookie;
     if (header) {
@@ -222,17 +223,19 @@ export class AuthController {
       // T030: domain cooldown signal → identical 429 wire shape as before
       // (status, body, Retry-After + rate-limit headers); nothing else changes.
       if (e instanceof VerificationCooldownError) {
-        const ex: any = new HttpException(
+        const ex = new HttpException(
           'Too Many Requests',
           HttpStatus.TOO_MANY_REQUESTS,
-        );
-        ex.options = {
-          headers: {
-            'Retry-After': String(e.retryAfterSec),
-            'X-RateLimit-Limit': '3',
-            'X-RateLimit-Remaining': '0',
+          {
+            cause: {
+              headers: {
+                'Retry-After': String(e.retryAfterSec),
+                'X-RateLimit-Limit': '3',
+                'X-RateLimit-Remaining': '0',
+              },
+            },
           },
-        };
+        );
         throw ex;
       }
       throw e;
@@ -251,7 +254,7 @@ export class AuthController {
     description: 'Too Many Requests — Retry-After: 3600',
   })
   /** Deferred WhatsApp OTP request (501 until provider setup). */
-  async requestOtp(
+  requestOtp(
     @Body() _dto: RequestOtpDto,
     @CurrentUser() _user?: Partial<User>,
   ) {
@@ -270,7 +273,7 @@ export class AuthController {
     description: 'Too Many Requests — Retry-After: 3600',
   })
   /** Deferred WhatsApp OTP verify (501 until provider setup). */
-  async verifyOtp(@Body() _dto: VerifyOtpDto) {
+  verifyOtp(@Body() _dto: VerifyOtpDto) {
     throw new HttpException(
       'WhatsApp OTP not enabled — password login only. TODO future.',
       HttpStatus.NOT_IMPLEMENTED,
@@ -341,10 +344,10 @@ export class AuthController {
     description: 'Too Many Requests — Retry-After: 3600',
   })
   /** Revokes all sessions via tokenVersion++ plus bulk revoke. */
-  async logoutAll(@CurrentUser() user: Partial<User>) {
+  async logoutAll(@CurrentUser() user: Partial<User> & { sub: string }) {
     // S-1: unified guard provides the payload shape ({sub, ...}); the entity
     // shape ({id}) existed only via the removed stacked JwtAuthGuard.
-    const userId = (user as any).sub ?? (user as any).id;
+    const userId = user.sub ?? user.id;
     await this.authService.logoutAll(userId);
     return { message: 'All sessions revoked' };
   }
@@ -364,7 +367,7 @@ export class AuthController {
   })
   /** Completes Google OAuth; returns the pair plus refresh cookie. */
   async googleCallback(
-    @Request() req: ExpressRequest & { user: any },
+    @Request() req: ExpressRequest & { user: GoogleProfile },
     @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     const profile = req.user;
@@ -386,15 +389,15 @@ export class AuthController {
   @ApiOperation({ summary: 'Link Google to current user' })
   /** Links the Google identity to the current user. */
   async googleLink(
-    @CurrentUser() user: Partial<User>,
-    @Request() req: ExpressRequest & { user: any },
+    @CurrentUser() user: Partial<User> & { sub: string },
+    @Request()
+    req: ExpressRequest & {
+      user: Partial<User> & { sub: string } & Partial<GoogleProfile>;
+    },
   ) {
-    const profile = req.user;
+    const profile = req.user as GoogleProfile;
     // S-1 companion: prefer payload sub; entity id only pre-unification.
-    await this.authService.linkGoogleAccount(
-      (user as any).sub ?? (user as any).id,
-      profile,
-    );
+    await this.authService.linkGoogleAccount(user.sub ?? user.id, profile);
     return { message: 'Google linked.' };
   }
 }

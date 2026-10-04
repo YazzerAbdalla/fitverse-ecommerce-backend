@@ -61,19 +61,20 @@ export class VerificationTokenStore {
    *   matching legacy which propagated).
    * @returns The winning raw token (first or collision-retry).
    */
-  async issue(
+  async newVerificationIssue(
     manager: EntityManager,
     userId: string,
     expiresAt: Date,
-    mint: () => { raw: string; hash: string },
+    rawHashPair: () => { raw: string; hash: string },
     isUniqueViolation: (e: unknown) => boolean,
     collisionRetry = true,
   ): Promise<string> {
-    const first = mint();
+    const first = rawHashPair();
     this.logger.debug(
       `verify store issue start userId=${userId} hashPrefix=${first.hash.slice(0, 6)}`,
     );
     // Invalidate prior active tokens so only one link is live at a time.
+    // DB-WRITE: single UPDATE statement (no SELECT) to avoid race conditions.
     await manager
       .createQueryBuilder()
       .update(EmailVerificationToken)
@@ -82,6 +83,7 @@ export class VerificationTokenStore {
       .execute();
     const repo = manager.getRepository(EmailVerificationToken);
     try {
+      // DB-WRITE: single INSERT statement (no SELECT) to avoid race conditions.
       await repo.save(
         repo.create({
           userId,
@@ -97,15 +99,13 @@ export class VerificationTokenStore {
       this.logger.warn(
         `EmailVerificationToken hash collision userId=${userId} hashPrefix=${first.hash.slice(0, 6)} retry once`,
       );
-      const retry = mint();
-      await repo.save(
-        repo.create({
-          userId,
-          tokenHash: retry.hash,
-          expiresAt,
-          usedAt: null,
-        }),
-      );
+      const retry = rawHashPair();
+      await repo.save({
+        userId,
+        tokenHash: retry.hash,
+        expiresAt,
+        usedAt: null,
+      });
       return retry.raw;
     }
   }
@@ -145,7 +145,7 @@ export class VerificationTokenStore {
    * @param token - Locked row to consume.
    * @returns Void.
    */
-  async consume(
+  async markTokenAsUsed(
     manager: EntityManager,
     token: EmailVerificationToken,
   ): Promise<void> {

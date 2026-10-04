@@ -6,9 +6,7 @@ import type { MigrationInterface, QueryRunner } from 'typeorm';
  * "User" (capital) while the actual table is "user" (lowercase), so that
  * migration can never execute and is recorded via --fake instead.
  */
-export class CreateRefreshTokenUserRefFix1755900000007
-  implements MigrationInterface
-{
+export class CreateRefreshTokenUserRefFix1755900000007 implements MigrationInterface {
   name = 'CreateRefreshTokenUserRefFix1755900000007';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

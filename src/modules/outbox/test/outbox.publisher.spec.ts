@@ -116,12 +116,10 @@ describe('OutboxPublisher publishBatch — claim PROCESSING → SENT', () => {
           addOrderBy: jest.fn().mockReturnThis(),
           limit: jest.fn().mockReturnThis(),
           setLock: jest.fn().mockReturnThis(),
-          setOnLocked: jest
-            .fn()
-            .mockImplementation((mode: any) => {
-              expect(mode).toBe('skip_locked');
-              return qb;
-            }),
+          setOnLocked: jest.fn().mockImplementation((mode: any) => {
+            expect(mode).toBe('skip_locked');
+            return qb;
+          }),
           getMany: jest.fn().mockResolvedValue([event]),
         };
         return qb;

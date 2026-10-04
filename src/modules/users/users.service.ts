@@ -224,7 +224,7 @@ export class UsersService {
    * @param data - User creation payload (incl. optional marketingOptIn/emailOptIn).
    * @returns The saved user.
    */
-  async createNewUser(data: any) {
+  async createNewUser(data: Partial<User>): Promise<User> {
     return await this.userRepo.save(data);
   }
 
