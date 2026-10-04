@@ -42,6 +42,7 @@ export class UsersService {
     email: string,
     manager?: EntityManager,
   ): Promise<User | null> {
+    this.logger.debug(`users findByEmail email=${email}`);
     const repo = manager ? manager.getRepository(User) : this.userRepo;
     return await repo.findOne({ where: { email } });
   }
@@ -56,6 +57,7 @@ export class UsersService {
     id: string,
     manager?: EntityManager,
   ): Promise<User | null> {
+    this.logger.debug(`users findById id=${id}`);
     const repo = manager ? manager.getRepository(User) : this.userRepo;
     return await repo.findOne({ where: { id } });
   }
@@ -108,6 +110,7 @@ export class UsersService {
     googleId: string,
     manager?: EntityManager,
   ): Promise<User | null> {
+    this.logger.debug(`users findByGoogleId`);
     const repo = manager ? manager.getRepository(User) : this.userRepo;
     return await repo.findOne({ where: { googleId } });
   }
@@ -122,6 +125,7 @@ export class UsersService {
     phoneNumber: string,
     manager?: EntityManager,
   ): Promise<User | null> {
+    this.logger.debug(`users findByPhone`);
     const repo = manager ? manager.getRepository(User) : this.userRepo;
     return await repo.findOne({ where: { phoneNumber } });
   }

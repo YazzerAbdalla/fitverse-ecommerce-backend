@@ -13,7 +13,7 @@ no wire/event/queue/env change unless the task says `[B]`/`[S]` + regression tes
   → A4 (secrets — done, see below)
   → A5 (DTO floors, contract [B] — done, see below)
   → A6 (partial uniques, schema [B] — done, see below)
-  → A8-residual (Swagger, docs-only, safe anytime)
+  → A8-residual (Swagger, docs-only — done, see below)
 ```
 
 Parallelizable: A8-residual anytime. Never parallelize: A6 migration with any
@@ -104,14 +104,21 @@ other migration work; A4 with release/deploy timing (changes boot behavior).
 
 ## A8-residual. Swagger + logging coverage (docs-only, safe anytime)
 
-- [ ] T-A8.1 Per-route `@ApiResponse`: `register` `400/409`, `login` `400`,
+- [x] T-A8.1 Per-route `@ApiResponse`: `register` `400/409`, `login` `400`,
   `forgot/reset/validate` `200/400`, OTP routes `501` as `ApiResponse`
   (today only in summary text), `@ApiBody` per POST. Swagger UI loads without
   errors; snapshot the new responses in `contracts/` if the repo keeps one.
-- [ ] T-A8.2 Skill §11 `debug` before every DB read/write in touched stores
+  **As-built:** also added `@ApiBody` to verify-POST/resend/refresh/logout
+  (full per-POST coverage); Swagger `createDocument` boot-proven (44 paths,
+  no errors; only body-less routes are `logout-all`/`order/:id/cancel`, which
+  take no `@Body()` by design).
+- [x] T-A8.2 Skill §11 `debug` before every DB read/write in touched stores
   (`RefreshTokenStore.findByHashForUpdate`, `PasswordResetTokenStore` lookups,
   `UsersService` finders) so duplicate reads are visible in logs.
-- [ ] T-A8.3 Confirm `docs/plan.md` §18 deltas reference the fold (columns vs
+  **As-built:** stores were already covered; added `debug` to the four plain
+  `UsersService` finders (`findUserByEmail/ById/ByGoogleId/ByPhone`, values
+  not logged for google/phone).
+- [x] T-A8.3 Confirm `docs/plan.md` §18 deltas reference the fold (columns vs
   table) — one paragraph, link ADR-0013. (The `specs/014-*` history files stay
   untouched: they record what was true at the time.)
 - **Done when:** Swagger covers every success/error status on touched routes;

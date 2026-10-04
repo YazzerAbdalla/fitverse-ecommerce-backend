@@ -103,7 +103,13 @@ export class AuthController {
   @Post('/register')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Register new user' })
-  @ApiResponse({ status: 201 })
+  @ApiBody({ type: UserRegisterDto })
+  @ApiResponse({ status: 201, description: 'User created' })
+  @ApiResponse({
+    status: 400,
+    description: 'Validation error / duplicate email',
+  })
+  @ApiResponse({ status: 409, description: 'Email conflict (race)' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
@@ -117,6 +123,7 @@ export class AuthController {
   @UseGuards(RateLimitGuard, LocalAuthGuard)
   @ApiBody({ type: LoginDto })
   @ApiResponse({ status: 200, description: 'Login success with refresh' })
+  @ApiResponse({ status: 400, description: 'Validation error' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({
     status: 429,
@@ -142,6 +149,9 @@ export class AuthController {
   @Post('/forgot-password')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Request password reset (anti-enumeration)' })
+  @ApiBody({ type: ForgotPasswordDto })
+  @ApiResponse({ status: 200, description: 'Neutral success (always)' })
+  @ApiResponse({ status: 400, description: 'Validation error' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
@@ -155,6 +165,9 @@ export class AuthController {
   @Post('/validate-reset-token')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Validate reset token' })
+  @ApiBody({ type: ValidateResetTokenDto })
+  @ApiResponse({ status: 200, description: '{ valid: true }' })
+  @ApiResponse({ status: 400, description: 'Invalid token / validation error' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
@@ -168,6 +181,9 @@ export class AuthController {
   @Post('/reset-password')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Reset password with token (single-use)' })
+  @ApiBody({ type: ResetPasswordDto })
+  @ApiResponse({ status: 200, description: 'Password reset' })
+  @ApiResponse({ status: 400, description: 'Invalid token / validation error' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
@@ -195,6 +211,7 @@ export class AuthController {
   @Post('/verify-email')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Verify email via body' })
+  @ApiBody({ type: VerifyEmailDto })
   @ApiResponse({ status: 200, description: 'Email verified' })
   @ApiResponse({ status: 400, description: 'Invalid or expired token' })
   @ApiResponse({
@@ -209,6 +226,7 @@ export class AuthController {
   @Post('/resend-verification')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Resend verification email (anti-enumeration)' })
+  @ApiBody({ type: ResendVerificationDto })
   @ApiResponse({ status: 200, description: 'Anti-enum message' })
   @ApiResponse({
     status: 429,
@@ -248,6 +266,8 @@ export class AuthController {
   @ApiOperation({
     summary: 'Request WhatsApp OTP (login / verify_phone) — TODO Future (501)',
   })
+  @ApiBody({ type: RequestOtpDto })
+  @ApiResponse({ status: 501, description: 'WhatsApp OTP not enabled' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
@@ -267,6 +287,8 @@ export class AuthController {
   @Post('/otp/verify')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Verify WhatsApp OTP — TODO Future (501)' })
+  @ApiBody({ type: VerifyOtpDto })
+  @ApiResponse({ status: 501, description: 'WhatsApp OTP not enabled' })
   @ApiResponse({
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
@@ -286,6 +308,7 @@ export class AuthController {
     summary:
       'Refresh accessToken via refreshToken (body or HttpOnly cookie) — rotation',
   })
+  @ApiBody({ type: RefreshTokenDto })
   @ApiResponse({ status: 200, description: 'Rotated pair' })
   @ApiResponse({ status: 401, description: 'Invalid or expired refresh token' })
   @ApiResponse({ status: 400, description: 'Validation error' })
@@ -318,6 +341,7 @@ export class AuthController {
   @Post('/logout')
   @UseGuards(RateLimitGuard)
   @ApiOperation({ summary: 'Logout single refresh token (idempotent 200)' })
+  @ApiBody({ type: LogoutDto })
   @ApiResponse({ status: 200, description: 'Logged out' })
   @ApiResponse({
     status: 429,
