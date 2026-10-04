@@ -127,6 +127,7 @@ describe('Auth Integration B7 - verifyEmail on User columns (real PG)', () => {
       const clock = new SystemClock();
       const tokenConfig: any = {
         emailVerificationTtlMs: 24 * 3600_000,
+        otpMaxAttempts: 3,
       };
 
       authService = new AuthService(
@@ -137,9 +138,9 @@ describe('Auth Integration B7 - verifyEmail on User columns (real PG)', () => {
         cacheMock,
         configService,
         whatsappMock,
-        new RefreshTokenStore(dataSource),
-        new PasswordResetTokenStore(dataSource),
-        new OtpStore(dataSource, cacheMock),
+        new RefreshTokenStore(dataSource, clock),
+        new PasswordResetTokenStore(dataSource, clock),
+        new OtpStore(dataSource, cacheMock, clock, tokenConfig),
         eventPublisher,
         clock,
         tokenConfig,

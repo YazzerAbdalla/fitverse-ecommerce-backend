@@ -119,6 +119,10 @@ describe('Auth Integration B7 - resendVerification overwrite + cooldown (real PG
         emit: jest.fn(async () => undefined),
       } as unknown as AuthEventPublisher;
       const clock = new SystemClock();
+      const tokenConfig = {
+        emailVerificationTtlMs: 24 * 3600_000,
+        otpMaxAttempts: 3,
+      } as any;
 
       authService = new AuthService(
         usersServiceMock,
@@ -128,12 +132,12 @@ describe('Auth Integration B7 - resendVerification overwrite + cooldown (real PG
         cacheMock,
         configService,
         whatsappMock,
-        new RefreshTokenStore(dataSource),
-        new PasswordResetTokenStore(dataSource),
-        new OtpStore(dataSource, cacheMock),
+        new RefreshTokenStore(dataSource, clock),
+        new PasswordResetTokenStore(dataSource, clock),
+        new OtpStore(dataSource, cacheMock, clock, tokenConfig),
         eventPublisher,
         clock,
-        { emailVerificationTtlMs: 24 * 3600_000 } as any,
+        tokenConfig,
       );
     } catch (e: any) {
       skip = true;
@@ -216,17 +220,15 @@ describe('Auth Integration B7 - resendVerification overwrite + cooldown (real PG
     );
 
     await authService.resendVerification(email);
-    const hashAfterFirst = (
-      await repo.findOneOrFail({ where: { email } })
-    ).emailVerificationTokenHash;
+    const hashAfterFirst = (await repo.findOneOrFail({ where: { email } }))
+      .emailVerificationTokenHash;
     // Immediate second hits the armed 60s cooldown — domain signal (the
     // controller renders the 429 wire shape), live hash untouched.
     await expect(authService.resendVerification(email)).rejects.toThrow(
       VerificationCooldownError,
     );
-    const hashAfterSecond = (
-      await repo.findOneOrFail({ where: { email } })
-    ).emailVerificationTokenHash;
+    const hashAfterSecond = (await repo.findOneOrFail({ where: { email } }))
+      .emailVerificationTokenHash;
     expect(hashAfterSecond).toBe(hashAfterFirst);
   });
 

@@ -1,3 +1,12 @@
+/**
+ * WhatsApp OTP delivery abstraction (provider-swappable, mockable in tests).
+ * V1 wires NoopWhatsAppProvider; Twilio/Meta are placeholders until
+ * WhatsApp Business setup (OTP endpoints return 501 meanwhile).
+ *
+ * Responsibility (SRP): OTP delivery contract + provider stubs, nothing else.
+ * Used by: AuthModule ('WHATSAPP_PROVIDER' token), AuthService OTP methods.
+ * Depends on: nothing.
+ */
 export interface WhatsAppProvider {
   sendOtp(
     phoneNumber: string,

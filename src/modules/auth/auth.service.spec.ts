@@ -92,23 +92,19 @@ describe('AuthService', () => {
       ),
       issueEmailVerificationToken: jest.fn(
         async (manager: any, userId: string, hash: string, exp: Date) => {
-          await manager
-            .getRepository({ name: 'User' })
-            .update(userId, {
-              emailVerificationTokenHash: hash,
-              emailVerificationExpiresAt: exp,
-              emailVerificationUsedAt: null,
-            });
+          await manager.getRepository({ name: 'User' }).update(userId, {
+            emailVerificationTokenHash: hash,
+            emailVerificationExpiresAt: exp,
+            emailVerificationUsedAt: null,
+          });
         },
       ),
       consumeEmailVerificationToken: jest.fn(
         async (manager: any, userId: string, now: Date) => {
-          await manager
-            .getRepository({ name: 'User' })
-            .update(userId, {
-              emailVerificationUsedAt: now,
-              emailVerified: true,
-            });
+          await manager.getRepository({ name: 'User' }).update(userId, {
+            emailVerificationUsedAt: now,
+            emailVerified: true,
+          });
         },
       ),
     };
@@ -224,7 +220,7 @@ describe('AuthService', () => {
         },
         {
           provide: OtpStore,
-          useValue: { issue: jest.fn(), verifyAttempt: jest.fn() },
+          useValue: { issueOtp: jest.fn(), verifyAttempt: jest.fn() },
         },
         { provide: AuthEventPublisher, useValue: eventPublisher },
         { provide: SystemClock, useValue: { now: () => new Date() } },
@@ -673,9 +669,7 @@ describe('AuthService', () => {
 
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
       // Single live-token overwrite on the user row
-      expect(
-        usersService.issueEmailVerificationToken,
-      ).toHaveBeenCalledTimes(1);
+      expect(usersService.issueEmailVerificationToken).toHaveBeenCalledTimes(1);
       const [managerArg, issuedUserId, issuedHash, issuedExp] =
         usersService.issueEmailVerificationToken.mock.calls[0];
       expect(managerArg).toBe(mockManager);
@@ -719,9 +713,7 @@ describe('AuthService', () => {
         emailVerified: true,
       });
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-      expect(
-        usersService.issueEmailVerificationToken,
-      ).toHaveBeenCalledTimes(1);
+      expect(usersService.issueEmailVerificationToken).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -866,9 +858,7 @@ describe('AuthService', () => {
         VerificationCooldownError,
       );
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(
-        usersService.issueEmailVerificationToken,
-      ).not.toHaveBeenCalled();
+      expect(usersService.issueEmailVerificationToken).not.toHaveBeenCalled();
     });
 
     it('not found → 200 anti-enum, 0 issue', async () => {
@@ -880,9 +870,7 @@ describe('AuthService', () => {
         message:
           'This email is not registered or already verified. If an account exists, a verification email has been sent.',
       });
-      expect(
-        usersService.issueEmailVerificationToken,
-      ).not.toHaveBeenCalled();
+      expect(usersService.issueEmailVerificationToken).not.toHaveBeenCalled();
     });
 
     it('verified true → 200 distinct, 0 issue', async () => {
@@ -892,9 +880,7 @@ describe('AuthService', () => {
       });
       const res = await service.resendVerification(user.email);
       expect(res).toEqual({ message: 'Email already verified' });
-      expect(
-        usersService.issueEmailVerificationToken,
-      ).not.toHaveBeenCalled();
+      expect(usersService.issueEmailVerificationToken).not.toHaveBeenCalled();
     });
 
     it('unverified → overwrite live hash + 24h + emit + cooldown set', async () => {
@@ -905,9 +891,7 @@ describe('AuthService', () => {
         message: 'If an account exists, a verification email has been sent.',
       });
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-      expect(usersService.issueEmailVerificationToken).toHaveBeenCalledTimes(
-        1,
-      );
+      expect(usersService.issueEmailVerificationToken).toHaveBeenCalledTimes(1);
       const issuedHash =
         usersService.issueEmailVerificationToken.mock.calls[0][2];
       expect(issuedHash).toMatch(/^[a-f0-9]{64}$/);

@@ -52,6 +52,14 @@ export interface AuthTokenConfig {
 
 const warnedKeys = new Set<string>();
 
+/**
+ * Warns once per missing/invalid key (startup noise control).
+ *
+ * @param logger - Logger for the fallback notice.
+ * @param key - Config key that fell back.
+ * @param fallback - Fallback value in effect.
+ * @returns Void.
+ */
 function warnOnce(logger: Logger, key: string, fallback: string | number) {
   // Warn-once: repeated resolutions must not spam logs on every request.
   if (warnedKeys.has(key)) return;
@@ -64,6 +72,15 @@ export function resetAuthTokenConfigWarnings(): void {
   warnedKeys.clear();
 }
 
+/**
+ * Reads a string key with warn-once fallback (empty counts as missing).
+ *
+ * @param config - Nest ConfigService.
+ * @param logger - Logger for the fallback notice.
+ * @param key - Config key.
+ * @param fallback - Default when missing/empty.
+ * @returns Configured value or fallback.
+ */
 function readString(
   config: ConfigService,
   logger: Logger,
@@ -78,6 +95,16 @@ function readString(
   return raw;
 }
 
+/**
+ * Reads an int key with min-clamp and warn-once fallback.
+ *
+ * @param config - Nest ConfigService.
+ * @param logger - Logger for the fallback notice.
+ * @param key - Config key.
+ * @param fallback - Default when missing/non-numeric/below min.
+ * @param min - Minimum accepted value.
+ * @returns Configured value or fallback.
+ */
 function readInt(
   config: ConfigService,
   logger: Logger,
@@ -156,6 +183,15 @@ export function resolveAuthTokenConfig(
   });
 }
 
+/**
+ * Reads a duration key (suffix s/m/h/d or plain ms) with warn-once fallback.
+ *
+ * @param config - Nest ConfigService.
+ * @param logger - Logger for the fallback notice.
+ * @param key - Config key.
+ * @param fallbackMs - Default milliseconds when missing/unparsable.
+ * @returns Duration in milliseconds.
+ */
 function readDurationMs(
   config: ConfigService,
   logger: Logger,

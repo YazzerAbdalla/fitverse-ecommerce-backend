@@ -4,11 +4,12 @@
  *
  * Responsibility (SRP): reset-token persistence, nothing else.
  * Used by: AuthService (requestPasswordReset/validateResetToken/resetPassword).
- * Depends on: DataSource, PasswordResetToken entity.
+ * Depends on: DataSource, PasswordResetToken entity, Clock (use instants).
  */
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 import { PasswordResetToken } from '../entities/password-reset-token.entity';
+import { SystemClock } from '../../../common/clock';
 
 /**
  * This store is responsible for password-reset-token persistence mechanics.
@@ -16,7 +17,7 @@ import { PasswordResetToken } from '../entities/password-reset-token.entity';
  *
  * Responsibility (SRP): reset-token persistence, nothing else.
  * Used by: AuthService (requestPasswordReset/validateResetToken/resetPassword).
- * Depends on: DataSource (repositories).
+ * Depends on: DataSource (repositories), Clock.
  *
  * Transaction rule: manager-scoped methods participate in the caller's unit
  * and never commit. validate stays a plain read (S-2 advisory); only consume
@@ -26,7 +27,10 @@ import { PasswordResetToken } from '../entities/password-reset-token.entity';
 export class PasswordResetTokenStore {
   private readonly logger = new Logger(PasswordResetTokenStore.name);
 
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly clock: SystemClock,
+  ) {}
 
   /**
    * Issues a token: invalidates priors, then inserts the new row.
@@ -49,7 +53,7 @@ export class PasswordResetTokenStore {
     await manager
       .createQueryBuilder()
       .update(PasswordResetToken)
-      .set({ usedAt: new Date() })
+      .set({ usedAt: this.clock.now() })
       .where('userId = :userId AND "usedAt" IS NULL AND "expiresAt" > NOW()', {
         userId,
       })
@@ -118,12 +122,12 @@ export class PasswordResetTokenStore {
   ): Promise<void> {
     this.logger.debug(`reset store consume start id=${token.id}`);
     const repo = manager.getRepository(PasswordResetToken);
-    await repo.update(token.id, { usedAt: new Date() });
+    await repo.update(token.id, { usedAt: this.clock.now() });
     // invalidate other active tokens
     await manager
       .createQueryBuilder()
       .update(PasswordResetToken)
-      .set({ usedAt: new Date() })
+      .set({ usedAt: this.clock.now() })
       .where('userId = :userId AND id != :id AND "usedAt" IS NULL', {
         userId,
         id: token.id,

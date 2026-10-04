@@ -42,7 +42,7 @@ import { PasswordResetTokenStore } from './stores/password-reset-token.store';
 import { RefreshTokenStore } from './stores/refresh-token.store';
 import { VerificationCooldownError } from './verification-cooldown.error';
 import { GoogleProfile } from './strategies/google.strategy';
-import { JwtPayloadProps } from './types';
+import { JwtPayload } from './types';
 
 /**
  * Minimal Redis counter surface behind the cache-manager Keyv escape hatch.
@@ -108,6 +108,15 @@ export class AuthService {
   public lastVerificationToken?: string;
   public lastOtp?: string;
 
+  /**
+   * Registers a new local user and fires the verification email after commit.
+   * The response never carries credential material (D3 + B6 SafeUser shape).
+   *
+   * @param userRegisterDto - Validated registration payload.
+   * @returns Message plus the client-safe user projection.
+   * @throws BadRequestException on duplicate email; ConflictException or
+   *   InternalServerErrorException passthrough from user creation.
+   */
   async register(userRegisterDto: UserRegisterDto) {
     const { email, password } = userRegisterDto;
     this.logger.debug(`Register attempt for ${email}`);
@@ -134,8 +143,11 @@ export class AuthService {
       this.logger.log(
         `New user with email ${email} had registered successfuly`,
       );
-    } catch (e: any) {
-      if (e instanceof ConflictException || e instanceof BadRequestException) {
+    } catch (error: unknown) {
+      if (
+        error instanceof ConflictException ||
+        error instanceof BadRequestException
+      ) {
         this.logger.error(
           'The email is already exist, please use another email',
         );
@@ -144,7 +156,7 @@ export class AuthService {
         );
       }
 
-      if (e instanceof InternalServerErrorException) {
+      if (error instanceof InternalServerErrorException) {
         this.logger.error('Internal server error while creating new user');
         throw new InternalServerErrorException(
           'Internal server error while creating new user',
@@ -154,10 +166,11 @@ export class AuthService {
 
     // Fire-and-forget verification email after commit — never blocks 201 (spec FR-005, edge: DB down after User commit)
     this.requestEmailVerification(savedUser!).catch(
-      (e: InternalServerErrorException) => {
+      (error: InternalServerErrorException) => {
         // Registration already committed; recovery via POST /auth/resend-verification
         this.logger.error(
-          `requestEmailVerification after register failed email=${email}: ${e?.message ?? e}`,
+          `requestEmailVerification after register failed email=${email}:`,
+          error,
         );
       },
     );
@@ -198,13 +211,22 @@ export class AuthService {
     return null;
   }
 
-  async login(user: Partial<User>) {
-    const { id, email, firstName, lastName, role, tokenVersion } = user;
+  /**
+   * Logs in with validated credentials (local strategy validated first).
+   * Issues the short-lived access token plus a capped single-use-rotation
+   * refresh token.
+   *
+   * @param loginPrincipal - Validated user row (password already checked).
+   * @returns Message plus the access/refresh pair.
+   */
+  async login(loginPrincipal: Partial<User>) {
+    const { id, email, firstName, lastName, role, tokenVersion } =
+      loginPrincipal;
 
     const fullName = firstName + ' ' + lastName;
 
     // Create the accessToken payload with tokenVersion for revocation
-    const payload: JwtPayloadProps = {
+    const payload: JwtPayload = {
       sub: id,
       email,
       fullName,
@@ -212,7 +234,7 @@ export class AuthService {
       tokenVersion: typeof tokenVersion === 'number' ? tokenVersion : 0,
     };
 
-    const accessToken = await this.jwtService.signAsync(payload as any);
+    const accessToken = await this.jwtService.signAsync(payload);
 
     // Issue refresh token (Phase 17)
     const refreshToken = await this.createRefreshTokenForUser(id!);
@@ -260,9 +282,9 @@ export class AuthService {
 
     try {
       await this.refreshTokens.create({ userId, tokenHash, expiresAt });
-    } catch (e: any) {
+    } catch (error: unknown) {
       // Handle partial unique collision (prob negligible) — retry once
-      if (this.isUniqueViolation(e)) {
+      if (this.isUniqueViolation(error)) {
         this.logger.warn(
           `Refresh tokenHash collision userId=${userId} retry once`,
         );
@@ -275,18 +297,19 @@ export class AuthService {
         });
         return retryRaw;
       }
-      throw e;
+      throw error;
     }
     return raw;
   }
 
   /**
    * Refreshes accessToken using opaque refresh token with single-use rotation.
-   * @param rawRefresh - Raw 64 hex refresh token from body or cookie.
+   * @param rawRefresh - Raw 64 hex refresh token from body or cookie
+   *   (undefined when neither transport carried one → 401, same as garbage).
    * @returns New pair {accessToken, refreshToken} and emailVerified flag.
    * @throws UnauthorizedException if invalid/expired/revoked.
    */
-  async refresh(rawRefresh: string): Promise<{
+  async refresh(rawRefresh: string | undefined): Promise<{
     accessToken: string;
     refreshToken: string;
     emailVerified: boolean;
@@ -301,7 +324,7 @@ export class AuthService {
     const tokenHash = sha256Hex(rawRefresh);
     const prefix = tokenHash.slice(0, 6);
 
-    let result: {
+    let rotatedPair: {
       accessToken: string;
       refreshToken: string;
       emailVerified: boolean;
@@ -309,31 +332,34 @@ export class AuthService {
 
     await this.dataSource.transaction(async (manager) => {
       // FOR UPDATE lookup — single-winner serialization (store-owned).
-      const found = await this.refreshTokens.findByHashForUpdate(
+      const foundRefreshToken = await this.refreshTokens.findByHashForUpdate(
         manager,
         tokenHash,
       );
 
       // Not found → 401 (no userId, no theft nuke)
-      if (!found) {
+      if (!foundRefreshToken) {
         throw new UnauthorizedException('Invalid or expired refresh token');
       }
 
       // Load user through the users boundary (US2: no direct user repo here).
-      const user = await this.usersService.findUserById(found.userId, manager);
-      if (!user) {
+      const refreshUser = await this.usersService.findUserById(
+        foundRefreshToken.userId,
+        manager,
+      );
+      if (!refreshUser) {
         throw new UnauthorizedException('Invalid or expired refresh token');
       }
 
       // Revoked already → theft detection (reuse of rotated token)
       // This is single-use rotation: old token should be revokedAt NOT NULL after first refresh
-      if (found.revokedAt) {
+      if (foundRefreshToken.revokedAt) {
         // Theft: revoke all remaining active tokens for this user (outside rows already revoked)
         // Do bulk revoke before throwing 401 — must be observable.
         // Store-owned own-tx nuke (B5): the 401 below rolls the outer tx back.
-        await this.refreshTokens.revokeAllActive(found.userId);
+        await this.refreshTokens.revokeAllActive(foundRefreshToken.userId);
         this.logger.warn(
-          `refresh reuse theft detected userId=${found.userId} hashPrefix=${prefix}`,
+          `refresh reuse theft detected userId=${foundRefreshToken.userId} hashPrefix=${prefix}`,
         );
         // Optional theft counter (best-effort, fail-open, observability only).
         // cache-manager exposes no incr; reach the ioredis client via the
@@ -358,28 +384,28 @@ export class AuthService {
 
       // Expired → 401 (no theft nuke, no bulk revoke)
       // expiresAt <= now is expired
-      if (found.expiresAt.getTime() <= Date.now()) {
+      if (foundRefreshToken.expiresAt.getTime() <= this.clock.now().getTime()) {
         throw new UnauthorizedException('Invalid or expired refresh token');
       }
 
       // Active branch — rotate: revoke old + insert new + sign new accessToken
       // Revoke old token
-      await this.refreshTokens.revokeById(manager, found.id);
+      await this.refreshTokens.revokeById(manager, foundRefreshToken.id);
 
       // Cap 5 LRU before insert — count active excluding the just-revoked old.
       const activeCount = await this.refreshTokens.countActive(
-        found.userId,
+        foundRefreshToken.userId,
         manager,
       );
       if (activeCount >= 5) {
         const oldest = await this.refreshTokens.findOldestActive(
-          found.userId,
+          foundRefreshToken.userId,
           manager,
         );
-        if (oldest && oldest.id !== found.id) {
+        if (oldest && oldest.id !== foundRefreshToken.id) {
           await this.refreshTokens.revokeById(manager, oldest.id);
           this.logger.log(
-            `Refresh cap evicted oldest on rotation userId=${found.userId} tokenId=${oldest.id}`,
+            `Refresh cap evicted oldest on rotation userId=${foundRefreshToken.userId} tokenId=${oldest.id}`,
           );
         }
       }
@@ -391,7 +417,7 @@ export class AuthService {
       );
       await this.refreshTokens.create(
         {
-          userId: found.userId,
+          userId: foundRefreshToken.userId,
           tokenHash: newHash,
           expiresAt: newExpiresAt,
         },
@@ -399,40 +425,42 @@ export class AuthService {
       );
 
       // Sign new accessToken with current tokenVersion
-      const payload: JwtPayloadProps = {
-        sub: user.id,
-        email: user.email,
-        fullName: `${user.firstName} ${user.lastName}`,
-        role: user.role,
+      const payload: JwtPayload = {
+        sub: refreshUser.id,
+        email: refreshUser.email,
+        fullName: `${refreshUser.firstName} ${refreshUser.lastName}`,
+        role: refreshUser.role,
         tokenVersion:
-          typeof user.tokenVersion === 'number' ? user.tokenVersion : 0,
+          typeof refreshUser.tokenVersion === 'number'
+            ? refreshUser.tokenVersion
+            : 0,
       };
-      const newAccessToken = await this.jwtService.signAsync(payload as any);
+      const newAccessToken = await this.jwtService.signAsync(payload);
 
       // Determine emailVerified for header
-      const emailVerified = !!user.emailVerified;
+      const emailVerified = !!refreshUser.emailVerified;
 
       if (!emailVerified) {
         this.logger.warn(
-          `refresh unverified email userId=${user.id} hashPrefix=${prefix}`,
+          `refresh unverified email userId=${refreshUser.id} hashPrefix=${prefix}`,
         );
       } else {
         this.logger.log(
-          `refresh rotated userId=${user.id} hashPrefix=${prefix} -> newPrefix=${newHash.slice(0, 6)}`,
+          `refresh rotated userId=${refreshUser.id} hashPrefix=${prefix} -> newPrefix=${newHash.slice(0, 6)}`,
         );
       }
 
-      result = {
+      rotatedPair = {
         accessToken: newAccessToken,
         refreshToken: newRaw,
         emailVerified,
       };
     });
 
-    if (!result) {
+    if (!rotatedPair) {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
-    return result;
+    return rotatedPair;
   }
 
   /**
@@ -463,15 +491,15 @@ export class AuthService {
   async logoutAll(userId: string): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
       // Locked read + nuke owned by UsersService (US2); same lock, same 404.
-      const user = await this.usersService.findUserByIdForUpdate(
+      const lockedUser = await this.usersService.findUserByIdForUpdate(
         manager,
         userId,
       );
-      if (!user) throw new UnauthorizedException('User not found');
+      if (!lockedUser) throw new UnauthorizedException('User not found');
       // Increment tokenVersion atomically
       await this.usersService.incrementTokenVersion(userId, {
         manager,
-        passwordChangedAt: new Date(),
+        passwordChangedAt: this.clock.now(),
       });
       // Bulk revoke all active refresh tokens (commits with this tx — no
       // rollback follows here, so the in-tx variant applies).
@@ -531,18 +559,20 @@ export class AuthService {
         'auth.password_reset_requested',
         resetPayload,
       );
-    } catch (e: any) {
+    } catch (error: unknown) {
       // Fire-and-forget after commit — 200 anti-enum already decided, never throw to caller
       if (
-        e instanceof InternalServerErrorException ||
-        e instanceof HttpException
+        error instanceof InternalServerErrorException ||
+        error instanceof HttpException
       ) {
         return this.logger.error(
-          `Failed to emit password reset event email=${email}: ${e?.message ?? e}`,
+          `Failed to emit password reset event email=${email}:`,
+          error,
         );
       }
       this.logger.error(
-        `Failed to emit password reset event email=${email}: ${e}`,
+        `Failed to emit password reset event email=${email}:`,
+        error,
       );
     }
   }
@@ -559,7 +589,11 @@ export class AuthService {
     const tokenHash = sha256Hex(rawToken);
     // Advisory read (S-2): no lock, UX pre-check only.
     const token = await this.resetTokens.findAdvisory(tokenHash, user.id);
-    if (!token || token.usedAt || token.expiresAt.getTime() <= Date.now()) {
+    if (
+      !token ||
+      token.usedAt ||
+      token.expiresAt.getTime() <= this.clock.now().getTime()
+    ) {
       throw new BadRequestException('Invalid or expired token.');
     }
     return user;
@@ -571,17 +605,19 @@ export class AuthService {
    * transaction holding FOR UPDATE — validateResetToken's answer is advisory
    * only. Single-winner under concurrency (second consume 400s).
    */
-  async resetPassword(dto: {
+  async resetPassword(resetPasswordDto: {
     email: string;
     token: string;
     newPassword: string;
   }): Promise<void> {
-    if (dto.newPassword === dto.email) {
+    if (resetPasswordDto.newPassword === resetPasswordDto.email) {
       throw new BadRequestException('Password must not equal email');
     }
-    const user = await this.usersService.findUserByEmail(dto.email);
+    const user = await this.usersService.findUserByEmail(
+      resetPasswordDto.email,
+    );
     if (!user) throw new BadRequestException('Invalid or expired token.');
-    const tokenHash = sha256Hex(dto.token);
+    const tokenHash = sha256Hex(resetPasswordDto.token);
 
     await this.dataSource.transaction(async (manager) => {
       // S-2 authority: revalidated under FOR UPDATE (store-owned lookup).
@@ -597,16 +633,19 @@ export class AuthService {
       ) {
         throw new BadRequestException('Invalid or expired token.');
       }
-      const hashed = await bcrypt.hash(dto.newPassword, this.saltOrRounds);
+      const hashed = await bcrypt.hash(
+        resetPasswordDto.newPassword,
+        this.saltOrRounds,
+      );
       // Password write owned by UsersService (US2): same hash + increment +
       // passwordChangedAt, inside this transaction.
       await this.usersService.updatePassword(user.id, hashed, undefined, {
         manager,
-        passwordChangedAt: new Date(),
+        passwordChangedAt: this.clock.now(),
       });
       await this.resetTokens.consume(manager, token, user.id);
     });
-    this.logger.log(`Password reset successful for ${dto.email}`);
+    this.logger.log(`Password reset successful for ${resetPasswordDto.email}`);
   }
 
   // ============ Phase 18 (014 US1/US2): Email verification ============
@@ -635,7 +674,8 @@ export class AuthService {
       return !!existing;
     } catch (error: unknown) {
       this.logger.warn(
-        `Resend cooldown check fail-open for ${normalizedEmail}: ${(error as Error)?.message ?? error}`,
+        `Resend cooldown check fail-open for ${normalizedEmail}:`,
+        error,
       );
       return false;
     }
@@ -657,7 +697,8 @@ export class AuthService {
       ).set(key, '1', this.resendCooldownMs);
     } catch (error: unknown) {
       this.logger.warn(
-        `Resend cooldown set fail-open for ${normalizedEmail}: ${(error as Error)?.message ?? error}`,
+        `Resend cooldown set fail-open for ${normalizedEmail}:`,
+        error,
       );
     }
   }
@@ -837,17 +878,17 @@ export class AuthService {
    * @throws BadRequestException on missing/invalid phone or unsupported purpose.
    */
   async requestWhatsAppOtp(
-    dto: { phoneNumber?: string; purpose?: OtpPurpose },
+    requestOtpDto: { phoneNumber?: string; purpose?: OtpPurpose },
     currentUser?: Partial<User>,
   ): Promise<{ expiresIn: number }> {
-    let phone = dto.phoneNumber;
+    let phone = requestOtpDto.phoneNumber;
     if (!phone && currentUser?.phoneNumber) phone = currentUser.phoneNumber;
 
     if (!phone) throw new BadRequestException('phoneNumber is required');
     const e164 = /^\+[1-9]\d{1,14}$/;
     if (!e164.test(phone))
       throw new BadRequestException('Invalid phoneNumber, must be E.164');
-    const purpose = (dto.purpose as OtpPurpose) || OtpPurpose.Login;
+    const purpose = (requestOtpDto.purpose as OtpPurpose) || OtpPurpose.Login;
     if ((purpose as unknown as string) === 'reset_password') {
       throw new BadRequestException(
         'purpose reset_password not supported in V1',
@@ -861,7 +902,7 @@ export class AuthService {
     // State owned by OtpStore (cooldown gate, Redis record, PG audit).
     // Provider send stays here: external I/O after state, fail-open.
     const user = phone ? await this.usersService.findUserByPhone(phone) : null;
-    await this.otpStore.issue(
+    await this.otpStore.issueOtp(
       phone,
       purpose,
       { codeHash, expiresAt },
@@ -874,8 +915,8 @@ export class AuthService {
         otp,
         Math.round(ttlMs / 60000),
       );
-    } catch (e) {
-      this.logger.error(`WhatsApp send failed for ${phone}: ${e}`);
+    } catch (error: unknown) {
+      this.logger.error(`WhatsApp send failed for ${phone}:`, error);
     }
     return { expiresIn: Math.round(ttlMs / 1000) };
   }
@@ -888,22 +929,34 @@ export class AuthService {
    * @returns Verification result or fresh login pair (purpose-dependent).
    * @throws BadRequestException on invalid/expired OTP or too many attempts.
    */
-  async verifyWhatsAppOtp(dto: {
+  async verifyWhatsAppOtp(verifyOtpDto: {
     phoneNumber: string;
     otp: string;
     purpose?: OtpPurpose;
-  }): Promise<any> {
-    const phone = dto.phoneNumber;
-    const purpose = (dto.purpose as OtpPurpose) || OtpPurpose.Login;
-    const codeHash = sha256Hex(dto.otp);
+  }): Promise<
+    | { verified: boolean }
+    | { message: string; accessToken: string; refreshToken: string }
+  > {
+    const phone = verifyOtpDto.phoneNumber;
+    const purpose = (verifyOtpDto.purpose as OtpPurpose) || OtpPurpose.Login;
+    const codeHash = sha256Hex(verifyOtpDto.otp);
     // State machine owned by OtpStore (Redis primary, PG fallback). The
     // purpose for post-verification orchestration stays the verify call's
     // (legacy: dto.purpose || Login), not the stored record's.
     await this.otpStore.verifyAttempt(phone, codeHash, purpose);
-    return this.handleOtpSuccess(phone, purpose);
+    return this.completeOtpVerification(phone, purpose);
   }
 
-  private async handleOtpSuccess(phone: string, purpose: OtpPurpose) {
+  /**
+   * Completes a verified OTP: marks the phone verified and either returns
+   * the verified flag (verify_phone purpose) or a fresh login pair.
+   *
+   * @param phone - Verified E.164 phone number.
+   * @param purpose - OTP purpose driving the post-verification branch.
+   * @returns Verified flag or login pair.
+   * @throws BadRequestException when no user owns the phone (login purpose).
+   */
+  private async completeOtpVerification(phone: string, purpose: OtpPurpose) {
     const user = await this.usersService.findUserByPhone(phone);
     if (purpose === OtpPurpose.VerifyPhone) {
       if (user) {
@@ -932,17 +985,19 @@ export class AuthService {
    * @returns User plus fresh access/refresh pair.
    * @throws BadRequestException on unverified provider email.
    */
-  async handleGoogleLogin(profile: GoogleProfile): Promise<{
+  async loginWithGoogle(profile: GoogleProfile): Promise<{
     user: Partial<User>;
     accessToken: string;
     refreshToken: string;
   }> {
     if (!profile.verified)
       throw new BadRequestException('Google email not verified');
-    const user = await this.usersService.findByGoogleId(profile.googleId);
-    if (user) {
-      const { accessToken, refreshToken } = await this.login(user);
-      return { user, accessToken, refreshToken };
+    const googleLinkedUser = await this.usersService.findByGoogleId(
+      profile.googleId,
+    );
+    if (googleLinkedUser) {
+      const { accessToken, refreshToken } = await this.login(googleLinkedUser);
+      return { user: googleLinkedUser, accessToken, refreshToken };
     }
     const existingByEmail = await this.usersService.findUserByEmail(
       profile.email,
@@ -954,10 +1009,10 @@ export class AuthService {
           existingByEmail.id,
           profile.googleId,
         );
-      } catch (e: any) {
-        if (this.isUniqueViolation(e))
+      } catch (error: unknown) {
+        if (this.isUniqueViolation(error))
           throw new ConflictException('Google account already linked');
-        throw e;
+        throw error;
       }
       const updated = await this.usersService.findUserById(existingByEmail.id);
       const { accessToken, refreshToken } = await this.login(updated!);
@@ -976,20 +1031,27 @@ export class AuthService {
         phoneVerified: false,
         emailVerified: profile.verified,
       });
-    } catch (e: any) {
+    } catch (error: unknown) {
       if (
-        (e instanceof HttpException ||
-          e instanceof ConflictException ||
-          e instanceof BadRequestException) &&
-        this.isUniqueViolation(e)
+        (error instanceof HttpException ||
+          error instanceof ConflictException ||
+          error instanceof BadRequestException) &&
+        this.isUniqueViolation(error)
       )
         throw new ConflictException('Google account already linked');
-      throw e;
+      throw error;
     }
     const { accessToken, refreshToken } = await this.login(saved);
     return { user: saved, accessToken, refreshToken };
   }
 
+  /**
+   * Matches driver unique-violation errors (PG 23505, duplicate/unique text).
+   * Auth-domain 409 mapping stays with the orchestrator; stores never call it.
+   *
+   * @param error - Caught error from a persistence write.
+   * @returns True when the error is a unique-violation, false otherwise.
+   */
   private isUniqueViolation(error: unknown): boolean {
     if (!(error instanceof Error)) return false;
 
@@ -1026,10 +1088,10 @@ export class AuthService {
     // Write owned by UsersService (US2); 409 mapping kept here.
     try {
       await this.usersService.linkGoogleAccount(userId, profile.googleId);
-    } catch (e: any) {
-      if (this.isUniqueViolation(e))
+    } catch (error: unknown) {
+      if (this.isUniqueViolation(error))
         throw new ConflictException('Google account already linked');
-      throw e;
+      throw error;
     }
     return (await this.usersService.findUserById(userId))!;
   }

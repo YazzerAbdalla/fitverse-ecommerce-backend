@@ -22,11 +22,11 @@ import { JwtGuard } from '../guards/jwt.guard';
 import { RolesGuard } from '../guards/roles.guard';
 import { JwtStrategy } from '../strategies/jwt.strategy';
 import { UserRoles } from '../../users/enum/roles';
-import { JwtPayloadProps } from '../types';
+import { JwtPayload } from '../types';
 
 // Revoked-version fixture: token was issued at version 0, user has since been
 // bumped to version 1 (logout-all / reset-password `tokenVersion++`).
-const REVOKED_PAYLOAD: JwtPayloadProps = {
+const REVOKED_PAYLOAD: JwtPayload = {
   sub: 'user-1',
   email: 'alice@example.com',
   fullName: 'Alice Test',

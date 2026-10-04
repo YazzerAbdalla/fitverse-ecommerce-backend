@@ -19,6 +19,8 @@ import {
   OtpVerification,
   OtpPurpose,
 } from '../entities/otp-verification.entity';
+import { SystemClock } from '../../../common/clock';
+import { AUTH_TOKEN_CONFIG, type AuthTokenConfig } from '../auth-token.config';
 
 /** OTP cache record shape (Redis `otp:whatsapp:<phone>`). */
 export interface OtpCacheRecord {
@@ -27,6 +29,17 @@ export interface OtpCacheRecord {
   createdAt: number;
   expiresAt: number;
   purpose: OtpPurpose;
+}
+
+/**
+ * Minimal typed surface of the cache used for OTP state.
+ * cache-manager's Cache type exposes no get/set/del generically, so the
+ * single documented cast lives in `cachePort()` instead of at every call.
+ */
+export interface OtpCachePort {
+  get(key: string): Promise<OtpCacheRecord | null | undefined>;
+  set(key: string, value: unknown, ttlMs: number): Promise<unknown>;
+  del(key: string): Promise<unknown>;
 }
 
 /**
@@ -47,10 +60,24 @@ export interface OtpCacheRecord {
 export class OtpStore {
   private readonly logger = new Logger(OtpStore.name);
 
+  // OTP resend cooldown: 60s per phone (Redis SET, fail-open, ms unit).
+  private readonly otpCooldownMs = 60_000;
+
   constructor(
     private readonly dataSource: DataSource,
     @Inject(CACHE_MANAGER) private readonly cache: Cache,
+    private readonly clock: SystemClock,
+    @Inject(AUTH_TOKEN_CONFIG) private readonly tokenConfig: AuthTokenConfig,
   ) {}
+
+  /**
+   * Typed view of the injected cache (single documented cast).
+   *
+   * @returns The cache as get/set/del port.
+   */
+  private cachePort(): OtpCachePort {
+    return this.cache;
+  }
 
   /**
    * Issues an OTP: cooldown gate, Redis record + cooldown arm, PG audit row.
@@ -65,7 +92,7 @@ export class OtpStore {
    * @throws BadRequestException when the 60s cooldown is active.
    * @returns Void.
    */
-  async issue(
+  async issueOtp(
     phone: string,
     purpose: OtpPurpose,
     minted: { codeHash: string; expiresAt: Date },
@@ -78,31 +105,29 @@ export class OtpStore {
     // swallowed and issuance always proceeds. Changing that is out of scope.
     const cooldownKey = `otp:cooldown:${phone}`;
     try {
-      const exists = await (
-        this.cache as unknown as {
-          get(k: string): Promise<unknown>;
-        }
-      ).get(cooldownKey);
+      const exists = await this.cachePort().get(cooldownKey);
       if (exists)
         throw new BadRequestException(
           'Resend cooldown active, try in 60 seconds',
         );
-    } catch (e) {
-      this.logger.warn(`Redis cooldown check fail-open: ${e}`);
+    } catch (error: unknown) {
+      this.logger.warn(`Redis cooldown check fail-open:`, error);
     }
     const cacheKey = `otp:whatsapp:${phone}`;
+    // Record instants in ms since epoch (matches expiresAt arithmetic below).
+    const nowMs = this.clock.now().getTime();
     const record: OtpCacheRecord = {
       hash: minted.codeHash,
       attempts: 0,
-      createdAt: Date.now(),
+      createdAt: nowMs,
       expiresAt: minted.expiresAt.getTime(),
       purpose,
     };
     try {
-      await (this.cache as any).set(cacheKey, record, ttlMs);
-      await (this.cache as any).set(cooldownKey, '1', 60_000);
-    } catch (e) {
-      this.logger.warn(`Redis set fail-open: ${e}`);
+      await this.cachePort().set(cacheKey, record, ttlMs);
+      await this.cachePort().set(cooldownKey, '1', this.otpCooldownMs);
+    } catch (error: unknown) {
+      this.logger.warn(`Redis set fail-open:`, error);
     }
     // persist to PG
     try {
@@ -118,8 +143,8 @@ export class OtpStore {
           verifiedAt: null,
         } as never),
       );
-    } catch (e) {
-      this.logger.warn(`PG OtpVerification save failed: ${e}`);
+    } catch (error: unknown) {
+      this.logger.warn(`PG OtpVerification save failed:`, error);
     }
   }
 
@@ -142,22 +167,28 @@ export class OtpStore {
     let redisData: OtpCacheRecord | null = null;
     let redisAvailable = true;
     try {
-      redisData = await (this.cache as any).get(cacheKey);
-    } catch (e) {
+      redisData = (await this.cachePort().get(cacheKey)) ?? null;
+    } catch (error: unknown) {
       redisAvailable = false;
-      this.logger.warn(`Redis get fail-open, fallback to DB: ${e}`);
+      this.logger.warn(`Redis get fail-open, fallback to DB:`, error);
     }
+
+    // Max attempts from startup config (was hardcoded 3, drifted from OTP_MAX_ATTEMPTS).
+    const maxAttempts = this.tokenConfig.otpMaxAttempts;
+    // Now in ms since epoch (single clock read per attempt).
+    const nowMs = this.clock.now().getTime();
 
     // Redis path
     if (redisAvailable && redisData) {
       // increment attempts on every attempt per B2 choice B
       redisData.attempts = (redisData.attempts || 0) + 1;
-      const attemptsOk = redisData.attempts <= 3;
-      const notExpired = redisData.expiresAt > Date.now();
+      const attemptsOk = redisData.attempts <= maxAttempts;
+      // Expiry compare in ms: record expiresAt is ms-since-epoch.
+      const notExpired = redisData.expiresAt > nowMs;
       const hashOk = timingSafeEqual(redisData.hash, codeHash);
       if (!notExpired) {
         try {
-          await (this.cache as any).del(cacheKey);
+          await this.cachePort().del(cacheKey);
         } catch {
           // best-effort delete — absence is fail-open safe
         }
@@ -165,7 +196,7 @@ export class OtpStore {
       }
       if (!attemptsOk) {
         try {
-          await (this.cache as any).del(cacheKey);
+          await this.cachePort().del(cacheKey);
         } catch {
           // best-effort delete — absence is fail-open safe
         }
@@ -173,10 +204,11 @@ export class OtpStore {
       }
       if (!hashOk) {
         try {
-          await (this.cache as any).set(
+          // Remaining TTL in ms (record expiry minus now, never negative).
+          await this.cachePort().set(
             cacheKey,
             redisData,
-            redisData.expiresAt - Date.now(),
+            Math.max(redisData.expiresAt - nowMs, 0),
           );
         } catch {
           // best-effort persist — absence is fail-open safe
@@ -187,7 +219,7 @@ export class OtpStore {
       }
       // success: delete Redis, update PG audit scoped to the calling purpose
       try {
-        await (this.cache as any).del(cacheKey);
+        await this.cachePort().del(cacheKey);
       } catch {
         void 0;
       }
@@ -197,25 +229,29 @@ export class OtpStore {
 
     // Fallback DB path (Q4)
     const repo = this.dataSource.getRepository(OtpVerification);
-    const latest = await repo.find({
+    const latestOtpRows = await repo.find({
       where: { phoneNumber: phone },
       order: { createdAt: 'DESC' },
       take: 1,
     });
-    const row = latest[0];
-    if (!row || row.verifiedAt || row.expiresAt.getTime() <= Date.now()) {
+    const latestOtpRow = latestOtpRows[0];
+    if (
+      !latestOtpRow ||
+      latestOtpRow.verifiedAt ||
+      latestOtpRow.expiresAt.getTime() <= nowMs
+    ) {
       throw new BadRequestException('Invalid or expired OTP');
     }
     // increment attempts on every attempt per B2
-    row.attempts += 1;
-    await repo.save(row);
-    if (row.attempts > 3)
+    latestOtpRow.attempts += 1;
+    await repo.save(latestOtpRow);
+    if (latestOtpRow.attempts > maxAttempts)
       throw new BadRequestException('Too many attempts, request new OTP');
-    if (!timingSafeEqual(row.codeHash, codeHash)) {
+    if (!timingSafeEqual(latestOtpRow.codeHash, codeHash)) {
       throw new BadRequestException('Invalid or expired OTP');
     }
-    row.verifiedAt = new Date();
-    await repo.save(row);
+    latestOtpRow.verifiedAt = this.clock.now();
+    await repo.save(latestOtpRow);
     return;
   }
 
@@ -228,14 +264,14 @@ export class OtpStore {
   private async incrementAttempts(phone: string): Promise<void> {
     try {
       const repo = this.dataSource.getRepository(OtpVerification);
-      const rows = await repo.find({
+      const candidateOtpRows = await repo.find({
         where: { phoneNumber: phone },
         order: { createdAt: 'DESC' },
         take: 1,
       });
-      if (rows[0]) {
-        rows[0].attempts += 1;
-        await repo.save(rows[0]);
+      if (candidateOtpRows[0]) {
+        candidateOtpRows[0].attempts += 1;
+        await repo.save(candidateOtpRows[0]);
       }
     } catch {
       // best-effort audit — absence is fail-open safe
@@ -255,15 +291,15 @@ export class OtpStore {
   ): Promise<void> {
     try {
       const repo = this.dataSource.getRepository(OtpVerification);
-      const rows = await repo.find({
+      const candidateOtpRows = await repo.find({
         where: { phoneNumber: phone, purpose },
         order: { createdAt: 'DESC' },
         take: 1,
       });
-      if (rows[0]) {
-        rows[0].verifiedAt = new Date();
-        rows[0].attempts += 1;
-        await repo.save(rows[0]);
+      if (candidateOtpRows[0]) {
+        candidateOtpRows[0].verifiedAt = this.clock.now();
+        candidateOtpRows[0].attempts += 1;
+        await repo.save(candidateOtpRows[0]);
       }
     } catch {
       void 0;

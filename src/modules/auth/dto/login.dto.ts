@@ -2,6 +2,9 @@
 import { IsEmail, IsString } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
+/**
+ * Password-login credentials (LocalAuthGuard pre-validates before passport).
+ */
 export class LoginDto {
   @ApiProperty({
     example: 'yasser@gmail.com',

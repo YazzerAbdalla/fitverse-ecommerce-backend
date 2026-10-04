@@ -110,8 +110,8 @@ export class AuthController {
     description: 'Too Many Requests — Retry-After: 3600',
   })
   /** Registers a new user and triggers the verification email (fire-and-forget). */
-  async register(@Body() userResgisterDto: UserRegisterDto) {
-    return await this.authService.register(userResgisterDto);
+  async register(@Body() userRegisterDto: UserRegisterDto) {
+    return await this.authService.register(userRegisterDto);
   }
 
   @Post('/login')
@@ -301,7 +301,7 @@ export class AuthController {
     @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     const raw = this.resolveRefreshRaw(dto, req);
-    const result = await this.authService.refresh(raw as string);
+    const result = await this.authService.refresh(raw);
     res.cookie(
       this.getRefreshCookieName(),
       result.refreshToken,
@@ -371,7 +371,7 @@ export class AuthController {
     @Res({ passthrough: true }) res: ExpressResponse,
   ) {
     const profile = req.user;
-    const result = await this.authService.handleGoogleLogin(profile);
+    const result = await this.authService.loginWithGoogle(profile);
     // Set refresh cookie same as login
     res.cookie(
       this.getRefreshCookieName(),

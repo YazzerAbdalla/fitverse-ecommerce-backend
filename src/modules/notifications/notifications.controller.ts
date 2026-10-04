@@ -17,7 +17,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import type { JwtPayloadProps } from '../auth/types';
+import type { JwtPayload } from '../auth/types';
 import { RateLimitGuard } from '../auth/guards/rate-limit.guard';
 import { UserRoles } from '../users/enum/roles';
 import { CreateSalesNotificationDto } from './dto/create-sales-notification.dto';
@@ -64,7 +64,7 @@ export class NotificationsController {
   })
   async enqueueSales(
     @Body() dto: CreateSalesNotificationDto,
-    @CurrentUser() actor: JwtPayloadProps,
+    @CurrentUser() actor: JwtPayload,
   ): Promise<{ jobId: string; message: string }> {
     const { jobId } = await this.notificationService.sendSalesCampaign(
       dto,
@@ -133,7 +133,7 @@ export class NotificationsController {
   @ApiResponse({ status: 403, description: 'Forbidden — non-owner scope' })
   async listHistory(
     @Query() query: NotificationHistoryQueryDto,
-    @CurrentUser() user: JwtPayloadProps,
+    @CurrentUser() user: JwtPayload,
   ): Promise<{ data: Notification[]; meta: Record<string, number> }> {
     // Admin may scope another inbox via ?userId=; non-Admin scoping another user is forbidden
     const targetUserId =
@@ -185,7 +185,7 @@ export class NotificationsController {
   @ApiResponse({ status: 200, description: 'Unread count' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   async unreadCount(
-    @CurrentUser() user: JwtPayloadProps,
+    @CurrentUser() user: JwtPayload,
   ): Promise<{ unreadCount: number }> {
     // Filtered count on (userId, isRead=false) uses IDX_notification_userId_isRead
     const unreadCount = await this.dataSource
@@ -205,9 +205,7 @@ export class NotificationsController {
   @ApiOperation({ summary: 'Mark all notifications as read' })
   @ApiResponse({ status: 200, description: 'Bulk read receipt' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async readAll(
-    @CurrentUser() user: JwtPayloadProps,
-  ): Promise<{ updated: number }> {
+  async readAll(@CurrentUser() user: JwtPayload): Promise<{ updated: number }> {
     // Single UPDATE scopes to the owner inbox only — Admin reads others via :id/read with assertOwner
     const result = await this.dataSource
       .createQueryBuilder()
@@ -236,7 +234,7 @@ export class NotificationsController {
   @ApiResponse({ status: 404, description: 'Notification not found' })
   async markRead(
     @Param('id') id: string,
-    @CurrentUser() user: JwtPayloadProps,
+    @CurrentUser() user: JwtPayload,
   ): Promise<{ id: string; isRead: boolean; readAt: Date | null }> {
     return this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(Notification);

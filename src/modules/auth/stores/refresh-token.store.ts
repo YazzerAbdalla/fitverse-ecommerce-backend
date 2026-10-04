@@ -4,11 +4,12 @@
  *
  * Responsibility (SRP): refresh-token persistence, nothing else.
  * Used by: AuthService (login/refresh/logout/logout-all orchestration).
- * Depends on: DataSource, RefreshToken entity.
+ * Depends on: DataSource, RefreshToken entity, Clock (revocation instants).
  */
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
 import { RefreshToken } from '../entities/refresh-token.entity';
+import { SystemClock } from '../../../common/clock';
 
 /**
  * This store is responsible for refresh-token persistence mechanics.
@@ -17,7 +18,7 @@ import { RefreshToken } from '../entities/refresh-token.entity';
  *
  * Responsibility (SRP): refresh-token persistence, nothing else.
  * Used by: AuthService (login/refresh/logout/logout-all orchestration).
- * Depends on: DataSource (repositories + one documented own-tx nuke).
+ * Depends on: DataSource (repositories + one documented own-tx nuke), Clock.
  *
  * Transaction rule: every method takes effect in the CALLER's unit of work.
  * Manager-scoped methods participate in the ambient transaction and never
@@ -29,8 +30,17 @@ import { RefreshToken } from '../entities/refresh-token.entity';
 export class RefreshTokenStore {
   private readonly logger = new Logger(RefreshTokenStore.name);
 
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly clock: SystemClock,
+  ) {}
 
+  /**
+   * Resolves the RefreshToken repository for the ambient unit of work.
+   *
+   * @param manager - Tx-scoped manager when inside a transaction.
+   * @returns The tx-scoped or ambient repository.
+   */
   private repo(manager?: EntityManager): Repository<RefreshToken> {
     return manager
       ? manager.getRepository(RefreshToken)
@@ -72,7 +82,7 @@ export class RefreshTokenStore {
     id: string,
   ): Promise<void> {
     this.logger.debug(`refresh store revoke start id=${id}`);
-    await this.repo(manager).update(id, { revokedAt: new Date() });
+    await this.repo(manager).update(id, { revokedAt: this.clock.now() });
   }
 
   /**
@@ -146,7 +156,7 @@ export class RefreshTokenStore {
     await this.dataSource
       .createQueryBuilder()
       .update(RefreshToken)
-      .set({ revokedAt: new Date() })
+      .set({ revokedAt: this.clock.now() })
       .where('tokenHash = :tokenHash AND "revokedAt" IS NULL', { tokenHash })
       .execute();
   }
@@ -165,7 +175,7 @@ export class RefreshTokenStore {
     await manager
       .createQueryBuilder()
       .update(RefreshToken)
-      .set({ revokedAt: new Date() })
+      .set({ revokedAt: this.clock.now() })
       .where('userId = :userId AND "revokedAt" IS NULL', { userId })
       .execute();
   }
@@ -183,7 +193,7 @@ export class RefreshTokenStore {
     await this.dataSource
       .createQueryBuilder()
       .update(RefreshToken)
-      .set({ revokedAt: new Date() })
+      .set({ revokedAt: this.clock.now() })
       .where('userId = :userId AND "revokedAt" IS NULL', { userId })
       .execute();
   }

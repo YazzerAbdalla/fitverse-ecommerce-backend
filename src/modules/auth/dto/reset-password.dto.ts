@@ -1,6 +1,9 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsEmail, IsString, MaxLength, MinLength } from 'class-validator';
 
+/**
+ * Single-use password reset (token consumed under FOR UPDATE; 8-72 chars).
+ */
 export class ResetPasswordDto {
   @IsEmail()
   @ApiProperty({ example: 'alice@example.com' })

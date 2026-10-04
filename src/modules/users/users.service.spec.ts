@@ -105,7 +105,8 @@ describe('UsersService', () => {
     );
   });
 
-  it('incrementTokenVersion increments with optional stamp (US2)', async () => {    await service.incrementTokenVersion('u1');
+  it('incrementTokenVersion increments with optional stamp (US2)', async () => {
+    await service.incrementTokenVersion('u1');
     const [, first] = userRepo.update.mock.calls[0];
     expect(typeof first.tokenVersion).toBe('function');
     expect(first.passwordChangedAt).toBeUndefined();
@@ -143,7 +144,12 @@ describe('UsersService', () => {
       getRepository: jest.fn().mockReturnValue({ update: repoUpdate }),
     };
     const exp = new Date('2026-03-03');
-    await service.issueEmailVerificationToken(manager, 'u1', 'h'.repeat(64), exp);
+    await service.issueEmailVerificationToken(
+      manager,
+      'u1',
+      'h'.repeat(64),
+      exp,
+    );
     expect(manager.getRepository).toHaveBeenCalled();
     expect(repoUpdate).toHaveBeenCalledWith('u1', {
       emailVerificationTokenHash: 'h'.repeat(64),

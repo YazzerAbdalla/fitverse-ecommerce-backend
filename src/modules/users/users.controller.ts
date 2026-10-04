@@ -17,7 +17,7 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import type { JwtPayloadProps } from '../auth/types';
+import type { JwtPayload } from '../auth/types';
 import { UpdatePreferencesDto } from './dto/update-preferences.dto';
 import { toSafeUser } from './dto/safe-user-response.dto';
 import { UsersService } from './users.service';
@@ -44,7 +44,7 @@ export class UsersController {
   @ApiResponse({ status: 200, description: 'Own user with preference flags' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 404, description: 'User not found' })
-  async getMe(@CurrentUser() user: JwtPayloadProps) {
+  async getMe(@CurrentUser() user: JwtPayload) {
     const userId = user?.sub;
     if (!userId) {
       throw new UnauthorizedException();

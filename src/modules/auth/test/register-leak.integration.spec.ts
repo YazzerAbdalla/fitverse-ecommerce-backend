@@ -131,12 +131,7 @@ describe('Register leak baseline T005/D3 - real PG', () => {
             .getOne(),
         ),
         issueEmailVerificationToken: jest.fn(
-          async (
-            m: any,
-            userId: string,
-            tokenHash: string,
-            expiresAt: Date,
-          ) =>
+          async (m: any, userId: string, tokenHash: string, expiresAt: Date) =>
             await m.getRepository(User).update(userId, {
               emailVerificationTokenHash: tokenHash,
               emailVerificationExpiresAt: expiresAt,
@@ -162,9 +157,11 @@ describe('Register leak baseline T005/D3 - real PG', () => {
         cacheMock,
         configService,
         whatsappMock,
-        new RefreshTokenStore(dataSource),
-        new PasswordResetTokenStore(dataSource),
-        new OtpStore(dataSource, cacheMock),
+        new RefreshTokenStore(dataSource, new SystemClock()),
+        new PasswordResetTokenStore(dataSource, new SystemClock()),
+        new OtpStore(dataSource, cacheMock, new SystemClock(), {
+          otpMaxAttempts: 3,
+        } as any),
         eventPublisher,
         new SystemClock(),
         {

@@ -193,12 +193,7 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
             .getOne(),
         ),
         issueEmailVerificationToken: jest.fn(
-          async (
-            m: any,
-            userId: string,
-            tokenHash: string,
-            expiresAt: Date,
-          ) =>
+          async (m: any, userId: string, tokenHash: string, expiresAt: Date) =>
             await m.getRepository(User).update(userId, {
               emailVerificationTokenHash: tokenHash,
               emailVerificationExpiresAt: expiresAt,
@@ -214,12 +209,6 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
         ),
       };
       const whatsappMock: any = { sendOtp: jest.fn() };
-      // Real stores wired to the real DataSource (US3): races prove the
-      // production wiring, not mocks.
-      const refreshTokens = new RefreshTokenStore(dataSource);
-      const resetTokens = new PasswordResetTokenStore(dataSource);
-      const otpStore = new OtpStore(dataSource, cacheMock);
-      const eventPublisher: any = { emit: jest.fn() };
       // SystemClock + legacy-identical config values (US4 rewire).
       const clock = new SystemClock();
       const tokenConfig: any = {
@@ -227,7 +216,14 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
         resetTokenTtlMs: 15 * 60_000,
         emailVerificationTtlMs: 24 * 3600_000,
         otpTtlMs: 5 * 60_000,
+        otpMaxAttempts: 3,
       };
+      // Real stores wired to the real DataSource (US3): races prove the
+      // production wiring, not mocks.
+      const refreshTokens = new RefreshTokenStore(dataSource, clock);
+      const resetTokens = new PasswordResetTokenStore(dataSource, clock);
+      const otpStore = new OtpStore(dataSource, cacheMock, clock, tokenConfig);
+      const eventPublisher: any = { emit: jest.fn() };
       authService = new AuthService(
         usersServiceMock,
         logger,
