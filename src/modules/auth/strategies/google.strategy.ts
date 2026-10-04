@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { Strategy, VerifyCallback } from 'passport-google-oauth20';
@@ -34,16 +34,39 @@ interface GoogleOAuthProfile {
  */
 @Injectable()
 export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
+  // Construction happens once per boot, so one warn here is warn-once by nature.
+  private readonly logger = new Logger(GoogleStrategy.name);
+
   constructor(configService: ConfigService) {
+    // Read before super (params are in scope; `this` is not yet).
+    // Empty counts as missing, same as auth-token.config readString.
+    const clientID = configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = configService.get<string>('GOOGLE_CLIENT_SECRET');
+    const callbackURL = configService.get<string>('GOOGLE_CALLBACK_URL');
     super({
-      clientID: configService.get<string>('GOOGLE_CLIENT_ID') || 'test',
-      clientSecret: configService.get<string>('GOOGLE_CLIENT_SECRET') || 'test',
-      callbackURL:
-        configService.get<string>('GOOGLE_CALLBACK_URL') ||
-        'http://localhost:3000/auth/google/callback',
+      clientID: clientID || 'test',
+      clientSecret: clientSecret || 'test',
+      callbackURL: callbackURL || 'http://localhost:3000/auth/google/callback',
       scope: ['profile', 'email'],
       state: true,
     });
+    // Fail-fast in production: silent 'test' fallbacks must never serve
+    // live traffic. In dev/test they stay (warned) so OAuth setup is optional.
+    const missing = [
+      !clientID && 'GOOGLE_CLIENT_ID',
+      !clientSecret && 'GOOGLE_CLIENT_SECRET',
+      !callbackURL && 'GOOGLE_CALLBACK_URL',
+    ].filter((key): key is string => !!key);
+    if (missing.length > 0) {
+      if (configService.get<string>('NODE_ENV') === 'production') {
+        throw new Error(
+          `Google OAuth misconfigured: missing ${missing.join(', ')} (required in production)`,
+        );
+      }
+      this.logger.warn(
+        `Google OAuth keys missing (${missing.join(', ')}): using dev fallbacks — set GOOGLE_* for real OAuth`,
+      );
+    }
   }
 
   /**

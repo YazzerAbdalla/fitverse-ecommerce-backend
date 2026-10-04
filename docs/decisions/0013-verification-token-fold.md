@@ -82,3 +82,17 @@ server-side column would leak by default.
 - `npm run test -- src/modules/auth src/modules/users` (serial, real PG):
   **18/18 suites, 168/168 green**, incl. rewritten verify/resend/races +
   new mapper + UsersService intent specs.
+
+## Addendum — A4 Google OAuth secret fail-fast (2026-10-04)
+
+- `JWT_SECRET || 'secret'` needed no work: it died with `JwtStrategy` in A7.
+  `JwtModule` and the WS gateway read `JWT_SECRET` with no fallback (fail-closed).
+- `GoogleStrategy` keeps dev fallbacks (`'test'` / localhost callback) but now
+  throws at construction when `NODE_ENV=production` and any of
+  `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALLBACK_URL` is
+  missing/empty; otherwise it warns once (construction runs once per boot).
+  Empty counts as missing, same as `auth-token.config.ts` `readString`.
+- Behavior delta (`[S]`, startup-only): a production boot without Google keys
+  now fails fast instead of silently wiring test credentials. Dev/test boot
+  unchanged. Proven by `google.strategy.spec.ts` A4 block (prod-missing
+  throws, prod-complete constructs, dev-missing warns + falls back).
