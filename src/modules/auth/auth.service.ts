@@ -104,6 +104,7 @@ export class AuthService {
 
   // For testing: allow capturing raw tokens
   public lastRawToken?: string;
+  public lastVerificationToken?: string;
   public lastOtp?: string;
 
   async register(userRegisterDto: UserRegisterDto) {
@@ -657,6 +658,9 @@ export class AuthService {
     // lastVerificationToken is always set by the store on success; the tx
     // throws before reaching here otherwise.
     const rawForEvent = lastVerificationToken;
+    // Test hook (same pattern as lastRawToken): E2E/integration capture the
+    // raw without reading email bodies.
+    this.lastVerificationToken = lastVerificationToken;
     await this.eventPublisher.emit('email.verification_requested', {
       userId: user.id,
       email,
@@ -774,6 +778,8 @@ export class AuthService {
     });
     // Arm the 60s cooldown after a successful issue (store-owned, fail-open).
     await this.verificationTokens.markCooldown(normalized);
+    // Test hook (same pattern as lastRawToken).
+    this.lastVerificationToken = lastVerificationToken;
     // Publish after commit — outside dataSource.transaction
     await this.eventPublisher.emit('email.verification_requested', {
       userId: user.id,

@@ -374,8 +374,9 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
       return;
     }
     const email = uniq('race_verify');
-    await seedUser(email);
-    await authService.requestEmailVerification(email);
+    const user = await seedUser(email);
+    // requestEmailVerification takes the loaded User (RP-AUTH, no re-read).
+    await authService.requestEmailVerification(user as any);
     const raw = authService.lastVerificationToken!;
     expect(raw).toMatch(/^[a-f0-9]{64}$/);
 

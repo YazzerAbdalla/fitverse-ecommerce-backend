@@ -198,7 +198,7 @@ describe('AuthService', () => {
         {
           provide: VerificationTokenStore,
           useValue: {
-            issue: jest.fn(
+            newVerificationIssue: jest.fn(
               async (
                 manager: any,
                 userId: string,
@@ -252,7 +252,7 @@ describe('AuthService', () => {
                   })
                   .getOne(),
             ),
-            consume: jest.fn(async (manager: any, token: any) => {
+            markTokenAsUsed: jest.fn(async (manager: any, token: any) => {
               token.usedAt = new Date();
               await manager.getRepository('EmailVerificationToken').save(token);
             }),
@@ -289,8 +289,9 @@ describe('AuthService', () => {
     }).compile();
 
     service = module.get<AuthService>(AuthService);
-    // reset lastRawToken
+    // reset test hooks
     service.lastRawToken = undefined;
+    service.lastVerificationToken = undefined;
   });
 
   it('should be defined', () => {
@@ -711,35 +712,13 @@ describe('AuthService', () => {
       );
     });
 
-    it('not found → void anti-enum, 0 transaction', async () => {
-      usersService.findUserByEmail.mockResolvedValue(null);
-      await expect(
-        service.requestEmailVerification('nobody@example.com'),
-      ).resolves.toBeUndefined();
-      expect(logger.debug).toHaveBeenCalledWith(
-        expect.stringContaining('nobody@example.com'),
-      );
-      expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
-    });
-
-    it('emailVerified true → void, 0 transaction, 0 insert', async () => {
-      usersService.findUserByEmail.mockResolvedValue({
-        ...user,
-        emailVerified: true,
-      });
-      await expect(
-        service.requestEmailVerification(user.email),
-      ).resolves.toBeUndefined();
-      expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
-    });
-
-    it('emailVerified false → UPDATE priors + INSERT 24h sha256 + emit once, EmailProvider.send not called directly', async () => {
-      usersService.findUserByEmail.mockResolvedValue({ ...user });
+    // New contract (RP-AUTH): the method takes the already-loaded User —
+    // register just created it, so there is no lookup and no anti-enum here.
+    // Anti-enumeration lives in resendVerification (T027 below).
+    it('issues for the given user → 1 tx + UPDATE priors + INSERT + emit once, EmailProvider.send not called directly', async () => {
       const emitSpy = eventPublisher.emit;
       const before = Date.now();
-      await service.requestEmailVerification(user.email);
+      await service.requestEmailVerification({ ...user });
       const after = Date.now();
 
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
@@ -755,7 +734,7 @@ describe('AuthService', () => {
       expect(created.userId).toBe(user.id);
       expect(created.tokenHash).toMatch(/^[a-f0-9]{64}$/);
       expect(created.usedAt).toBeNull();
-      // expiresAt ~24h
+      // expiresAt ~24h from tokenConfig
       const ttl = 24 * 3600 * 1000;
       expect(created.expiresAt.getTime()).toBeGreaterThanOrEqual(
         before + ttl - 5000,
@@ -773,10 +752,23 @@ describe('AuthService', () => {
       expect(emitSpy).toHaveBeenCalledTimes(1);
       expect(emitSpy).toHaveBeenCalledWith(
         'email.verification_requested',
-        expect.objectContaining({ userId: user.id, email: user.email }),
+        expect.objectContaining({
+          userId: user.id,
+          email: user.email,
+          rawToken: raw,
+        }),
       );
       expect((service as any).emailProvider).toBeUndefined();
       emitSpy.mockClear();
+    });
+
+    it('no verified-gate here: already-verified user still issues (resend owns anti-enum)', async () => {
+      await service.requestEmailVerification({
+        ...user,
+        emailVerified: true,
+      });
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -924,8 +916,11 @@ describe('AuthService', () => {
     it('not found → 200 anti-enum, 0 insert', async () => {
       usersService.findUserByEmail.mockResolvedValue(null);
       const res = await service.resendVerification('nobody@example.com');
+      // Pinned contract (RP-AUTH): the long anti-enum message — same string
+      // whether the email exists or not and whether it is verified.
       expect(res).toEqual({
-        message: 'If an account exists, a verification email has been sent.',
+        message:
+          'This email is not registered or already verified. If an account exists, a verification email has been sent.',
       });
       expect(mockTokenRepo.save).not.toHaveBeenCalled();
     });
