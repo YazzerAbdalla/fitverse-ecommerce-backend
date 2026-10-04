@@ -1,7 +1,7 @@
 # Tasks — Auth + Users Follow-ups (A4/A5/A6/A7/A8-residual)
 
 **Source:** `docs/plan-auth-users-hardening.md` §7 + `docs/decisions/0013-verification-token-fold.md`
-**Branch:** `015-auth-user-refactor` | **Status:** A7 done (`8f498e8`); A4 done; A5 done (commit below); A6/A8-residual open
+**Branch:** `015-auth-user-refactor` | **Status:** A7 done (`8f498e8`); A4 done; A5 done (commit below); A6 done (commit below); A8-residual open
 **Gates for every task:** `npm run build` clean · touched-scope lint error-free ·
 `npm run test -- src/modules/auth src/modules/users` green (serial, real PG) ·
 no wire/event/queue/env change unless the task says `[B]`/`[S]` + regression test.
@@ -12,7 +12,7 @@ no wire/event/queue/env change unless the task says `[B]`/`[S]` + regression tes
 [x] A7 (done `8f498e8` — single JWT path, google/link via @Auth())
   → A4 (secrets — done, see below)
   → A5 (DTO floors, contract [B] — done, see below)
-  → A6 (partial uniques, schema [B] — own commit, needs DBA approval)
+  → A6 (partial uniques, schema [B] — done, see below)
   → A8-residual (Swagger, docs-only, safe anytime)
 ```
 
@@ -81,14 +81,23 @@ other migration work; A4 with release/deploy timing (changes boot behavior).
 
 ## A6. DB partial uniques (schema change — needs DBA approval) `[B]`
 
-- [ ] T-A6.1 New migration (never edit committed): partial uniques
+- [x] T-A6.1 New migration (never edit committed): partial uniques
   `phoneNumber WHERE "phoneNumber" IS NOT NULL`,
   `googleId WHERE "googleId" IS NOT NULL` (`user.entity.ts:47-55` are
-  `@Index`-only today). Entity: `@Unique` + partial index expressions.
-- [ ] T-A6.2 Concurrency test: double-link same `googleId` →
-  one wins, other `409` (proves the DB, not the app, serializes).
-- [ ] T-A6.3 Backfill check: migration must no-op cleanly if duplicates
-  already exist (query + report; resolve data before applying).
+  `@Index`-only today). Entity: property-level `@Index(name, {unique, where})`
+  (class-level without fields crashes TypeORM 1.1 metadata build — proven by
+  repro, fixed). **Note:** migration 0000 specified these indexes but live DBs
+  never got them (dev `migrations` table empty — schema came from
+  `synchronize`); new `1755900000011-UserPartialUniques` (re)creates both
+  idempotently.
+- [x] T-A6.2 Concurrency test: double-link same `googleId` →
+  one wins, other `409` (proves the DB, not the app, serializes). New
+  `users-link.integration.spec.ts` (real PG: sequential 23505, concurrent
+  single-winner, phone column too) + unit test pinning the app 23505→409
+  mapping in `linkGoogleAccount`.
+- [x] T-A6.3 Backfill check: zero dup rows on dev; `0011.up()` applied cleanly
+  on the seeded DB, `down()` verified (2→0→2 indexes), DB left migrated.
+  Full-chain replay deliberately NOT run (would replay 14 migrations).
 - **Done when:** migration applies on seeded DB, double-link 409 proven,
   rollback path verified. Commit: `feat(users): partial uniques for
   phoneNumber/googleId`.

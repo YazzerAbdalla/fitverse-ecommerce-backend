@@ -9,7 +9,7 @@ import { AuthEventPublisher } from './auth-event.publisher';
 import { SystemClock } from '../../common/clock';
 import { AUTH_TOKEN_CONFIG } from './auth-token.config';
 import { JwtService } from '@nestjs/jwt';
-import { BadRequestException, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { ConfigService } from '@nestjs/config';
@@ -997,6 +997,43 @@ describe('AuthService', () => {
       expect(mockTokenRepo.save).not.toHaveBeenCalled();
       expect(emitSpy).not.toHaveBeenCalled();
       emitSpy.mockClear();
+    });
+  });
+
+  // ===================== A6: linkGoogleAccount maps 23505 → 409 =====================
+  describe('linkGoogleAccount double-link (A6)', () => {
+    const profile = {
+      googleId: 'google-dup-1',
+      email: 'dup@example.com',
+      firstName: 'Dup',
+      lastName: 'User',
+      verified: true,
+    };
+
+    it('unique violation on link → ConflictException (DB serializes, app maps)', async () => {
+      usersService.findByGoogleId.mockResolvedValue(null);
+      usersService.linkGoogleAccount.mockRejectedValue(
+        Object.assign(
+          new Error('duplicate key value violates unique constraint'),
+          {
+            code: '23505',
+          },
+        ),
+      );
+      await expect(
+        service.linkGoogleAccount('user-1', profile as any),
+      ).rejects.toThrow('Google account already linked');
+      await expect(
+        service.linkGoogleAccount('user-1', profile as any),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('non-unique error propagates unmapped', async () => {
+      usersService.findByGoogleId.mockResolvedValue(null);
+      usersService.linkGoogleAccount.mockRejectedValue(new Error('boom'));
+      await expect(
+        service.linkGoogleAccount('user-1', profile as any),
+      ).rejects.toThrow('boom');
     });
   });
 });
