@@ -29,6 +29,7 @@ import { generateHex } from '../../common/secure-token';
 import { sha256Hex } from '../../common/token-hasher';
 import User, { AuthProvider } from '../users/entity/user.entity';
 import { UsersService } from '../users/users.service';
+import { toSafeUser } from '../users/dto/safe-user-response.dto';
 import { AuthEventPublisher } from './auth-event.publisher';
 import type { AuthTokenConfig } from './auth-token.config';
 import { AUTH_TOKEN_CONFIG } from './auth-token.config';
@@ -161,10 +162,13 @@ export class AuthService {
       },
     );
 
-    // D3: same shape as before minus the credential material — the bcrypt hash
-    // must never leave the server in a response body (approved S-delta).
-    const { password: _dropped, ...safeUser } = newUser;
-    return { message: 'User created successfuly.', data: safeUser };
+    // D3 + B6: same message as before; data is the shared SafeUserResponseDto
+    // allow-list (no password/token material by construction). Additive delta
+    // vs the old DTO-spread: data now also carries id/role/provider/flags.
+    return {
+      message: 'User created successfuly.',
+      data: toSafeUser(savedUser!),
+    };
   }
 
   /**
