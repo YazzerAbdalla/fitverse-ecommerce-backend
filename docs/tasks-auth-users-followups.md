@@ -1,7 +1,7 @@
 # Tasks — Auth + Users Follow-ups (A4/A5/A6/A7/A8-residual)
 
 **Source:** `docs/plan-auth-users-hardening.md` §7 + `docs/decisions/0013-verification-token-fold.md`
-**Branch:** `015-auth-user-refactor` | **Status:** A7 done (`8f498e8`); A4 done (commit below); A5/A6/A8-residual open
+**Branch:** `015-auth-user-refactor` | **Status:** A7 done (`8f498e8`); A4 done; A5 done (commit below); A6/A8-residual open
 **Gates for every task:** `npm run build` clean · touched-scope lint error-free ·
 `npm run test -- src/modules/auth src/modules/users` green (serial, real PG) ·
 no wire/event/queue/env change unless the task says `[B]`/`[S]` + regression test.
@@ -11,7 +11,7 @@ no wire/event/queue/env change unless the task says `[B]`/`[S]` + regression tes
 ```text
 [x] A7 (done `8f498e8` — single JWT path, google/link via @Auth())
   → A4 (secrets — done, see below)
-  → A5 (DTO floors, contract [B] — own commit, needs approval)
+  → A5 (DTO floors, contract [B] — done, see below)
   → A6 (partial uniques, schema [B] — own commit, needs DBA approval)
   → A8-residual (Swagger, docs-only, safe anytime)
 ```
@@ -65,13 +65,16 @@ other migration work; A4 with release/deploy timing (changes boot behavior).
 
 ## A5. DTO floor unification (contract change — needs approval) `[B]`
 
-- [ ] T-A5.1 `dto/reset-password.dto.ts:9` + `dto/validate-reset-token.dto.ts:9`
+- [x] T-A5.1 `dto/reset-password.dto.ts:9` + `dto/validate-reset-token.dto.ts:9`
   `token: string` → `@Length(64,64) + @Matches(/^[0-9a-f]{64}$/)` (match
   `verify-email.dto.ts:17-19`). Garbage tokens 400 at validation instead of
-  service — update contract docs + parity expectations if any pin the old path.
-- [ ] T-A5.2 `dto/user-register.dto.ts:30-31` `MinLength(4)` → `MinLength(8)`
-  **or** record why 4 stays (weak registration floor vs reset floor).
-- [ ] T-A5.3 Unit tests per changed DTO (length/hex rejection, min-length
+  service — status-stable (was service 400, now validation 400); 64-hex
+  garbage still 400s at the service lookup. Parity specs send 64-hex garbage
+  and assert status only — unaffected.
+- [x] T-A5.2 `dto/user-register.dto.ts:30-31` `MinLength(4)` → `MinLength(8)`:
+  registration now matches the reset `newPassword` floor (8). Recorded here
+  instead of keeping 4 (4 allowed weaker registration secrets than reset).
+- [x] T-A5.3 Unit tests per changed DTO (length/hex rejection, min-length
   rejection); E2E register weak-password case still 400.
 - **Done when:** floors consistent (or divergence documented), tests pin the
   new 400s. Commit: `fix(auth): unify token/password DTO floors`.

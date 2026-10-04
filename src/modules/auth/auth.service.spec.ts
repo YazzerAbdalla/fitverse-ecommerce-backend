@@ -18,6 +18,8 @@ import * as bcrypt from 'bcrypt';
 import { validate } from 'class-validator';
 import { plainToInstance } from 'class-transformer';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { ValidateResetTokenDto } from './dto/validate-reset-token.dto';
+import { UserRegisterDto } from './dto/user-register.dto';
 
 // Keep original smoke test and extend with T014/T015
 describe('AuthService', () => {
@@ -614,6 +616,55 @@ describe('AuthService', () => {
       });
       const errorsLong = await validate(dtoLong);
       expect(errorsLong.length).toBeGreaterThan(0);
+    });
+
+    it('A5 token floors: reset/validate DTOs accept 64hex, reject garbage (DTO level)', async () => {
+      // Same floor as VerifyEmailDto: Length(64) + hex match.
+      const valid = 'b'.repeat(64);
+      for (const Dto of [ResetPasswordDto, ValidateResetTokenDto]) {
+        const ok = plainToInstance(Dto, {
+          email: user.email,
+          token: valid,
+          ...(Dto === ResetPasswordDto
+            ? { newPassword: 'LongEnough123!' }
+            : {}),
+        });
+        expect(await validate(ok)).toEqual([]);
+        for (const garbage of [
+          'wrong',
+          'g'.repeat(64),
+          'a'.repeat(63),
+          'a'.repeat(65),
+        ]) {
+          const bad = plainToInstance(Dto, {
+            email: user.email,
+            token: garbage,
+            ...(Dto === ResetPasswordDto
+              ? { newPassword: 'LongEnough123!' }
+              : {}),
+          });
+          expect(await validate(bad).then((e) => e.length)).toBeGreaterThan(0);
+        }
+      }
+    });
+
+    it('A5 register floor: password <8 rejected, 8 accepted (DTO level)', async () => {
+      // Registration floor matches the reset newPassword floor (8).
+      const base = {
+        firstName: 'A',
+        lastName: 'B',
+        email: user.email,
+      };
+      const weak = plainToInstance(UserRegisterDto, {
+        ...base,
+        password: 'short7!',
+      });
+      expect(await validate(weak).then((e) => e.length)).toBeGreaterThan(0);
+      const ok = plainToInstance(UserRegisterDto, {
+        ...base,
+        password: 'LongEnough123!',
+      });
+      expect(await validate(ok)).toEqual([]);
     });
 
     it('expired token via validateResetToken path also 400 (integration of both)', async () => {
