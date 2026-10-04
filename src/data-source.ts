@@ -21,7 +21,6 @@ import { ReservationItem } from './modules/reservation/entities/reservation-item
 import { OutboxEvent } from './modules/outbox/entities/outbox-event.entity';
 import { RefreshToken } from './modules/auth/entities/refresh-token.entity';
 import { PasswordResetToken } from './modules/auth/entities/password-reset-token.entity';
-import { EmailVerificationToken } from './modules/auth/entities/email-verification-token.entity';
 import { OtpVerification } from './modules/auth/entities/otp-verification.entity';
 
 dotenv.config();
@@ -33,7 +32,7 @@ export const AppDataSource = new DataSource({
   username: process.env.POSTGRES_USER,
   password: process.env.POSTGRES_PASSWORD,
   database: process.env.POSTGRES_DATABASE,
-  synchronize: true,
+  synchronize: false,
   logging: true,
   entities: [
     User,
@@ -52,7 +51,6 @@ export const AppDataSource = new DataSource({
     // entities stay out: their tables do not exist yet (pre-existing gap,
     // notifications scope owns it).
     PasswordResetToken,
-    EmailVerificationToken,
     OtpVerification,
   ],
   migrations: ['src/migration/**/*.ts'],
