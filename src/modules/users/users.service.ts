@@ -80,6 +80,25 @@ export class UsersService {
   }
 
   /**
+   * Finds a user by email with a write lock (serializes concurrent verify).
+   * @param manager - Tx-scoped manager of the enclosing transaction.
+   * @param email - User email address.
+   * @returns The locked user or null if not found.
+   */
+  async findUserByEmailForUpdate(
+    manager: EntityManager,
+    email: string,
+  ): Promise<User | null> {
+    this.logger.debug(`users findByEmailForUpdate start email=${email}`);
+    return await manager
+      .getRepository(User)
+      .createQueryBuilder('u')
+      .setLock('pessimistic_write')
+      .where('u.email = :email', { email })
+      .getOne();
+  }
+
+  /**
    * Finds a user by Google id.
    * @param googleId - Google OAuth subject id.
    * @param manager - Optional tx-scoped manager (participates, never commits).
@@ -171,6 +190,50 @@ export class UsersService {
   ): Promise<void> {
     const repo = manager ? manager.getRepository(User) : this.userRepo;
     await repo.update(userId, { phoneVerified: true });
+  }
+
+  /**
+   * Issues (or re-issues) the single live email-verification token.
+   * Overwrites the three verification columns so only one link is live;
+   * the previous link dies exactly when the new one is born.
+   * @param manager - Tx-scoped manager of the enclosing transaction.
+   * @param userId - Owner user UUID.
+   * @param tokenHash - sha256 hex of the new raw token (raw never stored).
+   * @param expiresAt - Expiry instant (caller computes via Clock + TTL).
+   * @returns Void.
+   */
+  async issueEmailVerificationToken(
+    manager: EntityManager,
+    userId: string,
+    tokenHash: string,
+    expiresAt: Date,
+  ): Promise<void> {
+    this.logger.debug(`users issueVerificationToken start id=${userId}`);
+    await manager.getRepository(User).update(userId, {
+      emailVerificationTokenHash: tokenHash,
+      emailVerificationExpiresAt: expiresAt,
+      emailVerificationUsedAt: null,
+    });
+  }
+
+  /**
+   * Consumes the live email-verification token (single-use) and flags verified.
+   * @param manager - Tx-scoped manager of the enclosing transaction.
+   * @param userId - Owner user UUID.
+   * @param now - Consumption instant (caller passes Clock.now(); the store
+   *   stays clock-free so the instant is explicit and testable).
+   * @returns Void.
+   */
+  async consumeEmailVerificationToken(
+    manager: EntityManager,
+    userId: string,
+    now: Date,
+  ): Promise<void> {
+    this.logger.debug(`users consumeVerificationToken start id=${userId}`);
+    await manager.getRepository(User).update(userId, {
+      emailVerificationUsedAt: now,
+      emailVerified: true,
+    });
   }
 
   /**

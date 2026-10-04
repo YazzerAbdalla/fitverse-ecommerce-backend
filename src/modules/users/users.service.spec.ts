@@ -105,8 +105,7 @@ describe('UsersService', () => {
     );
   });
 
-  it('incrementTokenVersion increments with optional stamp (US2)', async () => {
-    await service.incrementTokenVersion('u1');
+  it('incrementTokenVersion increments with optional stamp (US2)', async () => {    await service.incrementTokenVersion('u1');
     const [, first] = userRepo.update.mock.calls[0];
     expect(typeof first.tokenVersion).toBe('function');
     expect(first.passwordChangedAt).toBeUndefined();
@@ -115,5 +114,54 @@ describe('UsersService', () => {
     });
     const [, second] = userRepo.update.mock.calls[1];
     expect(second.passwordChangedAt).toEqual(new Date('2026-02-02'));
+  });
+
+  it('findUserByEmailForUpdate locks by email (B3)', async () => {
+    const getOne = jest.fn().mockResolvedValue({ id: 'u1' });
+    const qb: any = {
+      setLock: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getOne,
+    };
+    const manager: any = {
+      getRepository: jest
+        .fn()
+        .mockReturnValue({ createQueryBuilder: () => qb }),
+    };
+    await expect(
+      service.findUserByEmailForUpdate(manager, 'a@b.c'),
+    ).resolves.toEqual({ id: 'u1' });
+    expect(qb.setLock).toHaveBeenCalledWith('pessimistic_write');
+    expect(qb.where).toHaveBeenCalledWith('u.email = :email', {
+      email: 'a@b.c',
+    });
+  });
+
+  it('issueEmailVerificationToken overwrites the three columns (B3)', async () => {
+    const repoUpdate = jest.fn();
+    const manager: any = {
+      getRepository: jest.fn().mockReturnValue({ update: repoUpdate }),
+    };
+    const exp = new Date('2026-03-03');
+    await service.issueEmailVerificationToken(manager, 'u1', 'h'.repeat(64), exp);
+    expect(manager.getRepository).toHaveBeenCalled();
+    expect(repoUpdate).toHaveBeenCalledWith('u1', {
+      emailVerificationTokenHash: 'h'.repeat(64),
+      emailVerificationExpiresAt: exp,
+      emailVerificationUsedAt: null,
+    });
+  });
+
+  it('consumeEmailVerificationToken sets usedAt + verified flag (B3)', async () => {
+    const repoUpdate = jest.fn();
+    const manager: any = {
+      getRepository: jest.fn().mockReturnValue({ update: repoUpdate }),
+    };
+    const now = new Date('2026-04-04');
+    await service.consumeEmailVerificationToken(manager, 'u1', now);
+    expect(repoUpdate).toHaveBeenCalledWith('u1', {
+      emailVerificationUsedAt: now,
+      emailVerified: true,
+    });
   });
 });

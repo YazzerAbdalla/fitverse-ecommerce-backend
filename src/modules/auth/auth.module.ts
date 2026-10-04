@@ -21,7 +21,6 @@ import { GoogleStrategy } from './strategies/google.strategy';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PasswordResetToken } from './entities/password-reset-token.entity';
 import { OtpVerification } from './entities/otp-verification.entity';
-import { EmailVerificationToken } from './entities/email-verification-token.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { NoopWhatsAppProvider } from './providers/whatsapp.provider';
 import { NoopEmailProvider } from '../notifications/email.provider';
@@ -31,7 +30,6 @@ import { JwtGuard } from './guards/jwt.guard';
 import { AUTH_TOKEN_CONFIG, resolveAuthTokenConfig } from './auth-token.config';
 import { RefreshTokenStore } from './stores/refresh-token.store';
 import { PasswordResetTokenStore } from './stores/password-reset-token.store';
-import { VerificationTokenStore } from './stores/verification-token.store';
 import { OtpStore } from './stores/otp.store';
 import { AuthEventPublisher } from './auth-event.publisher';
 import { SystemClock } from '../../common/clock';
@@ -43,7 +41,6 @@ import { SystemClock } from '../../common/clock';
       PasswordResetToken,
       OtpVerification,
       RefreshToken,
-      EmailVerificationToken,
     ]),
     JwtModule.registerAsync({
       global: true,
@@ -66,7 +63,6 @@ import { SystemClock } from '../../common/clock';
     JwtGuard,
     RefreshTokenStore,
     PasswordResetTokenStore,
-    VerificationTokenStore,
     OtpStore,
     AuthEventPublisher,
     SystemClock,

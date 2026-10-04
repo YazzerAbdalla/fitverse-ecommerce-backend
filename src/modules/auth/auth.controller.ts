@@ -47,7 +47,7 @@ import { ConfigService } from '@nestjs/config';
 import { Auth } from './decorators/auth.decorator';
 import { AUTH_TOKEN_CONFIG } from './auth-token.config';
 import type { AuthTokenConfig } from './auth-token.config';
-import { VerificationCooldownError } from './stores/verification-token.store';
+import { VerificationCooldownError } from './verification-cooldown.error';
 import { GoogleProfile } from './strategies/google.strategy';
 
 /**

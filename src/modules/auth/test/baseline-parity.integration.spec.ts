@@ -17,6 +17,9 @@ import { AppModule } from '../../../app.module';
 import { AllExceptionsFilter } from '../../../common/filters/all-exceptions.filter';
 
 describe('Baseline Parity T003 - auth/users contract matrix (full-app supertest)', () => {
+  // Full-app HTTP + bcrypt per test routinely exceeds jest's 5s default.
+  jest.setTimeout(30000);
+
   let app: INestApplication<App>;
   let dataSource: DataSource;
   let skip = false;

@@ -15,7 +15,8 @@ import User from '../../users/entity/user.entity';
 import { RefreshToken } from '../entities/refresh-token.entity';
 import { PasswordResetToken } from '../entities/password-reset-token.entity';
 import { OtpVerification } from '../entities/otp-verification.entity';
-import { EmailVerificationToken } from '../entities/email-verification-token.entity';
+import { AuthService } from '../auth.service';
+import { VerificationCooldownError } from '../verification-cooldown.error';
 // Relation-closure entities (User -> Order/Cart, Order/Cart -> items -> Product -> Inventory).
 // Required: TypeORM fails metadata build if a relation target is missing from `entities`.
 import { Order } from '../../order/entities/order.entity';
@@ -24,11 +25,8 @@ import { Cart } from '../../cart/entities/cart.entity';
 import { CartItem } from '../../cart/entities/cart-items.entity';
 import { Product } from '../../products/entities/product.entity';
 import { Inventory } from '../../inventory/entities/inventory.entity';
-import { AuthService } from '../auth.service';
-import { VerificationCooldownError } from '../stores/verification-token.store';
 import { RefreshTokenStore } from '../stores/refresh-token.store';
 import { PasswordResetTokenStore } from '../stores/password-reset-token.store';
-import { VerificationTokenStore } from '../stores/verification-token.store';
 import { OtpStore } from '../stores/otp.store';
 import { SystemClock } from '../../../common/clock';
 
@@ -63,7 +61,6 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
         RefreshToken,
         PasswordResetToken,
         OtpVerification,
-        EmailVerificationToken,
         Order,
         OrderItem,
         Cart,
@@ -187,16 +184,40 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
             { emailVerified: true },
           ),
         ),
+        findUserByEmailForUpdate: jest.fn(async (m: any, email: string) =>
+          m
+            .getRepository(User)
+            .createQueryBuilder('u')
+            .setLock('pessimistic_write')
+            .where('u.email = :email', { email })
+            .getOne(),
+        ),
+        issueEmailVerificationToken: jest.fn(
+          async (
+            m: any,
+            userId: string,
+            tokenHash: string,
+            expiresAt: Date,
+          ) =>
+            await m.getRepository(User).update(userId, {
+              emailVerificationTokenHash: tokenHash,
+              emailVerificationExpiresAt: expiresAt,
+              emailVerificationUsedAt: null,
+            }),
+        ),
+        consumeEmailVerificationToken: jest.fn(
+          async (m: any, userId: string, now: Date) =>
+            await m.getRepository(User).update(userId, {
+              emailVerificationUsedAt: now,
+              emailVerified: true,
+            }),
+        ),
       };
       const whatsappMock: any = { sendOtp: jest.fn() };
       // Real stores wired to the real DataSource (US3): races prove the
       // production wiring, not mocks.
       const refreshTokens = new RefreshTokenStore(dataSource);
       const resetTokens = new PasswordResetTokenStore(dataSource);
-      const verificationTokens = new VerificationTokenStore(
-        dataSource,
-        cacheMock,
-      );
       const otpStore = new OtpStore(dataSource, cacheMock);
       const eventPublisher: any = { emit: jest.fn() };
       // SystemClock + legacy-identical config values (US4 rewire).
@@ -217,7 +238,6 @@ describe('Auth Baseline T006 - token races single-winner (real PG)', () => {
         whatsappMock,
         refreshTokens,
         resetTokens,
-        verificationTokens,
         otpStore,
         eventPublisher,
         clock,

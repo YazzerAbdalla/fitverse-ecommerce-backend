@@ -67,6 +67,19 @@ export default class User {
   @Column({ default: false })
   emailVerified!: boolean;
 
+  // Single live email-verification token (1:1, folded from the
+  // email_verification_token table). Only one link is live at a time:
+  // issue overwrites these columns, verify consumes them. Never serialized
+  // to clients — SafeUserResponseDto excludes them by construction.
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  emailVerificationTokenHash!: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  emailVerificationExpiresAt!: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  emailVerificationUsedAt!: Date | null;
+
   @Column({ default: false })
   marketingOptIn!: boolean;
 

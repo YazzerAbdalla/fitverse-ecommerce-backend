@@ -1,10 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuthService } from './auth.service';
-import { VerificationCooldownError } from './stores/verification-token.store';
+import { VerificationCooldownError } from './verification-cooldown.error';
 import { UsersService } from '../users/users.service';
 import { RefreshTokenStore } from './stores/refresh-token.store';
 import { PasswordResetTokenStore } from './stores/password-reset-token.store';
-import { VerificationTokenStore } from './stores/verification-token.store';
 import { OtpStore } from './stores/otp.store';
 import { AuthEventPublisher } from './auth-event.publisher';
 import { SystemClock } from '../../common/clock';
@@ -37,6 +36,8 @@ describe('AuthService', () => {
   let mockUserRepo: any;
   let mockQueryBuilder: any;
   let mockCreateQueryBuilder: jest.Mock;
+  // Locked user row returned by the findUserByEmailForUpdate fake (per-test).
+  let lockedVerificationUser: any;
 
   beforeEach(async () => {
     // chained QB for invalidate priors / FOR UPDATE
@@ -84,6 +85,32 @@ describe('AuthService', () => {
       setPhoneVerified: jest.fn(),
       findUserByPhone: jest.fn(),
       linkGoogleAccount: jest.fn(),
+      // Folded verification intents (B3): thin fakes through the mocked
+      // manager so call-shape assertions hold; real SQL proven on PG.
+      findUserByEmailForUpdate: jest.fn(async (manager: any, email: string) =>
+        lockedVerificationUser?.email === email ? lockedVerificationUser : null,
+      ),
+      issueEmailVerificationToken: jest.fn(
+        async (manager: any, userId: string, hash: string, exp: Date) => {
+          await manager
+            .getRepository({ name: 'User' })
+            .update(userId, {
+              emailVerificationTokenHash: hash,
+              emailVerificationExpiresAt: exp,
+              emailVerificationUsedAt: null,
+            });
+        },
+      ),
+      consumeEmailVerificationToken: jest.fn(
+        async (manager: any, userId: string, now: Date) => {
+          await manager
+            .getRepository({ name: 'User' })
+            .update(userId, {
+              emailVerificationUsedAt: now,
+              emailVerified: true,
+            });
+        },
+      ),
     };
     jwtService = { signAsync: jest.fn().mockResolvedValue('token') };
     logger = {
@@ -196,77 +223,6 @@ describe('AuthService', () => {
           },
         },
         {
-          provide: VerificationTokenStore,
-          useValue: {
-            newVerificationIssue: jest.fn(
-              async (
-                manager: any,
-                userId: string,
-                expiresAt: Date,
-                mint: any,
-                isUniqueViolation: any,
-                collisionRetry = true,
-              ) => {
-                const first = mint();
-                await manager
-                  .createQueryBuilder()
-                  .update('EmailVerificationToken')
-                  .set({ usedAt: new Date() })
-                  .where('userId = :userId AND "usedAt" IS NULL', { userId })
-                  .execute();
-                const repo = manager.getRepository('EmailVerificationToken');
-                try {
-                  await repo.save(
-                    repo.create({
-                      userId,
-                      tokenHash: first.hash,
-                      expiresAt,
-                      usedAt: null,
-                    }),
-                  );
-                  return first.raw;
-                } catch (e: any) {
-                  if (!collisionRetry || !isUniqueViolation(e)) throw e;
-                  const retry = mint();
-                  await repo.save(
-                    repo.create({
-                      userId,
-                      tokenHash: retry.hash,
-                      expiresAt,
-                      usedAt: null,
-                    }),
-                  );
-                  return retry.raw;
-                }
-              },
-            ),
-            findForUpdate: jest.fn(
-              async (manager: any, tokenHash: string, userId: string) =>
-                manager
-                  .getRepository('EmailVerificationToken')
-                  .createQueryBuilder('t')
-                  .setLock('pessimistic_write')
-                  .where('t.tokenHash = :tokenHash AND t.userId = :userId', {
-                    tokenHash,
-                    userId,
-                  })
-                  .getOne(),
-            ),
-            markTokenAsUsed: jest.fn(async (manager: any, token: any) => {
-              token.usedAt = new Date();
-              await manager.getRepository('EmailVerificationToken').save(token);
-            }),
-            isCooldownActive: jest.fn(
-              async (email: string) =>
-                !!(await cacheManager.get(`resend:cooldown:${email}`)),
-            ),
-            markCooldown: jest.fn(async (email: string) =>
-              cacheManager.set(`resend:cooldown:${email}`, '1', 60_000),
-            ),
-            purgeExpired: jest.fn(),
-          },
-        },
-        {
           provide: OtpStore,
           useValue: { issue: jest.fn(), verifyAttempt: jest.fn() },
         },
@@ -289,9 +245,10 @@ describe('AuthService', () => {
     }).compile();
 
     service = module.get<AuthService>(AuthService);
-    // reset test hooks
+    // reset test hooks + locked-row fake
     service.lastRawToken = undefined;
     service.lastVerificationToken = undefined;
+    lockedVerificationUser = null;
   });
 
   it('should be defined', () => {
@@ -698,54 +655,48 @@ describe('AuthService', () => {
     } as any;
 
     beforeEach(() => {
-      mockUserRepo.findOne = jest.fn();
-      mockTokenRepo.findOne.mockReset?.();
-      mockQueryBuilder.execute.mockClear();
-      mockTokenRepo.create.mockClear();
-      mockTokenRepo.save.mockClear();
       dataSource.transaction.mockClear();
+      mockUserRepo.update.mockClear();
+      usersService.issueEmailVerificationToken.mockClear();
       cacheManager.get.mockResolvedValue(undefined);
       cacheManager.set.mockResolvedValue(undefined);
-      // EMAIL_VERIFICATION_TTL 24h for US1 (shared mock defaults to 15m for reset)
-      configService.get.mockImplementation((key: string) =>
-        key === 'EMAIL_VERIFICATION_TTL' ? '24h' : '15m',
-      );
     });
 
-    // New contract (RP-AUTH): the method takes the already-loaded User —
-    // register just created it, so there is no lookup and no anti-enum here.
-    // Anti-enumeration lives in resendVerification (T027 below).
-    it('issues for the given user → 1 tx + UPDATE priors + INSERT + emit once, EmailProvider.send not called directly', async () => {
+    // Folded contract (B4): the method takes the already-loaded User and
+    // overwrites its verification columns via UsersService — no token table,
+    // no lookup, no anti-enum here (resend owns anti-enum, T027 below).
+    it('issues for the given user → 1 tx + UsersService.issue with 64hex hash + 24h + hook + emit once', async () => {
       const emitSpy = eventPublisher.emit;
       const before = Date.now();
       await service.requestEmailVerification({ ...user });
       const after = Date.now();
 
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-      // invalidate priors via UPDATE usedAt
-      expect(mockQueryBuilder.update).toHaveBeenCalled();
-      expect(mockQueryBuilder.set).toHaveBeenCalledWith(
-        expect.objectContaining({ usedAt: expect.any(Date) }),
-      );
-      // INSERT new token
-      expect(mockTokenRepo.create).toHaveBeenCalledTimes(1);
-      expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
-      const created = mockTokenRepo.create.mock.calls[0][0];
-      expect(created.userId).toBe(user.id);
-      expect(created.tokenHash).toMatch(/^[a-f0-9]{64}$/);
-      expect(created.usedAt).toBeNull();
+      // Single live-token overwrite on the user row
+      expect(
+        usersService.issueEmailVerificationToken,
+      ).toHaveBeenCalledTimes(1);
+      const [managerArg, issuedUserId, issuedHash, issuedExp] =
+        usersService.issueEmailVerificationToken.mock.calls[0];
+      expect(managerArg).toBe(mockManager);
+      expect(issuedUserId).toBe(user.id);
+      expect(issuedHash).toMatch(/^[a-f0-9]{64}$/);
       // expiresAt ~24h from tokenConfig
       const ttl = 24 * 3600 * 1000;
-      expect(created.expiresAt.getTime()).toBeGreaterThanOrEqual(
-        before + ttl - 5000,
-      );
-      expect(created.expiresAt.getTime()).toBeLessThanOrEqual(
-        after + ttl + 5000,
+      expect(issuedExp.getTime()).toBeGreaterThanOrEqual(before + ttl - 5000);
+      expect(issuedExp.getTime()).toBeLessThanOrEqual(after + ttl + 5000);
+      expect(mockUserRepo.update).toHaveBeenCalledWith(
+        user.id,
+        expect.objectContaining({
+          emailVerificationTokenHash: issuedHash,
+          emailVerificationExpiresAt: issuedExp,
+          emailVerificationUsedAt: null,
+        }),
       );
       // test hook captures raw, hash matches sha256(raw)
       const raw = service.lastVerificationToken!;
       expect(raw).toMatch(/^[a-f0-9]{64}$/);
-      expect(created.tokenHash).toBe(
+      expect(issuedHash).toBe(
         crypto.createHash('sha256').update(raw).digest('hex'),
       );
       // emit after commit exactly once; service never calls EmailProvider.send directly
@@ -768,11 +719,13 @@ describe('AuthService', () => {
         emailVerified: true,
       });
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-      expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
+      expect(
+        usersService.issueEmailVerificationToken,
+      ).toHaveBeenCalledTimes(1);
     });
   });
 
-  // ===================== T020: verifyEmail FOR UPDATE (US1) =====================
+  // ===================== T020: verifyEmail FOR UPDATE on user row (US1) =====================
   describe('verifyEmail (T020 US1)', () => {
     const user = {
       id: 'user-1',
@@ -785,73 +738,85 @@ describe('AuthService', () => {
     const past = new Date(Date.now() - 60 * 1000);
 
     beforeEach(() => {
-      mockUserRepo.findOne = jest.fn().mockResolvedValue({ ...user });
-      mockUserRepo.update.mockClear();
-      mockTokenRepo.update = jest.fn(async () => ({ affected: 1 }));
-      mockQueryBuilder.setLock.mockClear();
-      mockQueryBuilder.where.mockClear();
-      mockQueryBuilder.getOne.mockReset();
       dataSource.transaction.mockClear();
+      mockUserRepo.update.mockClear();
+      usersService.findUserByEmailForUpdate.mockClear();
+      usersService.consumeEmailVerificationToken.mockClear();
     });
 
-    function mockVerifyRow(row: any) {
-      // service uses manager.getRepository(EmailVerificationToken).findOne({where, lock}) OR QB; support both
-      mockTokenRepo.findOne = jest.fn().mockResolvedValue(row);
-      mockQueryBuilder.getOne.mockResolvedValue(row);
+    // Locked user row backing the findUserByEmailForUpdate fake.
+    function mockLockedUser(row: any) {
+      lockedVerificationUser = { email: user.email, ...row };
     }
 
-    it('valid → 200 usedAt NOW + emailVerified true', async () => {
-      usersService.findUserByEmail.mockResolvedValue({ ...user });
-      const row = {
-        id: 'tok-1',
-        tokenHash,
-        userId: user.id,
-        expiresAt: future,
-        usedAt: null,
+    function liveRow(overrides: any = {}) {
+      return {
+        id: user.id,
+        email: user.email,
+        emailVerified: false,
+        emailVerificationTokenHash: tokenHash,
+        emailVerificationExpiresAt: future,
+        emailVerificationUsedAt: null,
+        ...overrides,
       };
-      mockVerifyRow(row);
+    }
+
+    it('valid → 200 + consume called (usedAt NOW + verified flag)', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      mockLockedUser(liveRow());
       const res = await service.verifyEmail({ email: user.email, token: raw });
       expect(res).toEqual({ verified: true, emailVerified: true });
-      // FOR UPDATE used (either findOne lock or QB setLock)
-      const usedForUpdate =
-        mockQueryBuilder.setLock.mock.calls.some(
-          (c: any[]) => c[0] === 'pessimistic_write',
-        ) ||
-        (mockTokenRepo.findOne.mock.calls.some((c: any[]) =>
-          JSON.stringify(c[0] ?? {}).includes('pessimistic_write'),
-        ) as boolean);
-      expect(usedForUpdate).toBe(true);
+      // Locked read scoped to the email before any write
+      expect(usersService.findUserByEmailForUpdate).toHaveBeenCalledWith(
+        mockManager,
+        user.email,
+      );
+      // Single-use consume in the same tx
+      expect(usersService.consumeEmailVerificationToken).toHaveBeenCalledTimes(
+        1,
+      );
+      const [managerArg, consumedUserId, consumedAt] =
+        usersService.consumeEmailVerificationToken.mock.calls[0];
+      expect(managerArg).toBe(mockManager);
+      expect(consumedUserId).toBe(user.id);
+      expect(consumedAt).toBeInstanceOf(Date);
+      expect(mockUserRepo.update).toHaveBeenCalledWith(
+        user.id,
+        expect.objectContaining({
+          emailVerificationUsedAt: consumedAt,
+          emailVerified: true,
+        }),
+      );
     });
 
-    it('usedAt NOT NULL → 400', async () => {
+    it('usedAt NOT NULL → 400, 0 consume', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
-      mockVerifyRow({
-        id: 'tok-1',
-        tokenHash,
-        userId: user.id,
-        expiresAt: future,
-        usedAt: new Date(),
-      });
+      mockLockedUser(liveRow({ emailVerificationUsedAt: new Date() }));
       await expect(
         service.verifyEmail({ email: user.email, token: raw }),
       ).rejects.toThrow(BadRequestException);
+      expect(usersService.consumeEmailVerificationToken).not.toHaveBeenCalled();
     });
 
-    it('expiresAt <= NOW → 400', async () => {
+    it('expiresAt <= NOW → 400, 0 consume', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
-      mockVerifyRow({
-        id: 'tok-1',
-        tokenHash,
-        userId: user.id,
-        expiresAt: past,
-        usedAt: null,
-      });
+      mockLockedUser(liveRow({ emailVerificationExpiresAt: past }));
       await expect(
         service.verifyEmail({ email: user.email, token: raw }),
       ).rejects.toThrow('Invalid or expired verification token');
+      expect(usersService.consumeEmailVerificationToken).not.toHaveBeenCalled();
     });
 
-    it('unknown email → 400 (no 404 leak)', async () => {
+    it('wrong hash → 400, 0 consume', async () => {
+      usersService.findUserByEmail.mockResolvedValue({ ...user });
+      mockLockedUser(liveRow({ emailVerificationTokenHash: 'f'.repeat(64) }));
+      await expect(
+        service.verifyEmail({ email: user.email, token: raw }),
+      ).rejects.toThrow(BadRequestException);
+      expect(usersService.consumeEmailVerificationToken).not.toHaveBeenCalled();
+    });
+
+    it('unknown email → 400 (no 404 leak), 0 transaction', async () => {
       usersService.findUserByEmail.mockResolvedValue(null);
       await expect(
         service.verifyEmail({ email: 'nobody@example.com', token: raw }),
@@ -861,13 +826,7 @@ describe('AuthService', () => {
 
     it('logs hashPrefix only, never raw', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
-      mockVerifyRow({
-        id: 'tok-1',
-        tokenHash,
-        userId: user.id,
-        expiresAt: future,
-        usedAt: null,
-      });
+      mockLockedUser(liveRow());
       await service.verifyEmail({ email: user.email, token: raw });
       const allLogs = [
         ...logger.log.mock.calls,
@@ -891,15 +850,12 @@ describe('AuthService', () => {
 
     beforeEach(() => {
       dataSource.transaction.mockClear();
-      mockTokenRepo.create.mockClear();
-      mockTokenRepo.save.mockClear();
+      mockUserRepo.update.mockClear();
+      usersService.issueEmailVerificationToken.mockClear();
       cacheManager.get.mockReset();
       cacheManager.set.mockReset();
       cacheManager.get.mockResolvedValue(undefined);
       cacheManager.set.mockResolvedValue(undefined);
-      configService.get.mockImplementation((key: string) =>
-        key === 'EMAIL_VERIFICATION_TTL' ? '24h' : '15m',
-      );
     });
 
     it('cooldown key exists → VerificationCooldownError, 0 transaction', async () => {
@@ -910,10 +866,12 @@ describe('AuthService', () => {
         VerificationCooldownError,
       );
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+      expect(
+        usersService.issueEmailVerificationToken,
+      ).not.toHaveBeenCalled();
     });
 
-    it('not found → 200 anti-enum, 0 insert', async () => {
+    it('not found → 200 anti-enum, 0 issue', async () => {
       usersService.findUserByEmail.mockResolvedValue(null);
       const res = await service.resendVerification('nobody@example.com');
       // Pinned contract (RP-AUTH): the long anti-enum message — same string
@@ -922,20 +880,24 @@ describe('AuthService', () => {
         message:
           'This email is not registered or already verified. If an account exists, a verification email has been sent.',
       });
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+      expect(
+        usersService.issueEmailVerificationToken,
+      ).not.toHaveBeenCalled();
     });
 
-    it('verified true → 200 distinct, 0 insert', async () => {
+    it('verified true → 200 distinct, 0 issue', async () => {
       usersService.findUserByEmail.mockResolvedValue({
         ...user,
         emailVerified: true,
       });
       const res = await service.resendVerification(user.email);
       expect(res).toEqual({ message: 'Email already verified' });
-      expect(mockTokenRepo.save).not.toHaveBeenCalled();
+      expect(
+        usersService.issueEmailVerificationToken,
+      ).not.toHaveBeenCalled();
     });
 
-    it('unverified → UPDATE priors + INSERT 24h + emit + cooldown set', async () => {
+    it('unverified → overwrite live hash + 24h + emit + cooldown set', async () => {
       usersService.findUserByEmail.mockResolvedValue({ ...user });
       const emitSpy = eventPublisher.emit;
       const res = await service.resendVerification(user.email);
@@ -943,15 +905,24 @@ describe('AuthService', () => {
         message: 'If an account exists, a verification email has been sent.',
       });
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
-      expect(mockTokenRepo.save).toHaveBeenCalledTimes(1);
-      const created = mockTokenRepo.create.mock.calls[0][0];
-      expect(created.tokenHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(usersService.issueEmailVerificationToken).toHaveBeenCalledTimes(
+        1,
+      );
+      const issuedHash =
+        usersService.issueEmailVerificationToken.mock.calls[0][2];
+      expect(issuedHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(issuedHash).toBe(
+        crypto
+          .createHash('sha256')
+          .update(service.lastVerificationToken!)
+          .digest('hex'),
+      );
       expect(emitSpy).toHaveBeenCalledTimes(1);
       expect(emitSpy).toHaveBeenCalledWith(
         'email.verification_requested',
         expect.objectContaining({ userId: user.id }),
       );
-      // cooldown SET NX EX 60 recorded via cache.set
+      // cooldown SET 60s recorded via cache.set
       expect(cacheManager.set).toHaveBeenCalledWith(
         expect.stringContaining('resend:cooldown:'),
         expect.anything(),

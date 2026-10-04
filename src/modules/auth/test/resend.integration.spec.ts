@@ -1,6 +1,7 @@
 /**
- * T028 Integration test resendVerification race + cooldown (real PG).
- * Real PostgreSQL required. If DB not available, tests skip gracefully with warning.
+ * B7 Integration test resendVerification overwrite + cooldown (real PG).
+ * Resend overwrites the single live User column (old raw dies), 60s cooldown
+ * gates bursts before any transaction. Real PostgreSQL required; skips gracefully.
  */
 import { DataSource } from 'typeorm';
 import * as dotenv from 'dotenv';
@@ -8,14 +9,20 @@ import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import User from '../../users/entity/user.entity';
-import { EmailVerificationToken } from '../entities/email-verification-token.entity';
 import { PasswordResetToken } from '../entities/password-reset-token.entity';
 import { OtpVerification } from '../entities/otp-verification.entity';
+import { RefreshToken } from '../entities/refresh-token.entity';
 import { AuthService } from '../auth.service';
+import { VerificationCooldownError } from '../verification-cooldown.error';
+import { RefreshTokenStore } from '../stores/refresh-token.store';
+import { PasswordResetTokenStore } from '../stores/password-reset-token.store';
+import { OtpStore } from '../stores/otp.store';
+import { AuthEventPublisher } from '../auth-event.publisher';
+import { SystemClock } from '../../../common/clock';
 
 dotenv.config();
 
-describe('Auth Integration T028 - resendVerification race + cooldown (real PG)', () => {
+describe('Auth Integration B7 - resendVerification overwrite + cooldown (real PG)', () => {
   let dataSource: DataSource;
   let skip = false;
   let authService: AuthService;
@@ -30,12 +37,7 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
         username: process.env.POSTGRES_USER || 'postgres',
         password: process.env.POSTGRES_PASSWORD || 'mysecretpassword',
         database: process.env.POSTGRES_DATABASE || 'test_ecommerce_auth',
-        entities: [
-          User,
-          EmailVerificationToken,
-          PasswordResetToken,
-          OtpVerification,
-        ],
+        entities: [User, RefreshToken, PasswordResetToken, OtpVerification],
         synchronize: true,
         dropSchema: true,
         logging: false,
@@ -54,8 +56,8 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
       } as unknown as JwtService;
       const cacheMock: any = {
         get: jest.fn(async (k: string) => cooldownStore.get(k)),
-        set: jest.fn(async (k: string, v: any) => {
-          cooldownStore.set(k, v);
+        set: jest.fn(async (k: string, v: any, ttlMs?: number) => {
+          cooldownStore.set(k, { v, ttlMs });
         }),
         del: jest.fn(async (k: string) => {
           cooldownStore.delete(k);
@@ -64,22 +66,59 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
       const whatsappMock: any = {
         sendOtp: jest.fn().mockResolvedValue({ messageId: 'test' }),
       };
-      const configService = {
-        get: jest.fn((key: string) =>
-          key === 'EMAIL_VERIFICATION_TTL' ? '24h' : '15m',
-        ),
-      } as unknown as ConfigService;
+      const configService = {} as unknown as ConfigService;
+      const userRepo = () => dataSource.getRepository(User);
 
       const usersServiceMock = {
-        findUserByEmail: jest.fn(async (email: string) => {
-          return await dataSource
-            .getRepository(User)
-            .findOne({ where: { email } });
-        }),
+        findUserByEmail: jest.fn(
+          async (email: string) =>
+            await userRepo().findOne({ where: { email } }),
+        ),
+        findUserByEmailForUpdate: jest.fn(
+          async (manager: any, email: string) =>
+            await manager
+              .getRepository(User)
+              .createQueryBuilder('u')
+              .setLock('pessimistic_write')
+              .where('u.email = :email', { email })
+              .getOne(),
+        ),
+        issueEmailVerificationToken: jest.fn(
+          async (
+            manager: any,
+            userId: string,
+            tokenHash: string,
+            expiresAt: Date,
+          ) =>
+            await manager.getRepository(User).update(userId, {
+              emailVerificationTokenHash: tokenHash,
+              emailVerificationExpiresAt: expiresAt,
+              emailVerificationUsedAt: null,
+            }),
+        ),
+        consumeEmailVerificationToken: jest.fn(
+          async (manager: any, userId: string, now: Date) =>
+            await manager.getRepository(User).update(userId, {
+              emailVerificationUsedAt: now,
+              emailVerified: true,
+            }),
+        ),
+        setEmailVerified: jest.fn(
+          async (userId: string, manager?: any) =>
+            await (manager ? manager.getRepository(User) : userRepo()).update(
+              userId,
+              { emailVerified: true },
+            ),
+        ),
         createNewUser: jest.fn(async (data: any) => {
-          return await dataSource.getRepository(User).save(data);
+          return await userRepo().save(data);
         }),
       };
+
+      const eventPublisher = {
+        emit: jest.fn(async () => undefined),
+      } as unknown as AuthEventPublisher;
+      const clock = new SystemClock();
 
       authService = new AuthService(
         usersServiceMock,
@@ -89,6 +128,12 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
         cacheMock,
         configService,
         whatsappMock,
+        new RefreshTokenStore(dataSource),
+        new PasswordResetTokenStore(dataSource),
+        new OtpStore(dataSource, cacheMock),
+        eventPublisher,
+        clock,
+        { emailVerificationTtlMs: 24 * 3600_000 } as any,
       );
     } catch (e: any) {
       skip = true;
@@ -107,9 +152,7 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
   afterAll(async () => {
     try {
       if (dataSource?.isInitialized) {
-        await dataSource
-          .query('TRUNCATE "email_verification_token", "user" CASCADE')
-          .catch(() => {});
+        await dataSource.query('TRUNCATE "user" CASCADE').catch(() => {});
         await dataSource.destroy();
       }
     } catch {
@@ -120,9 +163,7 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
   beforeEach(async () => {
     if (skip || !dataSource?.isInitialized) return;
     cooldownStore.clear();
-    await dataSource
-      .query('TRUNCATE "email_verification_token", "user" CASCADE')
-      .catch(() => {});
+    await dataSource.query('TRUNCATE "user" CASCADE').catch(() => {});
   });
 
   it('should note skip gracefully when PG unavailable', () => {
@@ -130,11 +171,11 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
     expect(skip).toBe(true);
   });
 
-  it('resend invalidates old raw (400) and new raw verifies (200)', async () => {
+  it('resend overwrites live hash: old raw 400, new raw 200', async () => {
     if (skip || !dataSource?.isInitialized) return;
     const email = `resend_${Date.now()}@example.com`;
     const repo = dataSource.getRepository(User);
-    await repo.save(
+    const user = await repo.save(
       repo.create({
         firstName: 'R',
         lastName: 'U',
@@ -144,13 +185,13 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
       } as any),
     );
 
-    await authService.requestEmailVerification(email);
+    await authService.requestEmailVerification(user as any);
     const oldRaw = authService.lastVerificationToken!;
     await authService.resendVerification(email);
     const newRaw = authService.lastVerificationToken!;
     expect(newRaw).not.toBe(oldRaw);
 
-    // Old link dies with the resend invalidation
+    // Old link dies with the resend overwrite
     await expect(
       authService.verifyEmail({ email, token: oldRaw }),
     ).rejects.toThrow('Invalid or expired verification token');
@@ -160,7 +201,7 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
     ).resolves.toEqual({ verified: true, emailVerified: true });
   });
 
-  it('second resend within 60s → 429 before transaction', async () => {
+  it('second resend within 60s → VerificationCooldownError, 0 column change', async () => {
     if (skip || !dataSource?.isInitialized) return;
     const email = `cool_${Date.now()}@example.com`;
     const repo = dataSource.getRepository(User);
@@ -175,29 +216,29 @@ describe('Auth Integration T028 - resendVerification race + cooldown (real PG)',
     );
 
     await authService.resendVerification(email);
-    const countAfterFirst = await dataSource
-      .getRepository(EmailVerificationToken)
-      .count();
-    // Immediate second hits the armed 60s cooldown — 429, no new row
+    const hashAfterFirst = (
+      await repo.findOneOrFail({ where: { email } })
+    ).emailVerificationTokenHash;
+    // Immediate second hits the armed 60s cooldown — domain signal (the
+    // controller renders the 429 wire shape), live hash untouched.
     await expect(authService.resendVerification(email)).rejects.toThrow(
-      expect.objectContaining({ status: 429 }),
+      VerificationCooldownError,
     );
-    const countAfterSecond = await dataSource
-      .getRepository(EmailVerificationToken)
-      .count();
-    expect(countAfterSecond).toBe(countAfterFirst);
+    const hashAfterSecond = (
+      await repo.findOneOrFail({ where: { email } })
+    ).emailVerificationTokenHash;
+    expect(hashAfterSecond).toBe(hashAfterFirst);
   });
 
-  it('unknown email → 200 anti-enum, 0 rows', async () => {
+  it('unknown email → 200 anti-enum, user table untouched', async () => {
     if (skip || !dataSource?.isInitialized) return;
     const res = await authService.resendVerification(
       `nobody_${Date.now()}@example.com`,
     );
     expect(res).toEqual({
-      message: 'If an account exists, a verification email has been sent.',
+      message:
+        'This email is not registered or already verified. If an account exists, a verification email has been sent.',
     });
-    expect(await dataSource.getRepository(EmailVerificationToken).count()).toBe(
-      0,
-    );
+    expect(await dataSource.getRepository(User).count()).toBe(0);
   });
 });

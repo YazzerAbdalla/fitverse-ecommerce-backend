@@ -40,10 +40,7 @@ import type { WhatsAppProvider } from './providers/whatsapp.provider';
 import { OtpStore } from './stores/otp.store';
 import { PasswordResetTokenStore } from './stores/password-reset-token.store';
 import { RefreshTokenStore } from './stores/refresh-token.store';
-import {
-  VerificationCooldownError,
-  VerificationTokenStore,
-} from './stores/verification-token.store';
+import { VerificationCooldownError } from './verification-cooldown.error';
 import { GoogleProfile } from './strategies/google.strategy';
 import { JwtPayloadProps } from './types';
 
@@ -94,7 +91,6 @@ export class AuthService {
     private readonly whatsappProvider: WhatsAppProvider,
     private readonly refreshTokens: RefreshTokenStore,
     private readonly resetTokens: PasswordResetTokenStore,
-    private readonly verificationTokens: VerificationTokenStore,
     private readonly otpStore: OtpStore,
     private readonly eventPublisher: AuthEventPublisher,
     private readonly clock: SystemClock,
@@ -102,6 +98,10 @@ export class AuthService {
   ) {}
 
   private saltOrRounds = 10;
+
+  // Resend cooldown: 60s per email (Redis SET, fail-open). Named so the TTL
+  // arithmetic below states its unit (ms) and reason once.
+  private readonly resendCooldownMs = 60_000;
 
   // For testing: allow capturing raw tokens
   public lastRawToken?: string;
@@ -490,19 +490,6 @@ export class AuthService {
     return count;
   }
 
-  /**
-   * Purges used/expired EmailVerificationToken rows older than 7 days.
-   * Intended to be called by a nightly job (BullMQ repeat or ops cron), never in the request path.
-   * @returns Number of rows deleted.
-   */
-  async purgeExpiredVerificationTokens(): Promise<number> {
-    // Retention 7d per spec clarification: used tokens and long-expired actives are audit-dead
-    const count = await this.verificationTokens.purgeExpired();
-    if (count > 0)
-      this.logger.log(`EmailVerificationToken purge deleted ${count} rows`);
-    return count;
-  }
-
   // ============ Phase 16: Forgot Password & Recovery Token ============
   /**
    * Starts a password reset: anti-enumeration void for unknown emails,
@@ -629,6 +616,53 @@ export class AuthService {
   // src/common/ports.spec.ts).
 
   /**
+   * Checks the per-email resend cooldown (before any transaction).
+   * Fail-open: cache errors behave as "no cooldown", with a warn log.
+   *
+   * @param normalizedEmail - Lowercased email (cooldown key scope).
+   * @returns True when the cooldown is active (caller denies), false otherwise.
+   */
+  private async isResendCooldownActive(
+    normalizedEmail: string,
+  ): Promise<boolean> {
+    const key = `resend:cooldown:${normalizedEmail}`;
+    try {
+      const existing = await (
+        this.cache as unknown as {
+          get(k: string): Promise<unknown>;
+        }
+      ).get(key);
+      return !!existing;
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Resend cooldown check fail-open for ${normalizedEmail}: ${(error as Error)?.message ?? error}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Arms the per-email resend cooldown after a successful issue (fail-open).
+   *
+   * @param normalizedEmail - Lowercased email (cooldown key scope).
+   * @returns Void.
+   */
+  private async markResendCooldown(normalizedEmail: string): Promise<void> {
+    const key = `resend:cooldown:${normalizedEmail}`;
+    try {
+      await (
+        this.cache as unknown as {
+          set(k: string, v: string, ttlMs: number): Promise<unknown>;
+        }
+      ).set(key, '1', this.resendCooldownMs);
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Resend cooldown set fail-open for ${normalizedEmail}: ${(error as Error)?.message ?? error}`,
+      );
+    }
+  }
+
+  /**
    * Creates (or refreshes) an email-verification token after commit and emits the send event.
    * Fire-and-forget: unknown email or already-verified returns void (anti-enum); failures never throw.
    * @param email - User email to verify.
@@ -641,30 +675,24 @@ export class AuthService {
       this.clock.now().getTime() + this.tokenConfig.emailVerificationTtlMs,
     );
 
-    let lastVerificationToken: string | undefined;
+    // Mint outside the tx (pure crypto); only the column overwrite is transactional.
+    const rawVerificationToken = generateHex();
+    const verificationTokenHash = sha256Hex(rawVerificationToken);
 
     await this.dataSource.transaction(async (manager) => {
-      // Store-owned issue (invalidate priors + insert + collision retry);
-      // returns the winning raw for the test hook + event below.
-      const winningRaw = await this.verificationTokens.newVerificationIssue(
+      // Single live token: overwrite the user columns (prior link dies here).
+      await this.usersService.issueEmailVerificationToken(
         manager,
         user.id,
+        verificationTokenHash,
         expiresAt,
-        () => {
-          const r = generateHex();
-          return { raw: r, hash: sha256Hex(r) };
-        },
-        (e: unknown) => this.isUniqueViolation(e),
       );
-      lastVerificationToken = winningRaw;
     });
     // Publish after commit — outside dataSource.transaction (constitution async rule).
-    // lastVerificationToken is always set by the store on success; the tx
-    // throws before reaching here otherwise.
-    const rawForEvent = lastVerificationToken;
+    const rawForEvent = rawVerificationToken;
     // Test hook (same pattern as lastRawToken): E2E/integration capture the
     // raw without reading email bodies.
-    this.lastVerificationToken = lastVerificationToken;
+    this.lastVerificationToken = rawForEvent;
     await this.eventPublisher.emit('email.verification_requested', {
       userId: user.id,
       email,
@@ -680,48 +708,53 @@ export class AuthService {
    * @throws BadRequestException 400 for unknown email, missing/used/expired token (no 404 leak).
    */
   async verifyEmail(
-    dto: VerifyEmailDto,
+    verifyEmailDto: VerifyEmailDto,
   ): Promise<{ verified: boolean; emailVerified: boolean }> {
-    const user = await this.usersService.findUserByEmail(dto.email);
+    const advisoryUser = await this.usersService.findUserByEmail(
+      verifyEmailDto.email,
+    );
     // Do not 404-leak existence — unknown email is the same 400 as a bad token
-    if (!user) {
+    if (!advisoryUser) {
       throw new BadRequestException('Invalid or expired verification token');
     }
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(dto.token)
-      .digest('hex');
-    const hashPrefix = tokenHash.slice(0, 6);
+    // Hash via the shared port (same digest the issue path stored).
+    const presentedTokenHash = sha256Hex(verifyEmailDto.token);
+    const hashPrefix = presentedTokenHash.slice(0, 6);
 
     await this.dataSource.transaction(async (manager) => {
-      // FOR UPDATE lookup scoped to (tokenHash, userId) — concurrent same raw serializes here (store-owned).
-      const found = await this.verificationTokens.findForUpdate(
+      // FOR UPDATE on the user row — concurrent same-raw verifies serialize
+      // here; the winner consumes, losers see usedAt/hash-mismatch → 400.
+      const lockedUser = await this.usersService.findUserByEmailForUpdate(
         manager,
-        tokenHash,
-        user.id,
+        verifyEmailDto.email,
       );
-      // Single-use or expired or wrong-user hash → 400 without mutating
+      // Never issued (null hash), wrong hash, already used, or expired →
+      // 400 with zero mutation.
       if (
-        !found ||
-        found.usedAt ||
-        found.expiresAt.getTime() <= this.clock.now().getTime()
+        !lockedUser ||
+        lockedUser.emailVerificationTokenHash !== presentedTokenHash ||
+        lockedUser.emailVerificationUsedAt ||
+        !lockedUser.emailVerificationExpiresAt ||
+        lockedUser.emailVerificationExpiresAt.getTime() <=
+          this.clock.now().getTime()
       ) {
         throw new BadRequestException('Invalid or expired verification token');
       }
-      await this.verificationTokens.markTokenAsUsed(manager, found);
-      // Set verified once (idempotent flag, no toggle) via UsersService (US2).
-      if (!user.emailVerified) {
-        await this.usersService.setEmailVerified(user.id, manager);
-      }
+      // Single-use consume + verified flag in one update (UsersService owns it).
+      await this.usersService.consumeEmailVerificationToken(
+        manager,
+        lockedUser.id,
+        this.clock.now(),
+      );
     });
     // Hash prefix only — raw token is never logged
     this.logger.log(
-      `email verified userId=${user.id} hashPrefix=${hashPrefix}`,
+      `email verified userId=${advisoryUser.id} hashPrefix=${hashPrefix}`,
     );
     // Optional post-commit event — outside the tx, fail-open
     await this.eventPublisher.emit('auth.email_verified', {
-      userId: user.id,
-      email: dto.email,
+      userId: advisoryUser.id,
+      email: verifyEmailDto.email,
     });
     return { verified: true, emailVerified: true };
   }
@@ -734,10 +767,10 @@ export class AuthService {
    *   (before any transaction; the controller renders the 429 wire shape).
    */
   async resendVerification(email: string): Promise<{ message: string }> {
-    const normalized = email.toLowerCase();
+    const normalizedEmail = email.toLowerCase();
     // 60s cooldown prevents burst re-sends — checked before any DB
     // Cache-Read: if the cooldown is active, throw before any DB transaction (0 calls).
-    if (await this.verificationTokens.isCooldownActive(normalized)) {
+    if (await this.isResendCooldownActive(normalizedEmail)) {
       // Cooldown active → deny immediately, 0 transaction calls.
       throw new VerificationCooldownError(60);
     }
@@ -761,34 +794,30 @@ export class AuthService {
       this.clock.now().getTime() + this.tokenConfig.emailVerificationTtlMs,
     );
 
-    let lastVerificationToken: string | undefined;
+    // Mint outside the tx; only the column overwrite is transactional.
+    const rawVerificationToken = generateHex();
+    const verificationTokenHash = sha256Hex(rawVerificationToken);
 
     await this.dataSource.transaction(async (manager) => {
-      // Invalidate priors so the old link dies exactly when the new one is
-      // born (a racing verifyEmail on the old raw serializes on FOR UPDATE
-      // and sees usedAt → 400). Store-owned; returns the winning raw.
-      const winningRaw = await this.verificationTokens.newVerificationIssue(
+      // Overwrite the live token so the old link dies exactly when the new
+      // one is born (a racing verifyEmail on the old raw serializes on the
+      // user FOR UPDATE and sees a hash mismatch → 400).
+      await this.usersService.issueEmailVerificationToken(
         manager,
         user.id,
+        verificationTokenHash,
         expiresAt,
-        () => {
-          const r = generateHex();
-          return { raw: r, hash: sha256Hex(r) };
-        },
-        (e: unknown) => this.isUniqueViolation(e),
-        false, // resend path never retried collisions (legacy propagates)
       );
-      lastVerificationToken = winningRaw;
     });
-    // Arm the 60s cooldown after a successful issue (store-owned, fail-open).
-    await this.verificationTokens.markCooldown(normalized);
+    // Arm the 60s cooldown after a successful issue (fail-open).
+    await this.markResendCooldown(normalizedEmail);
     // Test hook (same pattern as lastRawToken).
-    this.lastVerificationToken = lastVerificationToken;
+    this.lastVerificationToken = rawVerificationToken;
     // Publish after commit — outside dataSource.transaction
     await this.eventPublisher.emit('email.verification_requested', {
       userId: user.id,
       email,
-      rawToken: lastVerificationToken,
+      rawToken: rawVerificationToken,
       expiresAt: expiresAt.toISOString(),
     });
     return {

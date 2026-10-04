@@ -7,7 +7,6 @@ import { AuthService } from './auth.service';
 import { UsersService } from '../users/users.service';
 import { RefreshTokenStore } from './stores/refresh-token.store';
 import { PasswordResetTokenStore } from './stores/password-reset-token.store';
-import { VerificationTokenStore } from './stores/verification-token.store';
 import { OtpStore } from './stores/otp.store';
 import { AuthEventPublisher } from './auth-event.publisher';
 import { SystemClock } from '../../common/clock';
@@ -153,7 +152,6 @@ describe('AuthService Refresh Token (Phase 17)', () => {
           },
         },
         { provide: PasswordResetTokenStore, useValue: {} },
-        { provide: VerificationTokenStore, useValue: {} },
         { provide: OtpStore, useValue: {} },
         { provide: AuthEventPublisher, useValue: { emit: jest.fn() } },
         { provide: SystemClock, useValue: { now: () => new Date() } },
