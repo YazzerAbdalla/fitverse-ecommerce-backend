@@ -40,7 +40,7 @@ export class JwtGuard implements CanActivate {
       // is the key that was passed in the JwtModule
       const payload: Record<string, string> =
         await this.jwtService.verifyAsync(token);
-      // S-1: sole-path revocation check (mirrors JwtStrategy.validate).
+      // S-1: sole-path revocation check (no second path remains).
       // Payload shape on request.user is frozen — downstream RolesGuard and
       // @CurrentUser() consume {sub, email, fullName, role, tokenVersion}.
       await this.assertNotRevoked(payload);
@@ -84,9 +84,9 @@ export class JwtGuard implements CanActivate {
     ) {
       throw new UnauthorizedException('Token revoked, please login again');
     }
-    // Fallback for tokens issued before tokenVersion existed (mirrors
-    // JwtStrategy.validate: tokens that cannot prove recency are allowed
-    // through here; the tokenVersion check above is the real authority).
+    // Fallback for tokens issued before tokenVersion existed: tokens that
+    // cannot prove recency are allowed through here; the tokenVersion check
+    // above is the real authority.
     const changedAt: unknown = (user as { passwordChangedAt?: unknown })
       .passwordChangedAt;
     const issuedAt: unknown = payload.iat;

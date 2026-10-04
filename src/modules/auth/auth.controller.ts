@@ -4,7 +4,7 @@
  *
  * Responsibility (SRP): auth HTTP transport, nothing else.
  * Used by: AuthModule (route registration).
- * Depends on: AuthService, RateLimitGuard/JwtAuthGuard/GoogleAuthGuard,
+ * Depends on: AuthService, RateLimitGuard/GoogleAuthGuard,
  *   AUTH_TOKEN_CONFIG (cookie shaping).
  */
 import {
@@ -37,7 +37,6 @@ import { ValidateResetTokenDto } from './dto/validate-reset-token.dto';
 import { RequestOtpDto } from './dto/request-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RateLimitGuard } from './guards/rate-limit.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { RefreshTokenDto, LogoutDto } from './dto/refresh-token.dto';
@@ -345,9 +344,8 @@ export class AuthController {
   })
   /** Revokes all sessions via tokenVersion++ plus bulk revoke. */
   async logoutAll(@CurrentUser() user: Partial<User> & { sub: string }) {
-    // S-1: unified guard provides the payload shape ({sub, ...}); the entity
-    // shape ({id}) existed only via the removed stacked JwtAuthGuard.
-    const userId = user.sub ?? user.id;
+    // S-1: JwtGuard is the sole path, so the payload shape ({sub}) always holds.
+    const userId = user.sub;
     await this.authService.logoutAll(userId);
     return { message: 'All sessions revoked' };
   }
@@ -385,7 +383,8 @@ export class AuthController {
   }
 
   @Get('/google/link')
-  @UseGuards(JwtAuthGuard, GoogleAuthGuard)
+  @Auth()
+  @UseGuards(GoogleAuthGuard)
   @ApiOperation({ summary: 'Link Google to current user' })
   /** Links the Google identity to the current user. */
   async googleLink(
@@ -396,8 +395,8 @@ export class AuthController {
     },
   ) {
     const profile = req.user as GoogleProfile;
-    // S-1 companion: prefer payload sub; entity id only pre-unification.
-    await this.authService.linkGoogleAccount(user.sub ?? user.id, profile);
+    // S-1: JwtGuard payload always carries sub (no entity-shape fallback).
+    await this.authService.linkGoogleAccount(user.sub, profile);
     return { message: 'Google linked.' };
   }
 }

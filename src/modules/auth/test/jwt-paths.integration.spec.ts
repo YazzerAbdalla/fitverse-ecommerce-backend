@@ -1,26 +1,23 @@
 /**
- * BASELINE characterization: dual-JWT-path behavior (read-only, no production changes).
+ * BASELINE characterization: sole-JWT-path behavior (read-only, no production changes).
  *
- * Phase 2 T004 of specs/015-auth-user-refactor (research D1). Two JWT paths exist:
- * - JwtGuard (guards/jwt.guard.ts): S-1 UNIFIED — `verifyAsync` + UsersService
+ * Phase 2 T004 of specs/015-auth-user-refactor (research D1), as enacted by A7:
+ * - JwtGuard (guards/jwt.guard.ts): SOLE path — `verifyAsync` + UsersService
  *   lookup + tokenVersion check, sets `request.user = payload`.
- *   (Pre-S-1 it skipped the lookup and let revoked tokens through.)
- * - JwtStrategy (strategies/jwt.strategy.ts): retained but off the request path.
- * - @Auth() hardcodes JwtGuard (decorators/auth.decorator.ts:7-11), so every
+ * - @Auth() hardcodes JwtGuard (decorators/auth.decorator.ts), so every
  *   `@Auth()` route runs the payload shape through RolesGuard.
+ * - The off-path passport strategy + wrapper guard were removed (A7); the
+ *   entity-vs-payload divergence they caused is gone with them.
  *
  * Unit-style: JwtService + UsersService are mocked (auth.service.spec.ts style),
- * no DB needed. Do NOT "fix" these expectations — S-1 unification (T012) will
- * flip test 1 to 401; that flip is the S-delta proof.
+ * no DB needed.
  */
 import { UnauthorizedException, ForbiddenException } from '@nestjs/common';
 import { ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
-import { ConfigService } from '@nestjs/config';
 import { JwtGuard } from '../guards/jwt.guard';
 import { RolesGuard } from '../guards/roles.guard';
-import { JwtStrategy } from '../strategies/jwt.strategy';
 import { UserRoles } from '../../users/enum/roles';
 import { JwtPayload } from '../types';
 
@@ -52,13 +49,11 @@ function httpContext(req: any, roles?: UserRoles[]): ExecutionContext {
 describe('jwt-paths baseline (T004, research D1)', () => {
   let jwtService: Record<string, jest.Mock>;
   let usersService: Record<string, jest.Mock>;
-  let configService: Record<string, jest.Mock>;
   let reflector: Record<string, jest.Mock>;
 
   beforeEach(() => {
     jwtService = { verifyAsync: jest.fn() };
     usersService = { findUserById: jest.fn(), findUserByEmail: jest.fn() };
-    configService = { get: jest.fn().mockReturnValue('secret') };
     reflector = { getAllAndOverride: jest.fn() };
   });
 
@@ -172,80 +167,7 @@ describe('jwt-paths baseline (T004, research D1)', () => {
     });
   });
 
-  describe('2. JwtStrategy denies the same revoked payload (enforcement)', () => {
-    it('validate throws UnauthorizedException on tokenVersion mismatch', async () => {
-      // S-1 PRE-STATE companion: the strategy path DOES enforce revocation.
-      usersService.findUserById.mockResolvedValue({ ...CURRENT_USER_ROW });
-      const strategy = new JwtStrategy(
-        usersService as any,
-        configService as unknown as ConfigService,
-      );
-
-      await expect(strategy.validate({ ...REVOKED_PAYLOAD })).rejects.toThrow(
-        UnauthorizedException,
-      );
-      await expect(strategy.validate({ ...REVOKED_PAYLOAD })).rejects.toThrow(
-        'Token revoked, please login again',
-      );
-      expect(usersService.findUserById).toHaveBeenCalledWith('user-1');
-    });
-
-    it('validate returns the User entity when versions match', async () => {
-      usersService.findUserById.mockResolvedValue({ ...CURRENT_USER_ROW });
-      const strategy = new JwtStrategy(
-        usersService as any,
-        configService as unknown as ConfigService,
-      );
-
-      const result = await strategy.validate({
-        ...REVOKED_PAYLOAD,
-        tokenVersion: 1,
-      });
-      // Shape: strategy returns the entity (has `id`, no `sub`).
-      expect(result).toEqual({ ...CURRENT_USER_ROW });
-      expect((result as any).id).toBe('user-1');
-      expect((result as any).sub).toBeUndefined();
-    });
-  });
-
-  describe('3. Shape documentation: payload vs entity', () => {
-    it('JwtGuard request.user is the payload; JwtStrategy result is the entity', async () => {
-      jwtService.verifyAsync.mockResolvedValue({
-        ...REVOKED_PAYLOAD,
-        tokenVersion: 1,
-      });
-      usersService.findUserById.mockResolvedValue({ ...CURRENT_USER_ROW });
-      const guard = new JwtGuard(
-        jwtService as unknown as JwtService,
-        usersService as any,
-      );
-      const strategy = new JwtStrategy(
-        usersService as any,
-        configService as unknown as ConfigService,
-      );
-
-      const req: any = {
-        headers: { authorization: 'Bearer revoked-token' },
-      };
-      await guard.canActivate(httpContext(req));
-      const entity = await strategy.validate({
-        ...REVOKED_PAYLOAD,
-        tokenVersion: 1,
-      });
-
-      // Payload keys (what RolesGuard + @CurrentUser() consume on @Auth() routes)
-      expect(Object.keys(req.user).sort()).toEqual(
-        ['email', 'fullName', 'role', 'sub', 'tokenVersion'].sort(),
-      );
-      // Entity keys (passport/JwtAuthGuard shape — NOT what @Auth() routes see)
-      expect(Object.keys(entity as any)).toEqual(
-        expect.arrayContaining(['id', 'email', 'role', 'tokenVersion']),
-      );
-      expect((entity as any).sub).toBeUndefined();
-    });
-  });
-
-  describe('4. RolesGuard relies on the payload shape', () => {
+  describe('2. RolesGuard relies on the payload shape', () => {
     function rolesGuardWith(required: UserRoles[] | undefined) {
       reflector.getAllAndOverride.mockReturnValue(required);
       return new RolesGuard(reflector as unknown as Reflector);
