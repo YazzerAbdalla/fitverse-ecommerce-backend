@@ -103,7 +103,7 @@ test files co-located per repo convention (`*.spec.ts` + `test/`).
 | Violation | Why Needed | Simpler Alternative Rejected Because |
 |-----------|------------|-------------------------------------|
 | II/TI-1: `OrderCancellationService` touches `Reservation`/`Inventory` repos directly | Consistency with the proven Phase 7 `OrderCompletionService` pattern in the same checkout→complete→cancel money flow; routing through `ReservationService`/`InventoryService` mid-phase would change lock ordering (D5) and widen blast radius to the expiry path | Deferring to `docs/REFACTOR_PLAN.md` S6 (RP-ORDER intent-based stores), which owns the TI-1/TI-3 cleanup with its own tests |
-| Controller-owned tx (TI-3) kept | Same-file consistency with `complete` (`order.controller.ts:152,249`); moving the boundary is S6 scope, not demo scope | A half-migrated boundary (cancel service-owned, complete controller-owned) is worse than a consistent one |
+| Controller-owned tx (TI-3) removed in Phase 8 | User-directed: `OrderController` drops `DataSource` entirely; `cancelOrder`/`completeOrder` own their transactions with `…WithManager` cores for composition (T033–T035). Checkout already service-owned | Uniform service-owned boundary is better than file-level consistency with a known violation |
 
 ## Phase 2 Handoff (for `/speckit.tasks`)
 

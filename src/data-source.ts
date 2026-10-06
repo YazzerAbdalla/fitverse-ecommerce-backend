@@ -8,6 +8,7 @@
  * Depends on: entity classes under src/modules/*, dotenv (.env).
  */
 import * as dotenv from 'dotenv';
+import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import User from './modules/users/entity/user.entity';
 import { Product } from './modules/products/entities/product.entity';
@@ -25,14 +26,39 @@ import { OtpVerification } from './modules/auth/entities/otp-verification.entity
 
 dotenv.config();
 
+// Schema sync is a system-mode condition from .env, not a hardcoded flag.
+// Explicit TYPEORM_SYNCHRONIZE wins; otherwise sync is ON outside production
+// (develop = true for now) and OFF in production, where migrations own DDL.
+// Sync=true never replaces migration files: every schema change still ships
+// as a committed migration under src/migration (see Database Rules).
+const systemMode = (
+  process.env.MODE ??
+  process.env.NODE_ENV ??
+  'development'
+).toUpperCase();
+const synchronizeFlag = process.env.TYPEORM_SYNCHRONIZE?.toLowerCase();
+const isProductionMode = systemMode === 'PROD' || systemMode === 'PRODUCTION';
+export const AppSynchronize =
+  synchronizeFlag !== undefined
+    ? synchronizeFlag === 'true' || synchronizeFlag === '1'
+    : !isProductionMode;
+
+if (AppSynchronize) {
+  new Logger('DataSource').warn(
+    `TypeORM synchronize=true (mode=${systemMode}): dev convenience only — production must use migrations with synchronize=false.`,
+  );
+}
+
 export const AppDataSource = new DataSource({
   type: 'postgres', // or 'mysql', 'sqlite', etc.
   host: process.env.POSTGRES_HOST,
-  port: process.env.POSTGRES_PORT ? parseInt(process.env.POSTGRES_PORT) : 5432,
+  port: process.env.POSTGRES_PORT
+    ? parseInt(process.env.POSTGRES_PORT, 10)
+    : 5432,
   username: process.env.POSTGRES_USER,
   password: process.env.POSTGRES_PASSWORD,
   database: process.env.POSTGRES_DATABASE,
-  synchronize: false,
+  synchronize: AppSynchronize,
   logging: true,
   entities: [
     User,

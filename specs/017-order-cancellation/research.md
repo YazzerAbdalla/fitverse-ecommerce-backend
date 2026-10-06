@@ -90,6 +90,32 @@ open NEEDS CLARIFICATION remains.
 - **Alternatives considered**: Keep optional — rejected; silent fail-open on
   a money-path service.
 
+## D10 — `cancel()` return contract (T005 decision)
+
+- **Decision**: `cancel()` returns an enriched `CancelOrderResult`
+  `{ order, reservationId: string | null, reason: 'user' | 'failed' | 'expired' }`
+  instead of a bare `Order`. The controller shapes the HTTP body from it
+  (D6); the only caller is `OrderController.cancel` (expiry path untouched,
+  D4). Interface is named (no inline literal) and documented on the method
+  JSDoc at implementation (T009).
+- **Rationale**: The service already loads the reservation (needed for the
+  release); returning its id avoids a second lookup in the controller for
+  FR-012 traceability. `reason` echoes the input param for the response.
+- **Alternatives considered**: Controller re-reads the reservation after
+  cancel — rejected (extra round trip for data already in hand).
+
+## D9 — Cancel reason is not embedded in order reads (T017 deferral)
+
+- **Decision**: `GET /order` and `GET /order/:id` do NOT carry the cancel
+  reason. The reason stays observable via the cancel response (FR-012) and
+  the `order.cancelled` record. Embedding it into reads would need a new
+  column (migration) or a per-row outbox lookup on a hot read path — both
+  rejected for demo scope.
+- **Rationale**: No-DDL constraint (data-model.md); reads stay fast;
+  observability requirement (US3/SC-005) is fully met without it.
+- **Follow-up**: post-demo, either a nullable `cancelReason` column or a
+  read-model join; tracked, not scheduled.
+
 ## D8 — Rate limiting stays as-is
 
 - **Decision**: Keep the existing `@UseGuards(RateLimitGuard)` on

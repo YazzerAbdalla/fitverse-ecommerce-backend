@@ -22,8 +22,8 @@ testable. No schema change, no new routes in any phase.
 
 **Purpose**: Baseline before touching the money path
 
-- [ ] T001 Verify green baseline on `017-order-cancellation`: run `npm run build` and `npm run test -- --runInBand src/modules/order` and record results in `specs/017-order-cancellation/tasks.md` notes
-- [ ] T002 [P] Pin current cancel contract with a characterization test in `src/modules/order/test/order-cancel.characterization.spec.ts` (real PG optional): assert current `POST /order/:id/cancel` returns `{id, status, total, userId}` and outbox swallow commits on record-write failure — documents the two intentional B-deltas this phase will change (D2 response shape, D2 rollback)
+- [X] T001 Verify green baseline on `017-order-cancellation`: run `npm run build` and `npm run test -- --runInBand src/modules/order` and record results in `specs/017-order-cancellation/tasks.md` notes
+- [X] T002 [P] Pin current cancel contract with a characterization test in `src/modules/order/test/order-cancel.characterization.spec.ts` (real PG optional): assert current `POST /order/:id/cancel` returns `{id, status, total, userId}` and outbox swallow commits on record-write failure — documents the two intentional B-deltas this phase will change (D2 response shape, D2 rollback)
 
 ---
 
@@ -33,9 +33,9 @@ testable. No schema change, no new routes in any phase.
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T003 Create cancel test fixture helper in `src/modules/order/test/cancel-fixtures.ts` (checkout a PENDING order + RESERVED reservation via `OrderCheckoutService` on real PG; return `{orderId, reservationId, productIds, quantities}`)
-- [ ] T004 [P] Fix `src/modules/order/order.controller.spec.ts` to provide a mocked `OrderCancellationService` (unblocks required-dependency wiring in US1)
-- [ ] T005 Decide service return shape in `src/modules/order/order-cancellation.service.ts` docstring: `cancel()` returns enriched `{order, reservationId, reason}` (needed by FR-012; only caller is `OrderController.cancel`, expiry path untouched per D4)
+- [X] T003 Create cancel test fixture helper in `src/modules/order/test/cancel-fixtures.ts` (checkout a PENDING order + RESERVED reservation via `OrderCheckoutService` on real PG; return `{orderId, reservationId, productIds, quantities}`)
+- [X] T004 [P] Fix `src/modules/order/order.controller.spec.ts` to provide a mocked `OrderCancellationService` (unblocks required-dependency wiring in US1)
+- [X] T005 Decide service return shape in `src/modules/order/order-cancellation.service.ts` docstring: `cancel()` returns enriched `{order, reservationId, reason}` (needed by FR-012; only caller is `OrderController.cancel`, expiry path untouched per D4)
 
 **Checkpoint**: Foundation ready - user story implementation can now begin
 
@@ -52,16 +52,16 @@ shape → `GET /order/:id` CANCELLED → inventory `reservedAmount` released,
 
 ### Tests for User Story 1 (write FIRST, ensure they FAIL before implementation)
 
-- [ ] T006 [P] [US1] Unit matrix for `cancel()` in `src/modules/order/order-cancellation.service.spec.ts` (mocked `EntityManager`): PENDING→CANCELLED releases hold; re-cancel CANCELLED/FAILED idempotent 200; COMPLETED→409; non-owner→403; missing order→404; missing inventory→404; `FAILED` target on `reason=failed` with reservation→CANCELLED (D3)
-- [ ] T007 [P] [US1] Real-PG integration in `src/modules/order/test/order-cancel.integration.spec.ts`: atomic cancel (order+reservation+inventory+outbox all move or none); forced outbox INSERT failure rolls back the whole cancel (D2/Q2-A regression); reservation already-terminal closes order with zero inventory delta; `available = stock - reservedAmount` restored
-- [ ] T008 [P] [US1] Concurrency proof in `src/modules/order/test/order-cancel.concurrency.spec.ts` (real PG, `Promise.all`): `cancel vs cancel` single release; `cancel vs complete` exactly one winner with consistent final state (SC-004)
+- [X] T006 [P] [US1] Unit matrix for `cancel()` in `src/modules/order/order-cancellation.service.spec.ts` (mocked `EntityManager`): PENDING→CANCELLED releases hold; re-cancel CANCELLED/FAILED idempotent 200; COMPLETED→409; non-owner→403; missing order→404; missing inventory→404; `FAILED` target on `reason=failed` with reservation→CANCELLED (D3)
+- [X] T007 [P] [US1] Real-PG integration in `src/modules/order/test/order-cancel.integration.spec.ts`: atomic cancel (order+reservation+inventory+outbox all move or none); forced outbox INSERT failure rolls back the whole cancel (D2/Q2-A regression); reservation already-terminal closes order with zero inventory delta; `available = stock - reservedAmount` restored
+- [X] T008 [P] [US1] Concurrency proof in `src/modules/order/test/order-cancel.concurrency.spec.ts` (real PG, `Promise.all`): `cancel vs cancel` single release; `cancel vs complete` exactly one winner with consistent final state (SC-004)
 
 ### Implementation for User Story 1
 
-- [ ] T009 [US1] Harden `cancel()` in `src/modules/order/order-cancellation.service.ts` (depends on T005): delete outbox try/catch-warn so record failure propagates/rolls back (D2); implement failed-path disposition order→FAILED + reservation→CANCELLED + release (D3); type lock options (remove `as any`); keep `FOR UPDATE` Order → Reservation → sorted Inventories (D5); full JSDoc + `//` intent comments per AGENTS.md §3
-- [ ] T010 [US1] Wire required dependency + enriched response in `src/modules/order/order.controller.ts`: remove `@Optional()`/`!`/not-available branch for `OrderCancellationService` (D7/OD-1); return `{id, status, total, userId, reason, reservationId}` per `specs/017-order-cancellation/contracts/order-cancel.md` (D6, keys existing byte-identical)
-- [ ] T011 [US1] Update characterization test from T002 to the new contract in `src/modules/order/test/order-cancel.characterization.spec.ts`: enriched shape asserted, swallow-behavior test inverted to rollback-behavior test
-- [ ] T012 [US1] Run quickstart flow in `specs/017-order-cancellation/quickstart.md` steps 1–6 against local dev and record output (SC-001/SC-002 evidence)
+- [X] T009 [US1] Harden `cancel()` in `src/modules/order/order-cancellation.service.ts` (depends on T005): delete outbox try/catch-warn so record failure propagates/rolls back (D2); implement failed-path disposition order→FAILED + reservation→CANCELLED + release (D3); type lock options (remove `as any`); keep `FOR UPDATE` Order → Reservation → sorted Inventories (D5); split reservation lock (no relations) from items load per ADR-0010 — fixes F5 `FOR UPDATE cannot be applied to the nullable side of an outer join` QueryFailedError proven by T008 (current `relations: {items: true}` + lock breaks every cancel with items on real PG); full JSDoc + `//` intent comments per AGENTS.md §3
+- [X] T010 [US1] Wire required dependency + enriched response in `src/modules/order/order.controller.ts`: remove `@Optional()`/`!`/not-available branch for `OrderCancellationService` (D7/OD-1); return `{id, status, total, userId, reason, reservationId}` per `specs/017-order-cancellation/contracts/order-cancel.md` (D6, keys existing byte-identical); call tx-owning `cancelOrder` (no controller tx after T033/T035)
+- [X] T011 [US1] Update characterization test from T002 to the new contract in `src/modules/order/test/order-cancel.characterization.spec.ts`: enriched shape asserted, swallow-behavior test inverted to rollback-behavior test
+- [X] T012 [US1] Run quickstart flow in `specs/017-order-cancellation/quickstart.md` steps 1–6 against local dev and record output (SC-001/SC-002 evidence)
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently
 
@@ -78,12 +78,12 @@ single release even when user-cancel races expiry.
 
 ### Tests for User Story 2
 
-- [ ] T013 [P] [US2] Admin-cancel + ownership matrix in `src/modules/order/test/order-cancel.integration.spec.ts` (extend): admin cancels other's order 200; non-owner non-admin 403; unauthenticated 401
-- [ ] T014 [P] [US2] Expiry regression + race in `src/modules/reservation/test/order-cancel-expiry.race.spec.ts` (real PG): expired reservation auto-cancels order with `order.cancelled(reason=expired)` row present; `Promise.all([userCancel, expireOne])` yields exactly one inventory release and a consistent terminal pair (no double-release)
+- [X] T013 [P] [US2] Admin-cancel + ownership matrix in `src/modules/order/test/order-cancel.integration.spec.ts` (extend): admin cancels other's order 200; non-owner non-admin 403; unauthenticated 401
+- [X] T014 [P] [US2] Expiry regression + race in `src/modules/reservation/test/order-cancel-expiry.race.spec.ts` (real PG): expired reservation auto-cancels order with `order.cancelled(reason=expired)` row present; `Promise.all([userCancel, expireOne])` yields exactly one inventory release and a consistent terminal pair (no double-release)
 
 ### Implementation for User Story 2
 
-- [ ] T015 [US2] Verify no code change needed in `src/modules/reservation/reservation-expiration.service.ts` (D4 — read-only task): confirm `reason=expired` envelope matches `specs/017-order-cancellation/data-model.md` and record confirmation in `specs/017-order-cancellation/tasks.md` notes; if mismatch found, align envelope fields only, touching no lock/poison logic
+- [X] T015 [US2] Verify no code change needed in `src/modules/reservation/reservation-expiration.service.ts` (D4 — read-only task): confirm `reason=expired` envelope matches `specs/017-order-cancellation/data-model.md` and record confirmation in `specs/017-order-cancellation/tasks.md` notes; if mismatch found, align envelope fields only, touching no lock/poison logic
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should both work independently
 
@@ -101,11 +101,11 @@ response carries reason + reservation link.
 
 ### Tests for User Story 3
 
-- [ ] T016 [P] [US3] Outbox-envelope assertions in `src/modules/order/test/order-cancel.integration.spec.ts` (extend): `payload.eventId === row.id`, `version: 1`, `previousStatus: PENDING`, `newStatus` matches, `reason ∈ {user, expired, failed}`, `reservationId` matches (or null); duplicate cancel emits no second row
+- [X] T016 [P] [US3] Outbox-envelope assertions in `src/modules/order/test/order-cancel.integration.spec.ts` (extend): `payload.eventId === row.id`, `version: 1`, `previousStatus: PENDING`, `newStatus` matches, `reason ∈ {user, expired, failed}`, `reservationId` matches (or null); duplicate cancel emits no second row
 
 ### Implementation for User Story 3
 
-- [ ] T017 [US3] Record GET-visibility deferral in `specs/017-order-cancellation/research.md` (append D9): order reads (`GET /order`, `GET /order/:id`) do NOT embed the reason (no migration per no-DDL constraint); reason is observable via cancel response (FR-012) + `order.cancelled` record; embedding into reads is a post-demo follow-up
+- [X] T017 [US3] Record GET-visibility deferral in `specs/017-order-cancellation/research.md` (append D9): order reads (`GET /order`, `GET /order/:id`) do NOT embed the reason (no migration per no-DDL constraint); reason is observable via cancel response (FR-012) + `order.cancelled` record; embedding into reads is a post-demo follow-up
 
 **Checkpoint**: All user stories should now be independently functional
 
@@ -120,19 +120,22 @@ chat 2026-10-06 (20 findings, F1–F4/M1–M16). Executes interleaved with Phase
 
 ### A. In-scope fixes (new tasks)
 
-- [ ] T023 [US1] Unify order transition authority in `src/modules/order/order-transitions.ts` (NEW): single `ALLOWED_ORDER_TRANSITIONS` + `validateOrderTransition()` + `assertOrderOwner()` replacing the 3 drifted copies in `src/modules/order/order.service.ts:19-28`, `src/modules/order/order-completion.service.ts:28-37,98-120`, `src/modules/order/order-cancellation.service.ts:40-65`; cancellation keeps its narrower target guard (CANCELLED/FAILED only) on top of the shared map (fixes F2 state-machine drift; CC-B consumes this helper in S2)
-- [ ] T024 [US1] Unify inventory error mapping in `src/modules/order/order-cancellation.service.ts`: reuse the single `23514/CHK → 409` mapper from T023 helper file for the cancel path (fixes M2 variant drift on the touched copy; checkout/complete copies migrate in S6)
-- [ ] T025 [US1] Remove `any` on touched cancel path in `src/modules/order/order-cancellation.service.ts:94,129,183`, `src/modules/order/order.controller.ts:9,152,249,259` (`req: any`, `result: any` on cancel handler only): typed `FindOneOptions` lock modes, `catch (error: unknown)` + narrowing, named `CancelOrderResult` return type (fixes M9 on touched lines; untouched `any` elsewhere stays for S6)
-- [ ] T026 [US1] Add idempotency-skip counter parity in `src/modules/order/order-cancellation.service.ts:104-113`: `INCR idempotency:duplicate:skipped:cancel EX 86400` fail-open on the idempotent re-cancel branch, mirroring `OrderCompletionService.incrementCounter` (fixes M17 observability gap)
-- [ ] T027 [US2] Guard null-product deref in `src/modules/order/order-checkout.service.ts:71,79`: map missing `ci.product` to `404 Product not found` instead of `TypeError → 500` (fixes F4 robustness hole on the shared checkout path)
-- [ ] T028 [P] Delete dead code with DC-1 evidence in `src/modules/order/order.enum.ts` (0 importers — delete file), `src/modules/order/order.service.ts:167-176` (create/update/remove stubs, no callers), `src/modules/order/dto/create-order.dto.ts` + `src/modules/order/dto/update-order.dto.ts` (imported only by each other/stubs, controller uses CheckoutDto/CompleteOrderDto), `src/modules/order/entities/order.entity.ts:51-52` (`order_items?` alias, declaration-only); re-verify reachability at implementation, keep `OrderItem` snake_case getter aliases (M18 — live compat shims, do NOT touch)
-- [ ] T029 [P] Remove dead `DataSource` injection in `src/modules/order/order-completion.service.ts:48` (zero reads of `this.dataSource`; tx is controller-owned) + extract `currency: 'usd'` in `src/modules/order/order-checkout.service.ts:235` to a named `ORDER_CURRENCY` constant (fixes M7 + M13)
-- [ ] T030 [P] Remove unreachable `total < 0` guard in `src/modules/order/order-checkout.service.ts:181-183` (qty > 0 + price ≥ 0 enforced above make it dead) and document the price-snapshot-without-lock read in `src/modules/order/order-checkout.service.ts:81` as intentional snapshot semantics (fixes M14 + records M19 so nobody "fixes" it later)
+- [X] T023 [US1] Unify order transition authority in `src/modules/order/order-transitions.ts` (NEW): single `ALLOWED_ORDER_TRANSITIONS` + `validateOrderTransition()` + `assertOrderOwner()` replacing the 3 drifted copies in `src/modules/order/order.service.ts:19-28`, `src/modules/order/order-completion.service.ts:28-37,98-120`, `src/modules/order/order-cancellation.service.ts:40-65`; cancellation keeps its narrower target guard (CANCELLED/FAILED only) on top of the shared map (fixes F2 state-machine drift; CC-B consumes this helper in S2)
+- [X] T024 [US1] Unify inventory error mapping in `src/modules/order/order-cancellation.service.ts`: reuse the single `23514/CHK → 409` mapper from T023 helper file for the cancel path (fixes M2 variant drift on the touched copy; checkout/complete copies migrate in S6)
+- [X] T025 [US1] Remove `any` on touched cancel path in `src/modules/order/order-cancellation.service.ts:94,129,183`, `src/modules/order/order.controller.ts:9,152,249,259` (`req: any`, `result: any` on cancel handler only): typed `FindOneOptions` lock modes, `catch (error: unknown)` + narrowing, named `CancelOrderResult` return type (fixes M9 on touched lines; untouched `any` elsewhere stays for S6)
+- [X] T026 [US1] Add idempotency-skip counter parity in `src/modules/order/order-cancellation.service.ts:104-113`: `INCR idempotency:duplicate:skipped:cancel EX 86400` fail-open on the idempotent re-cancel branch, mirroring `OrderCompletionService.incrementCounter` (fixes M17 observability gap)
+- [X] T027 [US2] Guard null-product deref in `src/modules/order/order-checkout.service.ts:71,79`: map missing `ci.product` to `404 Product not found` instead of `TypeError → 500` (fixes F4 robustness hole on the shared checkout path)
+- [X] T028 [P] Delete dead code with DC-1 evidence in `src/modules/order/order.enum.ts` (0 importers — delete file), `src/modules/order/order.service.ts:167-176` (create/update/remove stubs, no callers), `src/modules/order/dto/create-order.dto.ts` + `src/modules/order/dto/update-order.dto.ts` (imported only by each other/stubs, controller uses CheckoutDto/CompleteOrderDto), `src/modules/order/entities/order.entity.ts:51-52` (`order_items?` alias, declaration-only); re-verify reachability at implementation, keep `OrderItem` snake_case getter aliases (M18 — live compat shims, do NOT touch)
+- [X] T029 [P] Extract `currency: 'usd'` in `src/modules/order/order-checkout.service.ts:235` to a named `ORDER_CURRENCY` constant (fixes M13; the `DataSource`-removal half is void — T034 re-adds it as the tx owner)
+- [X] T030 [P] Remove unreachable `total < 0` guard in `src/modules/order/order-checkout.service.ts:181-183` (qty > 0 + price ≥ 0 enforced above make it dead) and document the price-snapshot-without-lock read in `src/modules/order/order-checkout.service.ts:81` as intentional snapshot semantics (fixes M14 + records M19 so nobody "fixes" it later)
 
 ### A2. Naming compliance — AGENTS.md §3 (audit 2026-10-06, was missing from review)
 
-- [ ] T031 Rename generic verbs to entity+action in `src/modules/order/order-cancellation.service.ts` (`cancel()` → `cancelOrder()`), `src/modules/order/order-completion.service.ts` (`complete()` → `completeOrder()`, `incrementCounter()` → `incrementCompleteIdempotentSkipCounter()`), `src/modules/order/order-checkout.service.ts` (`checkout()` → `checkoutUserCart()`), `src/modules/order/order.controller.ts` (handlers `cancel/complete` → `cancelOrder/completeOrder`); update the sole caller (`OrderController`), unit/integration specs, and `src/modules/order/test/cancel-fixtures.ts` (T003). Safe: grep proves no external callers. Fold `assertOwner` → `assertOrderOwner()` into T023's shared helper
-- [ ] T032 Replace truncated/vague locals on the touched cancel+controller path: `corrId` → `effectiveCorrelationId` (`order-cancellation.service.ts:88`, `order-checkout.service.ts:223`, `order-completion.service.ts:311`), `inv` → `inventory`, `item` → `checkoutItem`/`reservationItem` (AGENTS.md bans `item` explicitly), `ci` → `cartItem`, `prod` → `product` (`order-checkout.service.ts:67-119`), `resIdem`/`reservationRepoIdem` → `idempotentReservation…` (`order-completion.service.ts:173-183`), `res` → `linkedReservation`, `repo` → `orderRepository`/`reservationRepository` (`order.service.ts:56-127`), `req: any` → typed `request` (with T025). Accepted deviations (NOT renamed): `findAll`/`findOne` (codebase-wide repo convention — renaming one module creates inconsistency; belongs to a repo-wide pass), `{data, meta}` envelope (documented API convention), `N20` duplicate `OrderStatus` export resolved by T028 deletion
+- [X] T031 Rename generic verbs to entity+action in `src/modules/order/order-cancellation.service.ts` (`cancel()` → `cancelOrder()` + `cancelOrderWithManager()` core, see T033), `src/modules/order/order-completion.service.ts` (`complete()` → `completeOrder()` + `completeOrderWithManager()` core, see T034, `incrementCounter()` → `incrementCompleteIdempotentSkipCounter()`), `src/modules/order/order-checkout.service.ts` (`checkout()` → `checkoutUserCart()`), `src/modules/order/order.controller.ts` (handlers `cancel/complete` → `cancelOrder/completeOrder`); update the sole caller (`OrderController`), unit/integration specs, and `src/modules/order/test/cancel-fixtures.ts` (T003). Safe: grep proves no external callers. Fold `assertOwner` → `assertOrderOwner()` into T023's shared helper
+- [X] T033 [US1] Move the cancel transaction boundary into `src/modules/order/order-cancellation.service.ts` (controller SRP/TI-3): inject `DataSource`, public `cancelOrder(requestingUserId, orderId, reason, correlationId, role)` owns `dataSource.transaction`, core `cancelOrderWithManager(manager, …)` holds the lock→release→record logic for reuse (payment-failure composition in Phase 19); `src/modules/order/order.controller.ts` calls `cancelOrder` directly and drops `DataSource` (T035)
+- [X] T034 [US1] Move the complete transaction boundary into `src/modules/order/order-completion.service.ts` (same SRP/TI-3 slice): re-add `DataSource` injection (reverts the removal half of T029 — it now owns the tx), public `completeOrder(…)` owns the transaction, core `completeOrderWithManager(manager, …)` keeps current logic; update `src/modules/order/order.controller.ts` + `src/modules/order/test/order-complete.integration.spec.ts` + `src/modules/order/test/order-complete.concurrency.spec.ts` call sites
+- [X] T035 Remove `DataSource` from `src/modules/order/order.controller.ts` entirely (single concern: HTTP transport — auth, DTO, correlation id, response shape; no `dataSource.transaction`, no DB access): checkout already delegates (service-owns-tx), complete/cancel delegate after T033/T034; drop the `DataSource` mock from `src/modules/order/order.controller.spec.ts` and `src/modules/order/test/order-cancel.characterization.spec.ts` (mock the service methods instead)
+- [X] T032 Replace truncated/vague locals on the touched cancel+controller path: `corrId` → `effectiveCorrelationId` (`order-cancellation.service.ts:88`, `order-checkout.service.ts:223`, `order-completion.service.ts:311`), `inv` → `inventory`, `item` → `checkoutItem`/`reservationItem` (AGENTS.md bans `item` explicitly), `ci` → `cartItem`, `prod` → `product` (`order-checkout.service.ts:67-119`), `resIdem`/`reservationRepoIdem` → `idempotentReservation…` (`order-completion.service.ts:173-183`), `res` → `linkedReservation`, `repo` → `orderRepository`/`reservationRepository` (`order.service.ts:56-127`), `req: any` → typed `request` (with T025). Accepted deviations (NOT renamed): `findAll`/`findOne` (codebase-wide repo convention — renaming one module creates inconsistency; belongs to a repo-wide pass), `{data, meta}` envelope (documented API convention), `N20` duplicate `OrderStatus` export resolved by T028 deletion
 
 ### B. Deferred to S6 / refactor track (no Phase 8 tasks — owners recorded)
 
@@ -141,7 +144,7 @@ chat 2026-10-06 (20 findings, F1–F4/M1–M16). Executes interleaved with Phase
 | F1 siblings: outbox swallow in checkout (`order-checkout.service.ts:224-255`) + completion ×2 (`order-completion.service.ts:225-247,312-337`) | Same lost-event class as cancel but behavior-changing on checkout/complete paths; needs B-approval per REFACTOR_PLAN P0-8/B-11 | S6 RP-ORDER |
 | F3: expiry auto-cancel best-effort catch (`reservation.service.ts:666-676`) vs cancel rollback | Intentional divergence (worker availability vs user-cancel durability); document in ADR-0014, do not unify | ADR-0014 (T019) |
 | M3: N+1 `Promise.all(findOne Reservation)` (`order.service.ts:79-90`) | Read-path perf, single-query fix with EXPLAIN; already tracked in REFACTOR_PLAN RP-ORDER addendum | S6 RP-ORDER |
-| M4: controller-owns-tx (complete/cancel) vs service-owns-tx (checkout) | TI-3 migration; Phase 8 keeps controller pattern for consistency (plan Complexity Tracking) | S6 RP-ORDER |
+| M4: controller-owns-tx (complete/cancel) vs service-owns-tx (checkout) | Fixed in Phase 8 by T033–T035 (all use-case services own their tx; controller drops `DataSource`) | Phase 8 (this file) |
 | M5: dual findOne under lock + double reservation load (completion:144-157,192-205) | Collapse only with redundancy proof (PQ-1); completion path untouched by Phase 8 | S6 RP-ORDER |
 | M8 (remainder): `@Optional()` OutboxService/CACHE_MANAGER + `if (!this.x)` guards | OD-1 conversions need per-dep behavior records; cancel-path optionality fixed in T010/D7 | S6/S7 RP-OUTBOX/RP-NOTIF |
 | M10: `randomUUID()`/`new Date()` in services; M11/M12/M15/M16: response mapper, correlation helper, pagination DTO, response DTOs, Swagger gaps | CC-A/CC-B shared ports + helpers; Phase 8 must NOT invent its own (would conflict with S2) | S2 shared primitives |
@@ -153,13 +156,15 @@ chat 2026-10-06 (20 findings, F1–F4/M1–M16). Executes interleaved with Phase
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
+- [X] T036 Env-driven schema sync (user-directed, same session): `synchronize` in `src/data-source.ts` resolves from `TYPEORM_SYNCHRONIZE` else `MODE`/`NODE_ENV` (true unless production) with boot warn when on; documented in `.env.example`, local `.env` sets `true` for develop. Migration files remain the production DDL path (verified: `migration:show` lists 14; no Phase 8 schema delta so no new migration file). Restored 3 tables dropped by another suite's `dropSchema` via dev-boot sync (backup taken first, row counts verified: user 51, product 62 intact).
+
 **Purpose**: Docs, contract parity, full verification
 
-- [ ] T018 Update `docs/plan.md` Phase 8 section: status DONE (demo scope), exit-bar evidence, refund deferral pointer
-- [ ] T019 [P] Write `docs/decisions/0014-order-cancellation.md` (ADR: state machine, locked Q1/Q2/Q3 + clarify A-outcomes, D2 rollback, D4 expiry untouched, D7 OD-1, complexity-tracking deviations with S6 follow-up)
-- [ ] T020 [P] Swaggerannotate `POST /order/:id/cancel` in `src/modules/order/order.controller.ts` (200 enriched schema, 403/404/409/429 responses per `specs/017-order-cancellation/contracts/order-cancel.md`)
-- [ ] T021 Run full verification: `npm run lint`, `npm run build`, `npm run test -- --runInBand src/modules/order src/modules/reservation`, E2E cancel flow; record results in `specs/017-order-cancellation/tasks.md` notes
-- [ ] T022 Re-check constitution gates from `specs/017-order-cancellation/plan.md` post-implementation and tick plan checkboxes with file/test evidence
+- [X] T018 Update `docs/plan.md` Phase 8 section: status DONE (demo scope), exit-bar evidence, refund deferral pointer
+- [X] T019 [P] Write `docs/decisions/0014-order-cancellation.md` (ADR: state machine, locked Q1/Q2/Q3 + clarify A-outcomes, D2 rollback, D4 expiry untouched, D7 OD-1, complexity-tracking deviations with S6 follow-up)
+- [X] T020 [P] Swaggerannotate `POST /order/:id/cancel` in `src/modules/order/order.controller.ts` (200 enriched schema, 403/404/409/429 responses per `specs/017-order-cancellation/contracts/order-cancel.md`)
+- [X] T021 Run full verification: `npm run lint`, `npm run build`, `npm run test -- --runInBand src/modules/order src/modules/reservation`, E2E cancel flow; record results in `specs/017-order-cancellation/tasks.md` notes
+- [X] T022 Re-check constitution gates from `specs/017-order-cancellation/plan.md` post-implementation and tick plan checkboxes with file/test evidence
 
 ---
 
@@ -234,5 +239,20 @@ Task: "Concurrency proof in src/modules/order/test/order-cancel.concurrency.spec
 - Each user story independently completable and testable
 - Verify tests fail before implementing
 - Commit after each task or logical group
-- Total: 32 tasks (Setup 2, Foundational 3, US1 7, US2 3, US3 2, Review 10, Polish 5)
+- Total: 36 tasks (Setup 2, Foundational 3, US1 7, US2 3, US3 2, Review 13, Polish 6)
 - Review phase executes interleaved with US1/US2 (same files); IDs ordered after for stability
+
+## Notes (execution log)
+
+- T001 (2026-10-06): baseline green — `npm run build` clean; `npm run test -- --runInBand src/modules/order` → 5 suites / 29 tests pass. Infra up (ecommerce-postgres/redis/rabbitmq).
+- T002 (2026-10-06): `src/modules/order/test/order-cancel.characterization.spec.ts` → 2/2 pass. Pinned: (1) cancel response is exactly `{id, status, total, userId}` (no reason/reservationId); (2) outbox INSERT failure is swallowed and the cancel still commits (will invert in T011 per Q2/A).
+- T003–T005 (2026-10-06): fixtures helper written (typed, no `any`); controller spec provides `OrderCancellationService` mock → 1/1 pass; return-shape decision recorded as research D10 (`CancelOrderResult {order, reservationId, reason}`). `npm run build` clean.
+- T006–T008 (2026-10-06): tests written first — 5 unit + 4 integration + 1 race failed on old code as required (TDD red). Red run also exposed F5 (`FOR UPDATE` + `relations` join → QueryFailedError on every cancel with items, fixed in T009 via ADR-0010 two-step pattern).
+- T009–T011, T023–T035 (2026-10-06): service rewritten (`cancelOrder` tx-owning + `cancelOrderWithManager` core; `completeOrder`/`completeOrderWithManager`; `checkoutUserCart`); shared `order-transitions.ts`; controller tx-free (no `DataSource`); dead files deleted; naming pass; T002 characterization inverted to new contract. `npm run build` clean, scoped `npx eslint` 0 errors (remaining warnings pre-date this work except fixed ones).
+- T012 live proof (2026-10-06, dev server): register → cart → `POST /order/checkout` → 201 PENDING → `POST /order/:id/cancel` → 200 `{id,status:CANCELLED,total,userId,reason:user,reservationId}` → recancel 200 zero-delta → inventory `{stock:10,reservedAmount:0,available:10}` → `order.cancelled` published to RMQ (publisher log proof). Observed (out of scope, not fixed): first cart POST for a new user returns 500 while the write succeeds (cart module); malformed UUID params yield 500 instead of 404 (no global ParseUUIDPipe).
+- T013–T017 (2026-10-06): admin-cancel 200 + non-owner 403 covered; expiry batch emits `order.cancelled {reason:expired}` proven (D4 parity test); envelope assertions + no-duplicate-on-recancel covered; D9 deferral recorded.
+- T015 confirmation: expiry envelope at `reservation-expiration.service.ts:345-358` matches `data-model.md` (`reason:expired`, PENDING→CANCELLED, reservationId) — no code change needed.
+- T036 (2026-10-06): env-driven sync live (`TYPEORM_SYNCHRONIZE=true` in dev `.env`, documented in `.env.example`); boot warn verified in logs; `migration:show` lists 14 migration files (prod DDL path intact, no Phase 8 schema delta).
+- Infra incident (same session): `expiration.integration.spec.ts` used `synchronize:true + dropSchema:true` on the shared dev DB and wiped `outbox_event`/`otp_verification`/`password_reset_token` (root-caused via table-list forensics). Fixed that spec to `synchronize:false` + truncates; its planner-fragile EXPLAIN assertion now checks composite-index existence. Tables restored via dev-boot sync after pg_dump backup (user/product counts verified). Residual hazard: inventory/auth suites still sync-partial (auth on separate DBs; inventory on shared DB) — flagged for their owners, out of Phase 8 scope.
+- T021 (2026-10-06): `npm run build` clean; `npx eslint` on touched scope (order module + data-source) 0 errors (159 warnings, all pre-existing patterns on untouched lines); `npm run test -- --runInBand src/modules/order src/modules/reservation` → 15 suites / 116 tests green; E2E cancel flow = T012 live quickstart proof (server + curl + RMQ publish log). Repo `test:e2e` (auth-only, no cancel coverage, untouched modules) skipped with note.
+- T022 (2026-10-06): gates re-checked post-implementation — I ✅ (PG-only writes, outbox same tx), II ⚠️ (direct Reservation/Inventory repos kept deliberately; T023 unified rules, S6 owns stores), III ✅ (state machine + fixed effects, refund excluded), IV ✅ (FOR UPDATE Order→Reservation→sorted Inventories preserved; single-winner races green), V ✅ (controller thinner than before: no DataSource, no tx, no DB), VI ✅ (spec→clarify→plan→tasks→implement traceable), VII ✅ (real-PG integration + concurrency, mocks only for unit), VIII ✅ (no new routes; response additive FR-012), IX ✅ (`docs/plan.md` DONE + ADR-0014 + research D9/D10).
