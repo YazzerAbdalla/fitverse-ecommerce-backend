@@ -4,7 +4,11 @@
 
 ## Current (wrong) behavior
 
-`DELETE FROM outbox_event WHERE (status = $1 AND sentAt < … * $2) OR (status = $2 AND createdAt < … * $2)` with params `['SENT', retentionDays]` — `$2` binds a day-count where a status is compared, so the second arm never matches, the first arm matches only `SENT`, and in practice nothing (or only a shrinking legacy subset) is ever deleted.
+`DELETE FROM outbox_event WHERE (status = $1 AND sentAt < … * $2) OR (status = $2 AND createdAt < … * $2)` with params `['SENT', retentionDays]` — three stacked defects found during implementation:
+
+1. `$2` binds a day-count where a status is compared, so the second arm never matches (deletes nothing by design).
+2. Unquoted `sentAt`/`createdAt` fold to `sentat`/`createdat`, which do not exist — the statement actually **throws** `QueryFailedError` on every run.
+3. `dataSource.query()` returns `[rows, rowCount]` for `DELETE`, but the code reads `.rowCount` off the array → `undefined ?? 0`, so even a working delete would always report `0`.
 
 ## Corrected behavior
 
