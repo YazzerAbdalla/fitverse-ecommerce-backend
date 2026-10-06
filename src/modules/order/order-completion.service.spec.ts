@@ -53,16 +53,16 @@ describe('OrderCompletionService', () => {
     });
   });
 
-  describe('assertOwner', () => {
+  describe('assertOrderOwner', () => {
     it('should allow owner', () => {
       expect(() =>
-        service.assertOwner({ userId: 'u1' } as any, 'u1', UserRoles.User),
+        service.assertOrderOwner({ userId: 'u1' }, 'u1', UserRoles.User),
       ).not.toThrow();
     });
 
     it('should throw for non-owner', () => {
       expect(() =>
-        service.assertOwner({ userId: 'u1' } as any, 'u2', UserRoles.User),
+        service.assertOrderOwner({ userId: 'u1' }, 'u2', UserRoles.User),
       ).toThrow();
     });
   });
@@ -80,7 +80,12 @@ describe('OrderCompletionService', () => {
         findOne: jest.fn().mockResolvedValue(null),
       });
       await expect(
-        service.complete(manager, 'u1', 'order-id', UserRoles.User),
+        service.completeOrderWithManager(
+          manager,
+          'u1',
+          'order-id',
+          UserRoles.User,
+        ),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -118,7 +123,7 @@ describe('OrderCompletionService', () => {
         }),
       };
       // Need to handle second call for Order with items
-      const result = await service.complete(
+      const result = await service.completeOrderWithManager(
         manager,
         'u1',
         'oid',
@@ -148,7 +153,7 @@ describe('OrderCompletionService', () => {
           .mockResolvedValueOnce(order),
       });
       await expect(
-        service.complete(manager, 'u1', 'oid', UserRoles.User),
+        service.completeOrderWithManager(manager, 'u1', 'oid', UserRoles.User),
       ).rejects.toThrow(ConflictException);
     });
   });

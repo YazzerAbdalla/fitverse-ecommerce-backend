@@ -1,6 +1,4 @@
 import {
-  ConflictException,
-  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -20,21 +18,26 @@ import { ReservationService } from '../reservation/reservation.service';
 import { UserRoles } from '../users/enum/roles';
 import { OutboxService } from '../outbox/outbox.service';
 import { randomUUID } from 'crypto';
+import {
+  assertOrderOwner,
+  mapInventoryCheckViolation,
+  validateOrderTransition as validateSharedOrderTransition,
+} from './order-transitions';
+import { OrderItem } from './entities/order-items.entity';
 
-/**
- * Allowed Order status transitions for sale.
- * COMPLETED→COMPLETED is idempotent and short-circuited before validation.
- */
-const ALLOWED_ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  [OrderStatus.PENDING]: [
-    OrderStatus.COMPLETED,
-    OrderStatus.CANCELLED,
-    OrderStatus.FAILED,
-  ],
-  [OrderStatus.COMPLETED]: [OrderStatus.COMPLETED],
-  [OrderStatus.CANCELLED]: [],
-  [OrderStatus.FAILED]: [],
-};
+/** Completed order enriched with its reservation link and items. */
+export interface CompleteOrderResult {
+  id: string;
+  userId: string;
+  status: OrderStatus;
+  total: number;
+  created_at: Date;
+  updated_at: Date;
+  orderItems: OrderItem[];
+  reservationId: string | null;
+  expiresAt: Date | null;
+  reservation: Reservation | null;
+}
 
 /**
  * This service is responsible for order sale domain.
@@ -52,57 +55,54 @@ export class OrderCompletionService {
     private readonly outboxService?: OutboxService,
     @Optional()
     @Inject(CACHE_MANAGER)
-    private readonly cache?: Cache,
+    private readonly cacheManager?: Cache,
   ) {}
 
   /**
-   * Increments idempotency duplicate skipped counter for order complete (fail-open).
+   * Increments the idempotent-skip metric for complete (fail-open).
+   * Uses only the typed cache-manager `Cache` API — never the underlying
+   * store client internals. The get+set pair is not atomic under concurrency;
+   * that is acceptable for an observability-only counter (fail-open, never
+   * authoritative, a lost increment changes no business outcome).
+   *
    * @returns Void.
    */
-  private async incrementCounter(): Promise<void> {
-    // Each idempotent COMPLETED→COMPLETED skip increments INCR idempotency:duplicate:skipped:complete EX 86400
-    const key = 'idempotency:duplicate:skipped:complete';
+  private async incrementCompleteIdempotentSkipCounter(): Promise<void> {
+    // Each idempotent COMPLETED→COMPLETED skip bumps this 24h counter.
+    const counterKey = 'idempotency:duplicate:skipped:complete';
     try {
-      if (!this.cache) return;
-      const anyCache: any = this.cache as any;
-      const store: any = anyCache.store ?? anyCache.stores?.[0];
-      const client =
-        store?.client ?? store?.store?.client ?? anyCache.client ?? null;
-      if (client && typeof client.incr === 'function') {
-        await client.incr(key);
-        // Ensure 24h expiry (86400s) per Q5 B
-        if (typeof client.expire === 'function') {
-          await client.expire(key, 86400);
-        } else if (typeof client.pexpire === 'function') {
-          await client.pexpire(key, 86400000);
-        }
+      if (!this.cacheManager) {
         return;
       }
-      // Fallback to cache-manager get/set
-      const current = (await this.cache.get<number>(key)) ?? 0;
-      await this.cache.set(key, current + 1, 86400000);
-    } catch (e: any) {
-      // Fail-open: log warn but do not throw on counter failure
+      const currentCount =
+        (await this.cacheManager.get<number>(counterKey)) ?? 0;
+      // cache-manager set() TTL is milliseconds; 24h matches the event-dedup window.
+      const twentyFourHoursMs = 24 * 60 * 60 * 1000;
+      await this.cacheManager.set(
+        counterKey,
+        currentCount + 1,
+        twentyFourHoursMs,
+      );
+    } catch (counterError: unknown) {
+      // Fail-open: a metrics failure must never fail the business flow.
+      const errorMessage =
+        counterError instanceof Error
+          ? counterError.message
+          : String(counterError);
       this.logger.warn(
-        `Redis fail-open for idempotency counter ${key}: ${e?.message}`,
+        `Redis fail-open for idempotency counter ${counterKey}: ${errorMessage}`,
       );
     }
   }
 
   /**
-   * Validates an Order status transition.
+   * Validates an Order status transition (delegates to the shared table).
    * @param from - Current Order status.
    * @param to - Target Order status.
    * @throws ConflictException if transition is not allowed.
    */
   validateOrderTransition(from: OrderStatus, to: OrderStatus): void {
-    if (from === OrderStatus.COMPLETED && to === OrderStatus.COMPLETED) {
-      return;
-    }
-    const allowed = ALLOWED_ORDER_TRANSITIONS[from] ?? [];
-    if (!allowed.includes(to)) {
-      throw new ConflictException(`Invalid order transition: ${from} -> ${to}`);
-    }
+    validateSharedOrderTransition(from, to);
   }
 
   /**
@@ -112,16 +112,46 @@ export class OrderCompletionService {
    * @param role - Current user role.
    * @throws ForbiddenException if not owner and not Admin.
    */
-  assertOwner(order: Order, requestingUserId: string, role?: UserRoles): void {
-    // Owner-scoped (User) vs Admin bypass per spec FR-008
-    if (order.userId !== requestingUserId && role !== UserRoles.Admin) {
-      throw new ForbiddenException('You are not allowed to access this order');
-    }
+  assertOrderOwner(
+    order: Order,
+    requestingUserId: string,
+    role?: UserRoles,
+  ): void {
+    assertOrderOwner(order, requestingUserId, role);
   }
 
   /**
-   * Completes an order sale atomically.
-   * Locks Order FOR UPDATE → assertOwner → validateOrderTransition → locks Reservation FOR UPDATE → validates → locks sorted Inventories → stock-=qty reserved-=qty → saves Order+Reservation.
+   * Completes an order sale, owning the transaction boundary (TI-3).
+   * Controllers call this (never DataSource).
+   * @param requestingUserId - Current user id.
+   * @param orderId - Order id to complete.
+   * @param role - Current user role for admin bypass.
+   * @param correlationId - Tracing correlationId.
+   * @returns Completed Order enriched with reservationId and items.
+   * @throws NotFoundException if order/reservation/inventory missing.
+   * @throws ForbiddenException if not owner.
+   * @throws ConflictException if invalid transition or DB CHECK violation (mapped to 409).
+   */
+  async completeOrder(
+    requestingUserId: string,
+    orderId: string,
+    role?: UserRoles,
+    correlationId?: string,
+  ): Promise<CompleteOrderResult> {
+    return this.dataSource.transaction((manager) =>
+      this.completeOrderWithManager(
+        manager,
+        requestingUserId,
+        orderId,
+        role,
+        correlationId,
+      ),
+    );
+  }
+
+  /**
+   * Completes an order sale inside the caller's transaction.
+   * Locks Order FOR UPDATE → assertOrderOwner → validateOrderTransition → locks Reservation FOR UPDATE → validates → locks sorted Inventories → stock-=qty reserved-=qty → saves Order+Reservation.
    * @param manager - EntityManager of the enclosing transaction (caller owns commit/rollback).
    * @param requestingUserId - Current user id.
    * @param orderId - Order id to complete.
@@ -131,20 +161,20 @@ export class OrderCompletionService {
    * @throws ForbiddenException if not owner.
    * @throws ConflictException if invalid transition or DB CHECK violation (mapped to 409).
    */
-  async complete(
+  async completeOrderWithManager(
     manager: EntityManager,
     requestingUserId: string,
     orderId: string,
     role?: UserRoles,
     correlationId?: string,
-  ): Promise<any> {
+  ): Promise<CompleteOrderResult> {
     const orderRepo = manager.getRepository(Order);
 
     // 1. Lock Order FOR UPDATE
     const order = await orderRepo.findOne({
       where: { id: orderId },
       lock: { mode: 'pessimistic_write' },
-    } as any);
+    });
     if (!order) {
       throw new NotFoundException(`Order ${orderId} not found`);
     }
@@ -156,7 +186,7 @@ export class OrderCompletionService {
     });
     const currentOrder = orderWithItems ?? order;
 
-    this.assertOwner(currentOrder, requestingUserId, role);
+    this.assertOrderOwner(currentOrder, requestingUserId, role);
 
     // Idempotent guard before FOR UPDATE Reservation/Inventories (spec Q2 A): COMPLETED→COMPLETED must not mutate inventory
     // 2. Idempotent COMPLETED→COMPLETED — no inventory re-mutation (spec D1)
@@ -169,30 +199,31 @@ export class OrderCompletionService {
       this.logger.log(
         `Idempotent order complete for ${orderId} already COMPLETED — no inventory change`,
       );
-      await this.incrementCounter();
-      const reservationRepoIdem = manager.getRepository(Reservation);
-      const resIdem = await reservationRepoIdem.findOne({
+      await this.incrementCompleteIdempotentSkipCounter();
+      const idempotentReservationRepo = manager.getRepository(Reservation);
+      const idempotentReservation = await idempotentReservationRepo.findOne({
         where: { orderId },
         relations: { items: true },
       });
       return {
         ...currentOrder,
         status: OrderStatus.COMPLETED,
-        reservationId: resIdem?.id ?? null,
-        expiresAt: resIdem?.expiresAt ?? null,
-        reservation: resIdem,
+        reservationId: idempotentReservation?.id ?? null,
+        expiresAt: idempotentReservation?.expiresAt ?? null,
+        reservation: idempotentReservation,
       };
     }
 
     // 3. Validate PENDING→COMPLETED
     this.validateOrderTransition(currentOrder.status, OrderStatus.COMPLETED);
 
-    // 4. Lock Reservation FOR UPDATE by orderId (no outer join)
+    // 4. Lock Reservation FOR UPDATE by orderId (no outer join: FOR UPDATE
+    // cannot be applied to the nullable side of a relations join).
     const reservationRepo = manager.getRepository(Reservation);
     const lockedReservation = await reservationRepo.findOne({
       where: { orderId },
       lock: { mode: 'pessimistic_write' },
-    } as any);
+    });
     if (!lockedReservation) {
       throw new NotFoundException(`Reservation for order ${orderId} not found`);
     }
@@ -221,14 +252,14 @@ export class OrderCompletionService {
     // 5. No items? Still allow COMPLETED without inventory mutation (edge)
     if (!reservation.items || reservation.items.length === 0) {
       // OutboxEvent INSERT inside same transaction — OutboxService owns envelope (version, eventId, occurredAt, correlationId)
-      const corrIdNoItems = correlationId || randomUUID();
+      const noItemsCorrelationId = correlationId || randomUUID();
       if (this.outboxService) {
         try {
           await this.outboxService.createEvent(manager, {
             eventType: 'order.completed',
             aggregateType: 'Order',
             aggregateId: orderId,
-            correlationId: corrIdNoItems,
+            correlationId: noItemsCorrelationId,
             data: {
               orderId,
               userId: currentOrder.userId,
@@ -239,99 +270,113 @@ export class OrderCompletionService {
               completedAt: new Date().toISOString(),
             },
           });
-        } catch (e: any) {
+        } catch (outboxError: unknown) {
+          const errorMessage =
+            outboxError instanceof Error
+              ? outboxError.message
+              : String(outboxError);
           this.logger.warn(
-            `outbox order.completed insert failed for ${orderId}: ${e?.message}`,
+            `outbox order.completed insert failed for ${orderId}: ${errorMessage}`,
           );
         }
       }
       currentOrder.status = OrderStatus.COMPLETED;
       reservation.status = ReservationStatus.COMPLETED;
       const savedOrder = await orderRepo.save(currentOrder);
-      const savedRes = await reservationRepo.save(reservation);
+      const savedReservation = await reservationRepo.save(reservation);
       this.logger.log(
         `Order ${orderId} PENDING → COMPLETED (no items) via reservation ${reservation.id}`,
       );
       return {
         ...savedOrder,
-        reservationId: savedRes.id,
-        expiresAt: savedRes.expiresAt,
-        reservation: savedRes,
-        orderItems: (savedOrder as any).orderItems ?? currentOrder.orderItems,
+        reservationId: savedReservation.id,
+        expiresAt: savedReservation.expiresAt,
+        reservation: savedReservation,
+        orderItems: currentOrder.orderItems,
       };
     }
 
     // 6. Deterministic lock ordering
-    const sortedIds = [
-      ...new Set(reservation.items.map((i) => i.inventoryId)),
+    const sortedInventoryIds = [
+      ...new Set(
+        reservation.items.map((reservationItem) => reservationItem.inventoryId),
+      ),
     ].sort();
 
     // 7. Lock Inventories FOR UPDATE
     let lockedInventories: Inventory[] = [];
-    if (sortedIds.length > 0) {
+    if (sortedInventoryIds.length > 0) {
       lockedInventories = await manager.find(Inventory, {
-        where: { id: In(sortedIds) },
+        where: { id: In(sortedInventoryIds) },
         lock: { mode: 'pessimistic_write' },
       });
-      if (lockedInventories.length !== sortedIds.length) {
-        const foundIds = new Set(lockedInventories.map((r) => r.id));
-        const missing = sortedIds.find((mid) => !foundIds.has(mid))!;
-        throw new NotFoundException(`Inventory ${missing} not found`);
-      }
-    }
-    const inventoryMap = new Map(lockedInventories.map((inv) => [inv.id, inv]));
-
-    // 8. Mutate per item: stock-=qty reserved-=qty
-    const inventoryRepo = manager.getRepository(Inventory);
-    try {
-      for (const item of reservation.items) {
-        const inv = inventoryMap.get(item.inventoryId)!;
-        // DB CHECK backstop (spec D3) → 409, no explicit available check
-        inv.stock -= item.quantity;
-        inv.reservedAmount -= item.quantity;
-        await inventoryRepo.save(inv);
-      }
-    } catch (e: any) {
-      const msg = e?.message ?? '';
-      // DB CHECK backstop (spec D3) → 409
-      if (
-        msg.includes('CHK_') ||
-        msg.includes('check constraint') ||
-        msg.includes('violates check') ||
-        e?.code === '23514'
-      ) {
-        throw new ConflictException(
-          `Inventory invariant violation on order complete ${orderId}: ${msg}`,
+      if (lockedInventories.length !== sortedInventoryIds.length) {
+        const foundInventoryIds = new Set(
+          lockedInventories.map((inventoryRow) => inventoryRow.id),
+        );
+        const missingInventoryId = sortedInventoryIds.find(
+          (inventoryId) => !foundInventoryIds.has(inventoryId),
+        );
+        throw new NotFoundException(
+          `Inventory ${missingInventoryId} not found`,
         );
       }
-      throw e;
+    }
+    const inventoryById = new Map(
+      lockedInventories.map((inventoryRow) => [inventoryRow.id, inventoryRow]),
+    );
+
+    // 8. Mutate per item: stock-=qty reserved-=qty
+    const inventoryRepository = manager.getRepository(Inventory);
+    try {
+      for (const reservationItem of reservation.items) {
+        const lockedInventory = inventoryById.get(reservationItem.inventoryId);
+        if (!lockedInventory) {
+          throw new NotFoundException(
+            `Inventory ${reservationItem.inventoryId} not found`,
+          );
+        }
+        // DB CHECK backstop (spec D3) → 409, no explicit available check
+        lockedInventory.stock -= reservationItem.quantity;
+        lockedInventory.reservedAmount -= reservationItem.quantity;
+        await inventoryRepository.save(lockedInventory);
+      }
+    } catch (inventoryError: unknown) {
+      mapInventoryCheckViolation(
+        inventoryError,
+        `Inventory invariant violation on order complete ${orderId}`,
+      );
     }
 
     // 9. OutboxEvent INSERT inside same transaction — OutboxService owns envelope
-    const corrId = correlationId || randomUUID();
+    const effectiveCorrelationId = correlationId || randomUUID();
     if (this.outboxService) {
       try {
         await this.outboxService.createEvent(manager, {
           eventType: 'order.completed',
           aggregateType: 'Order',
           aggregateId: orderId,
-          correlationId: corrId,
+          correlationId: effectiveCorrelationId,
           data: {
             orderId,
             userId: currentOrder.userId,
             previousStatus: 'PENDING',
             newStatus: 'COMPLETED',
             reservationId: reservation.id,
-            items: reservation.items.map((i) => ({
-              inventoryId: i.inventoryId,
-              quantity: i.quantity,
+            items: reservation.items.map((reservationItem) => ({
+              inventoryId: reservationItem.inventoryId,
+              quantity: reservationItem.quantity,
             })),
             completedAt: new Date().toISOString(),
           },
         });
-      } catch (e: any) {
+      } catch (outboxError: unknown) {
+        const errorMessage =
+          outboxError instanceof Error
+            ? outboxError.message
+            : String(outboxError);
         this.logger.warn(
-          `outbox order.completed insert failed for ${orderId}: ${e?.message}`,
+          `outbox order.completed insert failed for ${orderId}: ${errorMessage}`,
         );
       }
     }
@@ -342,10 +387,10 @@ export class OrderCompletionService {
       reservation.status = ReservationStatus.COMPLETED;
     }
     const savedOrder = await orderRepo.save(currentOrder);
-    const savedRes = await reservationRepo.save(reservation);
+    const savedReservation = await reservationRepo.save(reservation);
 
     this.logger.log(
-      `Order ${orderId} PENDING → COMPLETED via reservation ${reservation.id} (stock bulk −${reservation.items.reduce((s, i) => s + i.quantity, 0)})`,
+      `Order ${orderId} PENDING → COMPLETED via reservation ${reservation.id} (stock bulk −${reservation.items.reduce((runningTotal, reservationItem) => runningTotal + reservationItem.quantity, 0)})`,
     );
 
     // Reload enriched for response
@@ -356,9 +401,9 @@ export class OrderCompletionService {
 
     return {
       ...(fullOrder ?? savedOrder),
-      reservationId: savedRes.id,
-      expiresAt: savedRes.expiresAt,
-      reservation: savedRes,
+      reservationId: savedReservation.id,
+      expiresAt: savedReservation.expiresAt,
+      reservation: savedReservation,
     };
   }
 }

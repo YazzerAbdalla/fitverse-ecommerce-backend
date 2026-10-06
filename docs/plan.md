@@ -680,7 +680,7 @@ A completed sale permanently decreases stock while releasing its reservation. �
 
 # Phase 8 — Order Cancellation
 
-**Status: NOT DONE — demo scope 2026-10-06: cancel-before-sale only (post-sale refund deferred)**
+**Status: DONE (demo scope) — 2026-10-06, spec `specs/017-order-cancellation/`** (cancel-before-sale only; post-sale refund deferred)
 
 **Goal:** Define and implement inventory behavior when orders are cancelled. **Demo scope:** `PENDING→CANCELLED` only (`reserved_amount -= quantity`, stock unchanged, single tx with Reservation `RESERVED→CANCELLED`). Post-sale refund (`COMPLETED→CANCELLED` + `stock += quantity`, refund behavior, full state-machine matrix) is deferred to post-demo — document as out-of-scope.
 
@@ -708,17 +708,15 @@ The exact behavior depends on the business meaning of cancellation/refund.
 
 Before coding cancellation:
 
-* [ ] Define Order statuses
-* [ ] Define valid transitions
-* [ ] Define cancellation rules per status
-* [ ] Define inventory effect per status
-* [ ] Define payment/refund behavior
+* [x] Define Order statuses — `PENDING|COMPLETED|CANCELLED|FAILED` (`order-status.enum.ts`, single table in `order-transitions.ts`)
+* [x] Define valid transitions — `PENDING→CANCELLED|FAILED|COMPLETED`, terminals terminal, idempotent re-cancel `200` (spec FR-002)
+* [x] Define cancellation rules per status — owner-or-Admin, `409` on `COMPLETED`, system reasons `failed`/`expired`
+* [x] Define inventory effect per status — pre-sale `reserved-=qty` only, stock untouched; no double-release under races (proven)
+* [ ] Define payment/refund behavior — **deferred post-demo** (post-sale `COMPLETED→CANCELLED` refund not in scope)
 
 ### Phase 8 Exit Criteria
 
-Cancellation cannot accidentally double-release or double-return inventory.
-
-**Demo exit (0.5 day, 1 AI session):** `POST /order/:id/cancel` `PENDING→CANCELLED` + `Reservation RESERVED→CANCELLED` (`reserved-=qty`, stock unchanged, one tx, `FOR UPDATE Order→Reservation→sorted Inventories`, idempotent re-cancel `200` zero delta, `409` on `COMPLETED/FAILED`). Post-sale `COMPLETED→CANCELLED` refund deferred.
+Cancellation cannot accidentally double-release or double-return inventory. — **MET (demo) 2026-10-06**: `POST /order/:id/cancel` `PENDING→CANCELLED|FAILED` + `Reservation RESERVED→CANCELLED` (`reserved-=qty`, stock unchanged, one tx, `FOR UPDATE Order→Reservation→sorted Inventories`, idempotent re-cancel `200` zero delta, `409` on `COMPLETED`); outbox record failure rolls back (TI-4); enriched response `{id,status,total,userId,reason,reservationId}`; controller tx-free (TI-3, services own boundaries); unit 9 + integration 6 + cancel-race 2 + expiry-race 3 + characterization 2 green on real PG plus live curl proof (checkout→cancel→recancel→inventory + `order.cancelled` published to RMQ). Post-sale refund deferred. See ADR-0014.
 
 ---
 

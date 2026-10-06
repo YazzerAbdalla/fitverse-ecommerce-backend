@@ -203,7 +203,7 @@ describe('Order Completion Integration (real PostgreSQL)', () => {
     ]);
 
     const result = await dataSource.transaction(async (manager) =>
-      orderCompletionService.complete(
+      orderCompletionService.completeOrderWithManager(
         manager,
         (user as any).id,
         (order as any).id,
@@ -256,7 +256,7 @@ describe('Order Completion Integration (real PostgreSQL)', () => {
 
     await expect(
       dataSource.transaction(async (manager) =>
-        orderCompletionService.complete(
+        orderCompletionService.completeOrderWithManager(
           manager,
           (user as any).id,
           (order as any).id,
@@ -278,7 +278,7 @@ describe('Order Completion Integration (real PostgreSQL)', () => {
     const { order } = await checkoutAs(user, [{ product, inventory, qty: 1 }]);
 
     await dataSource.transaction(async (manager) =>
-      orderCompletionService.complete(
+      orderCompletionService.completeOrderWithManager(
         manager,
         (user as any).id,
         (order as any).id,
@@ -306,7 +306,7 @@ describe('Order Completion Integration (real PostgreSQL)', () => {
     const { order } = await checkoutAs(user, [{ product, inventory, qty: 2 }]);
 
     await dataSource.transaction(async (manager) =>
-      orderCompletionService.complete(
+      orderCompletionService.completeOrderWithManager(
         manager,
         (user as any).id,
         (order as any).id,
@@ -319,7 +319,7 @@ describe('Order Completion Integration (real PostgreSQL)', () => {
     expect(afterFirst!.stock).toBe(8);
 
     const second = await dataSource.transaction(async (manager) =>
-      orderCompletionService.complete(
+      orderCompletionService.completeOrderWithManager(
         manager,
         (user as any).id,
         (order as any).id,
@@ -348,7 +348,7 @@ describe('Order Completion Integration (real PostgreSQL)', () => {
     // Need to cancel reservation's reservedAmount already? Set reservation to CANCELLED and reserved already? For simplicity, leave reservedAmount 1
     await expect(
       dataSource.transaction(async (manager) =>
-        orderCompletionService.complete(
+        orderCompletionService.completeOrderWithManager(
           manager,
           (user as any).id,
           (order as any).id,
@@ -374,7 +374,7 @@ describe('Order Completion Integration (real PostgreSQL)', () => {
 
     await expect(
       dataSource.transaction(async (manager) =>
-        orderCompletionService.complete(
+        orderCompletionService.completeOrderWithManager(
           manager,
           (other as any).id,
           (order as any).id,
@@ -384,7 +384,7 @@ describe('Order Completion Integration (real PostgreSQL)', () => {
     ).rejects.toThrow(/not allowed/);
 
     const asAdmin = await dataSource.transaction(async (manager) =>
-      orderCompletionService.complete(
+      orderCompletionService.completeOrderWithManager(
         manager,
         (admin as any).id,
         (order as any).id,

@@ -2,6 +2,7 @@ import { ConflictException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { OrderService } from './order.service';
 import { OrderStatus } from './order-status.enum';
+import { UserRoles } from '../users/enum/roles';
 import { DataSource } from 'typeorm';
 
 describe('OrderService', () => {
@@ -84,24 +85,23 @@ describe('OrderService', () => {
     });
   });
 
-  describe('assertOwner', () => {
+  describe('assertOrderOwner', () => {
     it('should not throw for owner', () => {
-      const order: any = { userId: 'u1' };
       expect(() =>
-        service.assertOwner(order, 'u1', 'User' as any),
+        service.assertOrderOwner({ userId: 'u1' }, 'u1', UserRoles.User),
       ).not.toThrow();
     });
 
     it('should not throw for Admin', () => {
-      const order: any = { userId: 'u1' };
       expect(() =>
-        service.assertOwner(order, 'u2', 'Admin' as any),
+        service.assertOrderOwner({ userId: 'u1' }, 'u2', UserRoles.Admin),
       ).not.toThrow();
     });
 
     it('should throw for non-owner non-admin', () => {
-      const order: any = { userId: 'u1' };
-      expect(() => service.assertOwner(order, 'u2', 'User' as any)).toThrow();
+      expect(() =>
+        service.assertOrderOwner({ userId: 'u1' }, 'u2', UserRoles.User),
+      ).toThrow();
     });
   });
 });

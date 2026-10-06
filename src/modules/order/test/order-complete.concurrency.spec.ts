@@ -186,7 +186,7 @@ describe('Order Completion Concurrency (real PostgreSQL)', () => {
 
     const results = await Promise.allSettled([
       dataSource.transaction(async (m) =>
-        orderCompletionService.complete(
+        orderCompletionService.completeOrderWithManager(
           m,
           (user as any).id,
           (order as any).id,
@@ -194,7 +194,7 @@ describe('Order Completion Concurrency (real PostgreSQL)', () => {
         ),
       ),
       dataSource.transaction(async (m) =>
-        orderCompletionService.complete(
+        orderCompletionService.completeOrderWithManager(
           m,
           (user as any).id,
           (order as any).id,
@@ -228,7 +228,7 @@ describe('Order Completion Concurrency (real PostgreSQL)', () => {
 
     const results = await Promise.allSettled([
       dataSource.transaction(async (m) =>
-        orderCompletionService.complete(
+        orderCompletionService.completeOrderWithManager(
           m,
           (user as any).id,
           (order as any).id,
@@ -280,7 +280,7 @@ describe('Order Completion Concurrency (real PostgreSQL)', () => {
     // Order of items opposite sortedIds both sort → [invA, invB] and [invB] so no deadlock
     const results = await Promise.allSettled([
       dataSource.transaction(async (m) =>
-        orderCompletionService.complete(
+        orderCompletionService.completeOrderWithManager(
           m,
           (user1 as any).id,
           (o1 as any).id,
@@ -288,7 +288,7 @@ describe('Order Completion Concurrency (real PostgreSQL)', () => {
         ),
       ),
       dataSource.transaction(async (m) =>
-        orderCompletionService.complete(
+        orderCompletionService.completeOrderWithManager(
           m,
           (user2 as any).id,
           (o2 as any).id,

@@ -17,9 +17,14 @@ import { Order } from './entities/order.entity';
 import { OrderItem } from './entities/order-items.entity';
 import { OrderStatus } from './order-status.enum';
 import { ReservationService } from '../reservation/reservation.service';
+import { Reservation } from '../reservation/entities/reservation.entity';
 import { CartService } from '../cart/cart.service';
 import { OutboxService } from '../outbox/outbox.service';
 import { randomUUID } from 'crypto';
+import { mapInventoryCheckViolation } from './order-transitions';
+
+/** Currency recorded on checkout outbox events (single-currency demo). */
+export const ORDER_CURRENCY = 'usd';
 
 /**
  * This service is responsible for checkout domain.
@@ -39,7 +44,7 @@ export class OrderCheckoutService {
   ) {}
 
   /**
-   * Performs cart-only checkout for user.
+   * Performs cart-only checkout for user, owning the transaction boundary.
    * @param userId - Authenticated user id from JWT sub.
    * @param correlationId - Optional correlationId for outbox tracing (generated if missing).
    * @returns Created order and reservation.
@@ -47,10 +52,10 @@ export class OrderCheckoutService {
    * @throws NotFoundException if product/inventory missing.
    * @throws ConflictException if insufficient available.
    */
-  async checkout(
+  async checkoutUserCart(
     userId: string,
     correlationId?: string,
-  ): Promise<{ order: Order; reservation: any; items: OrderItem[] }> {
+  ): Promise<{ order: Order; reservation: Reservation; items: OrderItem[] }> {
     return this.dataSource.transaction(async (manager) => {
       // 1. Load cart with items + product via manager (stay in transaction)
       const cart = await manager.findOne(Cart, {
@@ -62,21 +67,27 @@ export class OrderCheckoutService {
         throw new BadRequestException('Cart is empty');
       }
 
-      // Validate and collect productIds
-      const seenProducts = new Set<string>();
-      for (const ci of cart.cart_items) {
-        if (!Number.isInteger(ci.quantity) || ci.quantity <= 0) {
-          throw new BadRequestException('Quantity must be a positive integer');
-        }
-        if (seenProducts.has(ci.product.id)) {
-          throw new BadRequestException(
-            `Duplicate product in cart: ${ci.product.id}`,
+      // Validate lines and collect productIds; a line whose product row is
+      // gone (deleted product) is a 404, never a TypeError 500.
+      const seenProductIds = new Set<string>();
+      for (const cartItem of cart.cart_items) {
+        if (!cartItem.product) {
+          throw new NotFoundException(
+            'Product for a cart line no longer exists',
           );
         }
-        seenProducts.add(ci.product.id);
+        if (!Number.isInteger(cartItem.quantity) || cartItem.quantity <= 0) {
+          throw new BadRequestException('Quantity must be a positive integer');
+        }
+        if (seenProductIds.has(cartItem.product.id)) {
+          throw new BadRequestException(
+            `Duplicate product in cart: ${cartItem.product.id}`,
+          );
+        }
+        seenProductIds.add(cartItem.product.id);
       }
 
-      const productIds = cart.cart_items.map((ci) => ci.product.id);
+      const productIds = cart.cart_items.map((cartItem) => cartItem.product.id);
 
       // 2. Snapshot product prices via manager (no lock needed, read-committed)
       const products = await manager.find(Product, {
@@ -87,130 +98,159 @@ export class OrderCheckoutService {
         const missing = productIds.find((id) => !found.has(id))!;
         throw new NotFoundException(`Product ${missing} not found`);
       }
-      const productMap = new Map(products.map((p) => [p.id, p]));
+      const productMap = new Map(
+        products.map((productRow) => [productRow.id, productRow]),
+      );
 
-      // 3. Map productId -> inventoryId (via Inventory lookup)
+      // 3. Map productId -> inventoryId (via Inventory lookup). Missing rows
+      // surface as 404 while building checkout items below.
       const inventoriesByProduct = await manager.find(Inventory, {
         where: { productId: In(productIds) },
       });
       const invByProductId = new Map(
-        inventoriesByProduct.map((inv) => [inv.productId, inv]),
+        inventoriesByProduct.map((inventoryRow) => [
+          inventoryRow.productId,
+          inventoryRow,
+        ]),
       );
-      // Check missing inventory
-      for (const pid of productIds) {
-        if (!invByProductId.has(pid)) {
-          throw new NotFoundException(`Inventory for product ${pid} not found`);
-        }
-      }
 
-      // Build items with inventoryId and price snapshot
-      const checkoutItems = cart.cart_items.map((ci) => {
-        const prod = productMap.get(ci.product.id)!;
-        const inv = invByProductId.get(ci.product.id)!;
-        // Validate product price >=0
-        if (prod.price == null || prod.price < 0) {
-          throw new BadRequestException(`Invalid product price for ${prod.id}`);
+      // Build items with inventoryId and price snapshot. Prices are read
+      // without locks by design: the order snapshots the price observed at
+      // this read (historical-price isolation), it does not track later edits.
+      const checkoutItems = cart.cart_items.map((cartItem) => {
+        const productRow = productMap.get(cartItem.product.id);
+        if (!productRow) {
+          throw new NotFoundException(
+            `Product ${cartItem.product.id} not found`,
+          );
+        }
+        const inventoryRow = invByProductId.get(cartItem.product.id);
+        if (!inventoryRow) {
+          throw new NotFoundException(
+            `Inventory for product ${cartItem.product.id} not found`,
+          );
+        }
+        // Client prices are never trusted: the snapshot comes from the
+        // product row and must be a non-negative integer.
+        if (productRow.price == null || productRow.price < 0) {
+          throw new BadRequestException(
+            `Invalid product price for ${productRow.id}`,
+          );
         }
         return {
-          productId: ci.product.id,
-          inventoryId: inv.id,
-          quantity: ci.quantity,
-          unit_price: prod.price,
-          productName: prod.name,
+          productId: cartItem.product.id,
+          inventoryId: inventoryRow.id,
+          quantity: cartItem.quantity,
+          unit_price: productRow.price,
+          productName: productRow.name,
         };
       });
 
       // 4. Deterministic lock ordering to prevent deadlock when carts have opposite item order
-      const sortedIds = [
-        ...new Set(checkoutItems.map((i) => i.inventoryId)),
+      const sortedInventoryIds = [
+        ...new Set(
+          checkoutItems.map((checkoutItem) => checkoutItem.inventoryId),
+        ),
       ].sort();
 
       // 5. Lock inventories FOR UPDATE
       const lockedInventories = await manager.find(Inventory, {
-        where: { id: In(sortedIds) },
+        where: { id: In(sortedInventoryIds) },
         lock: { mode: 'pessimistic_write' },
       });
-      if (lockedInventories.length !== sortedIds.length) {
-        const foundIds = new Set(lockedInventories.map((r) => r.id));
-        const missing = sortedIds.find((id) => !foundIds.has(id))!;
-        throw new NotFoundException(`Inventory ${missing} not found`);
+      if (lockedInventories.length !== sortedInventoryIds.length) {
+        const foundInventoryIds = new Set(
+          lockedInventories.map((inventoryRow) => inventoryRow.id),
+        );
+        const missingInventoryId = sortedInventoryIds.find(
+          (inventoryId) => !foundInventoryIds.has(inventoryId),
+        );
+        throw new NotFoundException(
+          `Inventory ${missingInventoryId} not found`,
+        );
       }
-      const inventoryMap = new Map(
-        lockedInventories.map((inv) => [inv.id, inv]),
+      const inventoryById = new Map(
+        lockedInventories.map((inventoryRow) => [
+          inventoryRow.id,
+          inventoryRow,
+        ]),
       );
 
       // 6. Verify available excludes already-reserved units to prevent overselling
-      for (const item of checkoutItems) {
-        const inv = inventoryMap.get(item.inventoryId)!;
+      for (const checkoutItem of checkoutItems) {
+        const lockedInventory = inventoryById.get(checkoutItem.inventoryId);
+        if (!lockedInventory) {
+          throw new NotFoundException(
+            `Inventory ${checkoutItem.inventoryId} not found`,
+          );
+        }
         // Available stock excludes already-reserved units to prevent overselling
-        const available = inv.stock - inv.reservedAmount;
-        if (available < item.quantity) {
+        const availableUnits =
+          lockedInventory.stock - lockedInventory.reservedAmount;
+        if (availableUnits < checkoutItem.quantity) {
           throw new ConflictException(
-            `Insufficient available inventory for ${item.inventoryId}. Available: ${available}, requested: ${item.quantity}`,
+            `Insufficient available inventory for ${checkoutItem.inventoryId}. Available: ${availableUnits}, requested: ${checkoutItem.quantity}`,
           );
         }
       }
 
       // 7. Increment reservedAmount (sole producer after refactor)
-      for (const item of checkoutItems) {
-        const inv = inventoryMap.get(item.inventoryId)!;
-        inv.reservedAmount += item.quantity;
+      for (const checkoutItem of checkoutItems) {
+        const lockedInventory = inventoryById.get(checkoutItem.inventoryId);
+        if (!lockedInventory) {
+          throw new NotFoundException(
+            `Inventory ${checkoutItem.inventoryId} not found`,
+          );
+        }
+        lockedInventory.reservedAmount += checkoutItem.quantity;
         try {
-          await manager.save(inv);
-        } catch (e: any) {
-          const msg = e?.message ?? '';
-          if (
-            e?.code === '23514' ||
-            msg.includes('CHK_') ||
-            msg.includes('check constraint')
-          ) {
-            throw new ConflictException(
-              `Inventory invariant violation: ${msg}`,
-            );
-          }
-          throw e;
+          await manager.save(lockedInventory);
+        } catch (saveError: unknown) {
+          mapInventoryCheckViolation(
+            saveError,
+            'Inventory invariant violation',
+          );
         }
       }
 
-      // 8. Compute total = Σ quantity * unit_price (cents, server-calculated)
-      let total = 0;
-      for (const item of checkoutItems) {
-        // total formula: sum of qty * price
-        total += item.quantity * item.unit_price;
-      }
-      if (total < 0) {
-        throw new BadRequestException('Total must be non-negative');
+      // 8. Order total is server-calculated: sum of quantity * snapshot
+      // unit_price. Quantities are positive integers and prices are
+      // non-negative by the guards above, so the total cannot be negative
+      // (no separate guard needed).
+      let orderTotal = 0;
+      for (const checkoutItem of checkoutItems) {
+        orderTotal += checkoutItem.quantity * checkoutItem.unit_price;
       }
 
       // 9. Create Order PENDING
-      const orderRepo = manager.getRepository(Order);
-      const order = orderRepo.create({
+      const orderRepository = manager.getRepository(Order);
+      const pendingOrder = orderRepository.create({
         userId,
         status: OrderStatus.PENDING,
-        total,
+        total: orderTotal,
       });
-      const savedOrder = await orderRepo.save(order);
+      const savedOrder = await orderRepository.save(pendingOrder);
 
       // 10. Create OrderItems (historical snapshot)
-      const orderItemRepo = manager.getRepository(OrderItem);
-      const orderItems = checkoutItems.map((i) =>
-        orderItemRepo.create({
+      const orderItemRepository = manager.getRepository(OrderItem);
+      const orderItems = checkoutItems.map((checkoutItem) =>
+        orderItemRepository.create({
           orderId: savedOrder.id,
-          productId: i.productId,
-          quantity: i.quantity,
-          unit_price: i.unit_price,
-          productNameSnapshot: i.productName,
+          productId: checkoutItem.productId,
+          quantity: checkoutItem.quantity,
+          unit_price: checkoutItem.unit_price,
+          productNameSnapshot: checkoutItem.productName,
         }),
       );
-      const savedItems = await orderItemRepo.save(orderItems);
+      const savedItems = await orderItemRepository.save(orderItems);
 
       // 11. Create Reservation via internal helper (no re-lock, assumes caller holds locks)
       const reservation = await this.reservationService.createForCheckout(
         manager,
         userId,
-        checkoutItems.map((i) => ({
-          inventoryId: i.inventoryId,
-          quantity: i.quantity,
+        checkoutItems.map((checkoutItem) => ({
+          inventoryId: checkoutItem.inventoryId,
+          quantity: checkoutItem.quantity,
         })),
         savedOrder.id,
       );
@@ -220,24 +260,24 @@ export class OrderCheckoutService {
 
       // 13. OutboxEvent INSERT inside same transaction — no client.emit
       // Correlation ID resolved at request boundary (controller) and passed in
-      const corrId = correlationId || randomUUID();
+      const effectiveCorrelationId = correlationId || randomUUID();
       if (this.outboxService) {
         try {
           await this.outboxService.createEvent(manager, {
             eventType: 'order.created',
             aggregateType: 'Order',
             aggregateId: savedOrder.id,
-            correlationId: corrId,
+            correlationId: effectiveCorrelationId,
             data: {
               orderId: savedOrder.id,
               userId,
-              total,
-              currency: 'usd',
-              items: checkoutItems.map((i) => ({
-                productId: i.productId,
-                inventoryId: i.inventoryId,
-                quantity: i.quantity,
-                unit_price: i.unit_price,
+              total: orderTotal,
+              currency: ORDER_CURRENCY,
+              items: checkoutItems.map((checkoutItem) => ({
+                productId: checkoutItem.productId,
+                inventoryId: checkoutItem.inventoryId,
+                quantity: checkoutItem.quantity,
+                unit_price: checkoutItem.unit_price,
               })),
               reservationId: reservation.id,
               expiresAt: reservation.expiresAt?.toISOString() ?? null,
@@ -246,16 +286,20 @@ export class OrderCheckoutService {
                 : new Date().toISOString(),
             },
           });
-        } catch (e: any) {
+        } catch (outboxError: unknown) {
           // Best-effort outbox — if table missing (integration without migration) log and continue so business still commits
+          const errorMessage =
+            outboxError instanceof Error
+              ? outboxError.message
+              : String(outboxError);
           this.logger.warn(
-            `outbox order.created insert failed for ${savedOrder.id}: ${e?.message}`,
+            `outbox order.created insert failed for ${savedOrder.id}: ${errorMessage}`,
           );
         }
       }
 
       this.logger.log(
-        `Checkout succeeded for user ${userId} order ${savedOrder.id} total ${total}`,
+        `Checkout succeeded for user ${userId} order ${savedOrder.id} total ${orderTotal}`,
       );
 
       // Reload order with items for response

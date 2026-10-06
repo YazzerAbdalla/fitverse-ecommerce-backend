@@ -1,31 +1,14 @@
-import {
-  ConflictException,
-  ForbiddenException,
-  Injectable,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, FindOptionsWhere } from 'typeorm';
 import { Order } from './entities/order.entity';
 import { Reservation } from '../reservation/entities/reservation.entity';
 import { UserRoles } from '../users/enum/roles';
 import { OrderStatus } from './order-status.enum';
-
-/**
- * Allowed Order status transitions (mirrors Reservation ALLOWED_TRANSITIONS).
- * Idempotent COMPLETED→COMPLETED is handled as a short-circuit before this map.
- */
-const ALLOWED_ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  [OrderStatus.PENDING]: [
-    OrderStatus.COMPLETED,
-    OrderStatus.CANCELLED,
-    OrderStatus.FAILED,
-  ],
-  [OrderStatus.COMPLETED]: [OrderStatus.COMPLETED],
-  [OrderStatus.CANCELLED]: [],
-  [OrderStatus.FAILED]: [],
-};
+import {
+  assertOrderOwner,
+  validateOrderTransition as validateSharedOrderTransition,
+} from './order-transitions';
 
 /**
  * This service is responsible for order retrieval domain.
@@ -53,47 +36,48 @@ export class OrderService {
   ): Promise<{ data: any[]; meta: any }> {
     const page = pagination.page ?? 1;
     const limit = Math.min(pagination.limit ?? 20, 100);
-    const repo = this.dataSource.getRepository(Order);
+    const orderRepository = this.dataSource.getRepository(Order);
 
-    const where: any = {};
+    const whereClause: FindOptionsWhere<Order> = {};
     // Owner-scoped unless Admin filters by userId
     if (role === UserRoles.Admin && filter?.userId) {
-      where.userId = filter.userId;
+      whereClause.userId = filter.userId;
     } else {
-      where.userId = requestingUserId;
+      whereClause.userId = requestingUserId;
     }
     if (pagination.status) {
-      where.status = pagination.status;
+      whereClause.status = pagination.status as OrderStatus;
     }
 
-    const [data, total] = await repo.findAndCount({
-      where,
+    const [orderRows, total] = await orderRepository.findAndCount({
+      where: whereClause,
       relations: { orderItems: { product: true } },
+      // Offset pagination: skip the rows of previous pages.
       skip: (page - 1) * limit,
       take: limit,
       order: { created_at: 'DESC' },
     });
 
     // Enrich with reservationId via Reservation orderId FK (without eager join)
-    const reservationRepo = this.dataSource.getRepository(Reservation);
-    const enriched = await Promise.all(
-      data.map(async (order) => {
-        const res = await reservationRepo.findOne({
-          where: { orderId: order.id },
+    const reservationRepository = this.dataSource.getRepository(Reservation);
+    const enrichedOrders = await Promise.all(
+      orderRows.map(async (orderRow) => {
+        const linkedReservation = await reservationRepository.findOne({
+          where: { orderId: orderRow.id },
         });
         return {
-          ...order,
-          reservationId: res?.id ?? null,
-          expiresAt: res?.expiresAt ?? null,
+          ...orderRow,
+          reservationId: linkedReservation?.id ?? null,
+          expiresAt: linkedReservation?.expiresAt ?? null,
         };
       }),
     );
 
     return {
-      data: enriched,
+      data: enrichedOrders,
       meta: {
         totalItems: total,
-        itemCount: data.length,
+        itemCount: orderRows.length,
         itemsPerPage: limit,
         totalPages: Math.ceil(total / limit) || 1,
         currentPage: page,
@@ -114,41 +98,35 @@ export class OrderService {
     requestingUserId: string,
     id: string,
     role?: UserRoles,
-  ): Promise<any> {
-    const repo = this.dataSource.getRepository(Order);
-    const order = await repo.findOne({
+  ): Promise<Order & { reservationId: string | null; expiresAt: Date | null }> {
+    const orderRepository = this.dataSource.getRepository(Order);
+    const order = await orderRepository.findOne({
       where: { id },
       relations: { orderItems: { product: true } },
     });
     if (!order) throw new NotFoundException(`Order ${id} not found`);
-    this.assertOwner(order, requestingUserId, role);
+    this.assertOrderOwner(order, requestingUserId, role);
 
-    const reservationRepo = this.dataSource.getRepository(Reservation);
-    const res = await reservationRepo.findOne({ where: { orderId: order.id } });
+    const reservationRepository = this.dataSource.getRepository(Reservation);
+    const linkedReservation = await reservationRepository.findOne({
+      where: { orderId: order.id },
+    });
 
     return {
       ...order,
-      reservationId: res?.id ?? null,
-      expiresAt: res?.expiresAt ?? null,
+      reservationId: linkedReservation?.id ?? null,
+      expiresAt: linkedReservation?.expiresAt ?? null,
     };
   }
 
   /**
-   * Validates an Order status transition.
+   * Validates an Order status transition (delegates to the shared table).
    * @param from - Current Order status.
    * @param to - Target Order status.
    * @throws ConflictException if transition is not allowed.
    */
   validateOrderTransition(from: OrderStatus, to: OrderStatus): void {
-    // Idempotent COMPLETED→COMPLETED is handled by caller as early return before this check
-    if (from === OrderStatus.COMPLETED && to === OrderStatus.COMPLETED) {
-      return;
-    }
-    const allowed = ALLOWED_ORDER_TRANSITIONS[from] ?? [];
-    // No duplicate COMPLETED in allowed for COMPLETED (handled above), but keep map for docs
-    if (!allowed.includes(to)) {
-      throw new ConflictException(`Invalid order transition: ${from} -> ${to}`);
-    }
+    validateSharedOrderTransition(from, to);
   }
 
   /**
@@ -158,20 +136,11 @@ export class OrderService {
    * @param role - Current user role.
    * @throws ForbiddenException if not owner and not Admin.
    */
-  assertOwner(order: Order, requestingUserId: string, role?: UserRoles): void {
-    if (order.userId !== requestingUserId && role !== UserRoles.Admin) {
-      throw new ForbiddenException('You are not allowed to access this order');
-    }
-  }
-
-  // Deprecated stubs kept for compatibility
-  create(_dto: any) {
-    throw new NotFoundException('Use POST /order/checkout');
-  }
-  update(_id: number, _dto: any) {
-    throw new NotFoundException('Not implemented');
-  }
-  remove(_id: number) {
-    throw new NotFoundException('Not implemented');
+  assertOrderOwner(
+    order: Order,
+    requestingUserId: string,
+    role?: UserRoles,
+  ): void {
+    assertOrderOwner(order, requestingUserId, role);
   }
 }

@@ -8,20 +8,26 @@ import {
   Query,
   Req,
   UseGuards,
-  Optional,
-  Inject,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiConflictResponse,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiResponse,
+  ApiTooManyRequestsResponse,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
+import type { Request } from 'express';
 import { RateLimitGuard } from '../auth/guards/rate-limit.guard';
-import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { UserRoles } from '../users/enum/roles';
-import { CheckoutDto } from './dto/checkout.dto';
-import { CompleteOrderDto } from './dto/complete-order.dto';
 import { OrderService } from './order.service';
+import type { OrderItem } from './entities/order-items.entity';
 import { OrderCheckoutService } from './order-checkout.service';
 import { OrderCompletionService } from './order-completion.service';
 import { OrderCancellationService } from './order-cancellation.service';
@@ -36,10 +42,7 @@ export class OrderController {
     private readonly orderService: OrderService,
     private readonly orderCheckoutService: OrderCheckoutService,
     private readonly orderCompletionService: OrderCompletionService,
-    @InjectDataSource() private readonly dataSource: DataSource,
-    @Optional()
-    @Inject(OrderCancellationService)
-    private readonly orderCancellationService?: OrderCancellationService,
+    private readonly orderCancellationService: OrderCancellationService,
   ) {}
 
   @Post('checkout')
@@ -58,28 +61,27 @@ export class OrderController {
   })
   async checkout(
     @CurrentUser('sub') userId: string,
-    @Body() dto: CheckoutDto,
-    @Req() req: any,
+    @Req() req: Request & { headers: Record<string, string | string[]> },
   ) {
     const correlationId =
       req?.headers?.['x-request-id'] ||
       req?.headers?.['x-correlation-id'] ||
       randomUUID();
-    const result = await this.orderCheckoutService.checkout(
+    const result = await this.orderCheckoutService.checkoutUserCart(
       userId,
-      correlationId,
+      Array.isArray(correlationId) ? correlationId[0] : String(correlationId),
     );
     // Return shape per contracts: {id, userId, status, total, createdAt, reservationId, expiresAt, items}
-    const order: any = result.order;
+    const order = result.order;
     return {
       id: order.id,
       userId: order.userId,
       status: order.status,
       total: order.total,
       createdAt: order.created_at,
-      expiresAt: result.reservation?.expiresAt ?? order.expiresAt ?? null,
+      expiresAt: result.reservation?.expiresAt ?? null,
       reservationId: result.reservation?.id ?? null,
-      items: (result.items || order.orderItems || []).map((it: any) => ({
+      items: (result.items || order.orderItems || []).map((it) => ({
         id: it.id,
         productId: it.productId,
         quantity: it.quantity,
@@ -101,10 +103,9 @@ export class OrderController {
   })
   async createAlias(
     @CurrentUser('sub') userId: string,
-    @Body() dto: CheckoutDto,
-    @Req() req: any,
+    @Req() req: Request & { headers: Record<string, string | string[]> },
   ) {
-    return this.checkout(userId, dto, req);
+    return this.checkout(userId, req);
   }
 
   /**
@@ -138,25 +139,22 @@ export class OrderController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
-  async complete(
+  async completeOrder(
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: UserRoles,
     @Param('id') id: string,
-    @Body() dto: CompleteOrderDto,
-    @Req() req: any,
+    @Req() req: Request & { headers: Record<string, string | string[]> },
   ) {
     const correlationId =
       req?.headers?.['x-request-id'] ||
       req?.headers?.['x-correlation-id'] ||
       randomUUID();
-    const result: any = await this.dataSource.transaction((manager) =>
-      this.orderCompletionService.complete(
-        manager,
-        userId,
-        id,
-        role,
-        correlationId,
-      ),
+    // Transaction boundary owned by the service (TI-3); the controller stays thin.
+    const result = await this.orderCompletionService.completeOrder(
+      userId,
+      id,
+      role,
+      Array.isArray(correlationId) ? correlationId[0] : String(correlationId),
     );
     // Normalize response shape per contracts/order-complete.md
     return {
@@ -164,10 +162,10 @@ export class OrderController {
       status: result.status,
       total: result.total,
       userId: result.userId,
-      createdAt: result.created_at ?? result.createdAt,
-      updatedAt: result.updated_at ?? result.updatedAt,
-      reservationId: result.reservationId ?? result.reservation?.id ?? null,
-      expiresAt: result.expiresAt ?? result.reservation?.expiresAt ?? null,
+      createdAt: result.created_at,
+      updatedAt: result.updated_at,
+      reservationId: result.reservationId,
+      expiresAt: result.expiresAt,
       reservation: result.reservation
         ? {
             id: result.reservation.id,
@@ -176,14 +174,19 @@ export class OrderController {
             orderId: result.reservation.orderId,
           }
         : null,
-      items: (result.orderItems || []).map((it: any) => ({
-        id: it.id,
-        productId: it.productId,
-        quantity: it.quantity,
-        unitPrice: it.unit_price ?? it.unitPrice,
-        unit_price: it.unit_price ?? it.unitPrice,
-        subtotal: it.subtotal ?? it.quantity * (it.unit_price ?? it.unitPrice),
-        productName: it.productNameSnapshot ?? it.product?.name ?? null,
+      items: (result.orderItems || []).map((orderItemRow: OrderItem) => ({
+        id: orderItemRow.id,
+        productId: orderItemRow.productId,
+        quantity: orderItemRow.quantity,
+        unitPrice: orderItemRow.unit_price,
+        unit_price: orderItemRow.unit_price,
+        subtotal:
+          orderItemRow.subtotal ??
+          orderItemRow.quantity * orderItemRow.unit_price,
+        productName:
+          orderItemRow.productNameSnapshot ??
+          orderItemRow.product?.name ??
+          null,
       })),
     };
   }
@@ -207,19 +210,18 @@ export class OrderController {
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: UserRoles,
     @Param('id') id: string,
-    @Body() dto: CompleteOrderDto,
-    @Req() req: any,
+    @Req() req: Request & { headers: Record<string, string | string[]> },
   ) {
-    return this.complete(userId, role, id, dto, req);
+    return this.completeOrder(userId, role, id, req);
   }
 
   /**
    * Cancels a pending order (user or admin). Centralized outbox.
    * @param userId - JWT sub.
    * @param role - User role.
-   * @param id - Order id.
-   * @param req - Request for correlationId.
-   * @returns Cancelled order.
+   * @param orderId - Order id.
+   * @param request - Request for correlationId.
+   * @returns Cancelled order with reason and reservation link.
    */
   @Post(':id/cancel')
   @UseGuards(RateLimitGuard)
@@ -230,37 +232,41 @@ export class OrderController {
     description:
       'Async event: order.cancelled via transactional outbox (OutboxEvent PENDING→OutboxPublisher→RabbitMQ)',
   })
-  @ApiResponse({ status: 200, description: 'Order cancelled' })
-  @ApiResponse({ status: 404, description: 'Order not found' })
-  @ApiResponse({ status: 409, description: 'Invalid transition' })
-  async cancel(
+  @ApiOkResponse({ description: 'Order cancelled with reason + reservationId' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid JWT' })
+  @ApiForbiddenResponse({ description: 'Not owner and not Admin' })
+  @ApiNotFoundResponse({ description: 'Order or linked inventory not found' })
+  @ApiConflictResponse({ description: 'Order already COMPLETED' })
+  @ApiTooManyRequestsResponse({ description: 'Rate limit exceeded' })
+  async cancelOrder(
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: UserRoles,
-    @Param('id') id: string,
-    @Req() req: any,
+    @Param('id') orderId: string,
+    @Req() request: Request,
   ) {
+    // Correlation id resolved at the request boundary, never in the service.
     const correlationId =
-      req?.headers?.['x-request-id'] ||
-      req?.headers?.['x-correlation-id'] ||
+      request?.headers?.['x-request-id'] ||
+      request?.headers?.['x-correlation-id'] ||
       randomUUID();
-    if (!this.orderCancellationService) {
-      throw new Error('OrderCancellationService not available');
-    }
-    const result: any = await this.dataSource.transaction((manager) =>
-      this.orderCancellationService!.cancel(
-        manager,
-        id,
-        'user',
-        correlationId,
-        userId,
-        role,
-      ),
+    const headerCorrelationId = Array.isArray(correlationId)
+      ? correlationId[0]
+      : String(correlationId);
+    // Transaction boundary owned by the service (TI-3); the controller stays thin.
+    const cancelOrderResult = await this.orderCancellationService.cancelOrder(
+      orderId,
+      'user',
+      userId,
+      role,
+      headerCorrelationId,
     );
     return {
-      id: result.id,
-      status: result.status,
-      total: result.total,
-      userId: result.userId,
+      id: cancelOrderResult.order.id,
+      status: cancelOrderResult.order.status,
+      total: cancelOrderResult.order.total,
+      userId: cancelOrderResult.order.userId,
+      reason: cancelOrderResult.reason,
+      reservationId: cancelOrderResult.reservationId,
     };
   }
 
