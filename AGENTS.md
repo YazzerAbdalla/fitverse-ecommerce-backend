@@ -19,7 +19,7 @@ For additional context about technologies to be used, project structure,
 
 shell commands, and other important information, read the current plan
 
-at `specs/016-baseline/plan.md` (S1 — Reconcile + Baseline).
+at `specs/017-order-cancellation/plan.md` (Phase 8 — Order Cancellation).
 
 <!-- SPECKIT END -->
 
