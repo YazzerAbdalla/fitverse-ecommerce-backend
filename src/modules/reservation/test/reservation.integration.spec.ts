@@ -6,6 +6,7 @@ import { ReservationItem } from '../entities/reservation-item.entity';
 import { ReservationService } from '../reservation.service';
 import { ReservationStatus } from '../entities/reservation-status.enum';
 import User from '../../users/entity/user.entity';
+import { RefreshToken } from '../../auth/entities/refresh-token.entity';
 import { Product } from '../../products/entities/product.entity';
 import { Inventory } from '../../inventory/entities/inventory.entity';
 import { Order } from '../../order/entities/order.entity';
@@ -46,6 +47,7 @@ describe('Reservation Integration (real PostgreSQL)', () => {
       logging: false,
       entities: [
         User,
+        RefreshToken,
         Product,
         Inventory,
         Cart,

@@ -1,7 +1,8 @@
 # Refactoring Plan — Mini E-Commerce Backend (Spec-by-Spec, Rev. 2)
 
-**Date:** 2026-10-02 (rev. 2 — R/B/S split, Phase 0 baseline, CC-A/B/C split, tx-ownership rule, invariants, gates) | **Mode:** planning only — no production code changed.
-**Scope:** `specs/001`–`specs/014`, `src/`, `test/`.
+**Date:** 2026-10-02 (rev. 2) + Rev. 3 addendum 2026-10-06 (audit close-the-gaps — no production code changed).
+**Scope:** `specs/001`–`specs/014`, `src/`, `test/`, `.env`/boot (`main.ts`), CORS/WS security.
+**Rev. 3 note:** Rev. 2 text is preserved verbatim. §13 lists every finding from the 2026-10-06 full-stack audit (ISSUE-01…12 / CLEAN-01…12) that had no plan home, each classified R/B/S and assigned to an existing phase — plus the few genuinely new rules (SEC-2, CF-2, CACHE-1). Nothing in §§1–12 was rewritten; §13 + Appendix B deltas are the source of truth for the new items.
 **Supersedes:** Rev. 1 (same file). All project-specific findings, evidence, and module analysis from Rev. 1 are preserved; what changed is listed in the summary at the end.
 **Governing rules:** no new features, no public API / event / queue / schema changes unless explicitly classified **B/S** with approval; no removed security checks; no redundant-query removal without proof; no silent `@Optional()` → required conversions.
 
@@ -292,8 +293,11 @@ No circular dependencies. `CC-C` design is reviewed before RP-ORDER/RP-EXP consu
 - **DC-1 (dead code)** Deletion requires reachability evidence: static imports, DI providers, module registrations, routes, event/queue handlers, schedulers, dynamic refs, tests, config-driven behavior. Candidates: inventory stubs, `transition` alias, builder + unused fluent methods, `worker.sendBulk`, consumer alias, `users.service:65-72` block, `LocalAuthGuard` manual validation, `console.log`s, `(manager as any).__orderBeforeStatus` (replace, not just delete).
 - **OD-1 (optional deps)** Converting `@Optional()` → required is behavior-affecting (startup/wiring/failure semantics). Each conversion states: why required; current absent-behavior; post-change behavior; providing modules; startup/wiring tests; whether fail-open is intentionally removed. Applies to: `NOTIFICATION_SERVICE` client, `OutboxService` in expiration, `CACHE_MANAGER` fallbacks, worker/bulk/channels `dataSource/config`, `RateLimitGuard` configService, gateway configService, SMTP config.
 - **SG-1 (size signals)** Function/file/class size and nesting depth are review signals, not laws. Extract on responsibility boundaries, never on line counts alone.
+- **CACHE-1 (shared-store ban) [new, Rev. 3].** `cacheManager.clear()` on the shared Redis is forbidden (wipes `rl:*`, tick/poison, dedup/cooldown keys). Product invalidation must be selective (per-key `del`) or generational (version stamp); see §13 RP-CACHE-GUARD deltas.
 - **CF-1 (config)** Typed objects parsed once at startup; no `process.env` in business logic (`data-source.ts`/`main.ts` entry + `NODE_ENV` branch → `ConfigService`); silent fallbacks centralized; hard-fail only with approval + tests.
+- **CF-2 (config clamping) [new, Rev. 3].** Every numeric clamp logs `Logger.warn` with raw+applied values when it clamps; boot validation fails on absurd values (see §13 CF-2a OUTBOX_POLL_INTERVAL_MS, CF-2b RMQ URL). Silent clamp-to-range without a warn is a defect.
 - **SEC-1** Raw tokens/secrets/PII never logged/stored; hashes only. S-class changes need explicit approval + regression tests.
+- **SEC-2 (secrets & transport) [new, Rev. 3].** Real credentials never live in `.env` on disk beyond local dev (rotate on leak; gitleaks gate); CORS allow-list from config (never `origin: true` + `credentials: true`); WS `WS_AUTH=false` fails boot in production; JWT requires numeric `tokenVersion` (legacy email-fallback/1s-grace removed only with approval — see §13).
 
 ---
 
@@ -322,6 +326,87 @@ No circular dependencies. `CC-C` design is reviewed before RP-ORDER/RP-EXP consu
 
 ---
 
+## 13. Rev. 3 Addendum — 2026-10-06 audit close-the-gaps (only new items)
+
+Every row below is an audit finding (ISSUE/CLEAN id) with **no existing plan home**. Items already covered are **not** repeated: controller-tx (ISSUE-05 → §2/TI-3/RP-RES/RP-ORDER), `forwardRef` (CLEAN-02 → RP-INV), shared-policy duplication (CLEAN-03 → CC-B), `process.env` (CLEAN-05 → RP-OUTBOX/CF-1), `@Optional()` set (CLEAN-06 → OD-1), magic TTLs (CLEAN-09 → CC-A), `public dataSource` (CLEAN-01 → RP-RES). The `OrderService.findAll` N+1 (ISSUE-08) is already tracked in RP-ORDER — this addendum only strengthens it to require a single-query fix (join or batched `In()` + map) with `EXPLAIN`, not just "signal evidence".
+
+| Audit ID | Class | New item (was not in Rev. 2) | Assigned phase | Evidence |
+|----------|-------|------------------------------|----------------|----------|
+| P0-6 (ISSUE-01) | **[S]** ops | Secrets rotation + hygiene: rotate `GOOGLE_CLIENT_SECRET` and `RESEND_API_KEY`/`SMTP_PASS` found as real values in on-disk `.env:32-33,46,50-51`; strip to placeholders; verify `git check-ignore .env`; add gitleaks gate for `re_[A-Za-z0-9_]{20,}` / `GOCSPX-` | Ops (no code phase; gate in §11) | `.env` vs `.env.example:73,77` placeholder pattern; `AGENTS.md` §7 |
+| P0-7 (ISSUE-02) | **[S]** | CORS allow-list: `main.ts:68-71` `origin: true + credentials: true` reflects any origin with credentials → credentialed CSRF | RP-CACHE-GUARD or RP-AUTH (one-line + test) | `src/main.ts:68-71` |
+| P0-8 (ISSUE-04) | **[B]** | Checkout outbox swallow violates TI-4: `order-checkout.service.ts:249-254` catches outbox `INSERT` failure, warns, and commits `Order + Reservation + reservedAmount` with no event (lost-event class the outbox exists to kill) | RP-ORDER | `order-checkout.service.ts:224-255` vs TI-4; CC-C `emitOutboxBestEffort` currently blesses the swallow — this item overrides that to a must-fix |
+| P0-9 (ISSUE-12) | **[B]** | RMQ boot validation + reconnect: `main.ts:15,26` `urls: [rabbitmqUrl!]` crashes opaquely when unset; no heartbeat/reconnect options; publisher skip is warn-once-per-process | RP-OUTBOX | `src/main.ts:15,26`; `outbox.publisher.ts:31-37,68-76` |
+| CF-2a (ISSUE-10) | **[B]** config | Outbox poll interval: deployed `.env:57` `6000000` vs contract `1000`; getter silently clamps to `10000`, hiding the typo | RP-OUTBOX | `.env:57`; `outbox.publisher.ts:51-55` |
+| B-3 (ISSUE-06) | **[B]** | Atomic inventory mutations: `increase/decrease/reserve/release/completeSale` (`inventory.service.ts:81-210`) + bulk `decrease/restoreStockForOrderMany` (`:117-146`, client-computed `newStock` via `save`) are lock-free read-modify-write → lost updates vs checkout's locked path | RP-INV | `inventory.service.ts:81-210`; checkout lock `:129-132` for contrast. Fix: single locked/atomic helper + `Promise.all` lost-update test |
+| CACHE-1a (ISSUE-07) | **[R]** | `clear()` ban: `invalidateAllLists` fallback `cacheManager.clear()` flushes shared Redis (`rl:*`, tick/poison, dedup, cooldown) | RP-CACHE-GUARD | `products.service.ts:197-201`; new rule CACHE-1 §10 |
+| CACHE-1b (CLEAN-08) | **[R]** | Cache key/stampede/TTL: list key `products:list:{page}:{limit}` ignores future filters/sort (`:61-66`); `findAndCount` has no deterministic `order`; no singleflight on miss; `CacheModule ttl: 60*1000` ms-vs-s ambiguity vs `set(key,v,ttl)` | RP-CACHE-GUARD | `products.service.ts:61-66,381-433,440-476`; `app.module.ts:43` |
+| THROTTLE (ISSUE-11) | **[S]** | Throttling gaps: reservation controller has **no** `RateLimitGuard` at all; `GET /order`, `GET /order/:id` unthrottled (amplifies ISSUE-08 N+1). Inventory `increase/decrease` noted in RP-CACHE-GUARD, extended here to reservation + order reads | RP-CACHE-GUARD | `reservation.controller.ts:32,36,54,63,79+`; `order.controller.ts:267,291`; `inventory.controller.ts:31,46,63,84` |
+| SEC-2c (ISSUE-03) | **[S]** | WS `WS_AUTH=false` prod guard: gateway joins `dev-anonymous` with full room access on one env typo; no boot failure in production | RP-NOTIF | `notifications.gateway.ts:51-56` (P0-4/R-4 already track the `tokenVersion` half) |
+| SEC-2d (CLEAN-11) | **[S]** | JWT legacy fallback: `jwt.guard.ts:69-104` email-fallback lookup + non-numeric `tokenVersion` passthrough + `passwordChangedAt` 1s grace fail open on unverifiable tokens | RP-AUTH | `jwt.guard.ts:69-104` vs TI-8 |
+| DEDUP (ISSUE-09) | decision | Dedup PG-claim-first: `tryAcquireDedupKey` returns `true` on Redis error **and** when no client exists (`worker:60-96` → send path) → duplicates during outages | RP-NOTIF | `notifications.worker.ts:60-96,102-120`; TI-5/TI-7 |
+| FILTER (CLEAN-10) | **[R]** | Filter throw + log noise: `all-exceptions.filter.ts:23-37` throws `GraphQLError` inside `catch()` (loses REST envelope contract); `:17-20` logs stacks for expected 4xx | CC-B (filter) or RP-AUTH (auth 4xx parity test) | `all-exceptions.filter.ts:17-20,23-37,52-53,64-65` (`as any` ×2 also closed here) |
+| PAGINATION (CLEAN-12) | **[R]** | Boundary validation DTOs: `parseInt(page)`/`+page` without NaN/negative guards (`order.controller:271-289`, `reservation.controller:67-76`); `main.ts:74` `console.log` → `Logger` closed in same sweep | CC-B | controllers cited; `main.ts:74`; `inventory.controller.ts:18-23` inline DTO already moves in RP-INV |
+| STUBS (CLEAN-07) | **[R]** | Order stubs + alias: `order.service.ts:167-176` throw-stubs + `order.entity.ts:51-52` deprecated `order_items?` (inventory stubs already in RP-INV/DC-1) | RP-ORDER | files cited; DC-1 reachability evidence required |
+
+**Phase deltas (what each phase additionally does):**
+- **RP-INV += B-3**: all stock/reserved mutations go through one locked (or atomic-`UPDATE … SET stock = stock + $1 WHERE …`) helper; bulk helpers get `WHERE`-guarded updates; lost-update regression test. Reads stay tx-free (unchanged).
+- **RP-CACHE-GUARD += CACHE-1a/1b + THROTTLE + P0-7**: forbid `clear()` (selective `del` or generation stamp); keys from full normalized query + deterministic `order`; singleflight on miss; TTL unit pinned + tested; add reservation/order-read buckets or record explicit exemptions; CORS allow-list fix may land here.
+- **RP-ORDER += P0-8 + STUBS**: delete outbox swallow (failure rolls back); delete order throw-stubs + deprecated alias with DC-1 evidence.
+- **RP-OUTBOX += P0-9 + CF-2a/2b**: warn-on-clamp everywhere + boot validation (absurd values fail); RMQ explicit boot error or documented standalone mode + reconnect options + oldest-`PENDING` health.
+- **RP-NOTIF += SEC-2c + DEDUP decision**: WS prod-guard; PG-claim-first decision enacted only with approval.
+- **RP-AUTH += SEC-2d + FILTER(parity)**: JWT strict-shape decision enacted only with approval (audit live-token age first); filter 4xx parity test.
+- **CC-B += PAGINATION + FILTER(fix)**: shared `PaginationQueryDto`; filter returns instead of throwing; single typed 429-header carrier.
+
+---
+
+## 14. Implementation Sessions — spec-ready packaging (Rev. 3)
+
+Each session below is one future Spec Kit spec (`specify → clarify → plan → tasks → implement → verify`). A session starts only when the previous session is green (§11) and its required approvals (Appendix B) are recorded. Effort is a rough solo-engineering estimate, excluding approval latency.
+
+### S1 — Reconcile + Baseline `[R/B/S-ops]` (~0.5–1 day) — ✅ Implemented 2026-10-06 on `016-baseline` (evidence: `specs/016-baseline/`, commits P0-1/P0-6/P0-7/pins; close-out in `specs/016-baseline/reconcile.md`)
+- **Plan scope:** reconcile `git log` (RP-AUTH + token-fold already merged) vs plan; then Phase 0 (P0-1 outbox-SQL fix, P0-2–P0-4 pins, P0-5 baselines) + §13 P0-6 (secret rotation, ops) + P0-7 (CORS allow-list).
+- **Approvals needed:** B-7 (secrets rotation), B-8 (CORS).
+- **DoD:** P0-1 merged solo; CORS allow-list + test; secrets rotated/stripped + gitleaks gate; characterization suites green.
+- **Spec hint:** `specs/016-baseline/` — ops checklist + retention test + CORS test.
+
+### S2 — Shared Primitives + Policies `[R]` (~1–2 days)
+- **Plan scope:** CC-A (Clock/Hasher/Duration/typed configs + CF-2 warn-on-clamp) + CC-B (quantity guard, 23514-map, owner, paginate, mapper, correlationId, PAGINATION `PaginationQueryDto`, FILTER filter-fix + typed 429 carrier, `main.ts` `console.log` → `Logger`).
+- **DoD:** all call sites on ports/helpers; messages/keys byte-identical; unit matrices green.
+- **Spec hint:** `specs/017-shared-primitives/` — Rule-of-Three table per helper.
+
+### S3 — Inventory + Cache/Guard `[R/B/S]` (~1–2 days, RP-INV ∥ RP-CACHE-GUARD)
+- **Plan scope:** RP-INV (+ §13 B-3 atomic mutations + lost-update test) + RP-CACHE-GUARD (+ §13 CACHE-1a/1b, THROTTLE incl. reservation + order-read buckets, P0-7 if deferred from S1).
+- **Approvals needed:** B-12 (atomic mutations), B-4/B-16 (validation/rate-limit deltas).
+- **DoD:** single locked/atomic inventory helper; `clear()` gone; keys normalized + TTL pinned + singleflight; buckets added or exemptions recorded.
+- **Spec hint:** `specs/018-inventory-cache/` — two parallel tracks, shared-port signatures frozen in S2.
+
+### S4 — Reservation Chain `[R]` (~2–3 days, RP-RES → RP-LIFECYCLE)
+- **Plan scope:** tx-ownership move + `lockInventoriesSorted` store, then lifecycle split (steps, builder removal, auto-cancel unification).
+- **DoD:** controllers tx-free; single lock path; 200/409 matrix + `Promise.all` single-winner races green.
+- **Spec hint:** `specs/019-reservation-chain/` — sequential, no parallelism inside.
+
+### S5 — Auth Delta `[R/S]` (~1–2 days; shrinks if RP-AUTH reconcile holds)
+- **Plan scope:** only RP-AUTH leftovers: §13 SEC-2d JWT strict-shape + FILTER 4xx parity test.
+- **Approvals needed:** B-1/B-2 (S-1/S-2 if still open), B-10 (JWT legacy removal — audit live-token age first).
+- **DoD:** strict-shape enforced or documented retention; parity test green; no other auth files touched.
+- **Spec hint:** `specs/020-auth-delta/` — self-contained auth+users track.
+
+### S6 — Order + Expiration `[R/B]` (~2–3 days, CC-C design + RP-ORDER ∥ RP-EXP)
+- **Plan scope:** CC-C port-signature freeze, then parallel: RP-ORDER (+ §13 P0-8 swallow removal, STUBS deletion, single-query N+1 fix with `EXPLAIN`) + RP-EXP (OD-1 `OutboxService` decision recorded).
+- **Approvals needed:** B-3 (OD-1 set), B-11 (outbox swallow), B-20 (stub deletion).
+- **DoD:** outbox failure rolls back checkout; N+1 single query proven; per-candidate single-tx + tick-lock + quarantine preserved.
+- **Spec hint:** `specs/021-order-expiration/` — coordinate only on frozen port signatures.
+
+### S7 — Outbox + Notifications `[R/B/S]` (~2–3 days, RP-OUTBOX → RP-NOTIF)
+- **Plan scope:** RP-OUTBOX (land CC-C adapters + §13 P0-9 RMQ validation/reconnect, CF-2a/b warn-on-clamp + boot validation) then RP-NOTIF (+ §13 SEC-2c WS prod-guard, DEDUP PG-claim-first).
+- **Approvals needed:** B-3 (OD-1), B-9 (WS guard), B-13/B-14 (poll interval/RMQ), B-17 (dedup strategy).
+- **DoD:** lease-reclaim + late-writer protection proven; duplicate-`eventId` harmless; WS boots fail closed in prod; replay → 0-new.
+- **Spec hint:** `specs/022-outbox-notifications/` — strictly sequential (producer before consumer).
+
+**Session rules:** one session = one spec, one green run (`lint/build/test/test:e2e` relevant + concurrency suites where touched), plan checkboxes ticked with evidence. Never parallelize S7's two halves; never start S6 without S4's lock seams; pre-decide DEDUP, SEC-2d, B-2/B-3 before S5–S7 to avoid mid-session stalls.
+
+---
+
 ## Appendix A — Preserved evidence index (Rev. 1 audits, still valid)
 
 - Auth: `auth.service.ts` 1267 lines; `refresh:225-394`; cache/emit/`getRepository(User)` sites; TTL×3; hash×14.
@@ -337,3 +422,17 @@ No circular dependencies. `CC-C` design is reviewed before RP-ORDER/RP-EXP consu
 4. **Inventory `ParseUUIDPipe`/rate-limit gaps** (validation/behavior-adjacent) — RP-INV / RP-CACHE-GUARD: pin behavior first, change only as approved B.
 5. **`register` response `data:newUser`** — pin password-absence by test in RP-AUTH; any change is S-gated.
 6. **R-4 WS `tokenVersion`** — fix scope approved in RP-NOTIF with auth-track input (characterized in P0-4).
+7. **SEC-2a secrets rotation** — real `GOOGLE_CLIENT_SECRET` + `RESEND_API_KEY`/`SMTP_PASS` found in on-disk `.env` (§13 P0-6). Rotate both, strip to placeholders, verify `git check-ignore .env`, add gitleaks gate. Ops task, no code phase.
+8. **SEC-2b CORS allow-list** — `main.ts:68-71` `origin: true + credentials: true` (§13 P0-7). Fix in RP-CACHE-GUARD or RP-AUTH (one-line + test), approval-gated as `[S]`.
+9. **SEC-2c WS `WS_AUTH=false` prod guard** — gateway `:51-56` dev-anonymous bypass (§13 RP-NOTIF delta). Boot must fail in production when disabled; `[S]`, with RP-NOTIF.
+10. **SEC-2d JWT legacy fallback** — `jwt.guard.ts:69-104` email-fallback + non-numeric passthrough + 1s grace (§13 RP-AUTH delta). Removal is `[S]`-gated (audit active-token age first).
+11. **B-2 checkout outbox swallow** — `order-checkout.service.ts:249-254` catch-and-commit violates TI-4 (§13 RP-ORDER delta). Remove swallow so outbox failure rolls back; regression test.
+12. **B-3 non-transactional inventory mutations** — `inventory.service.ts:81-210` read-modify-write without lock (§13 RP-INV delta). Route through locked/atomic helper + lost-update test.
+13. **CF-2a outbox poll interval** — deployed `.env:57` `OUTBOX_POLL_INTERVAL_MS=6000000` vs contract `1000`; getter clamps silently to `10000` (§13 RP-OUTBOX delta). Set `1000`, add warn-on-clamp + boot validation.
+14. **CF-2b RMQ boot validation** — `main.ts:15,26` `urls: [rabbitmqUrl!]` crashes opaquely; no reconnect policy (§13 RP-OUTBOX delta). Explicit boot error or documented standalone mode + health (oldest-`PENDING` age).
+15. **CACHE-1a `clear()` ban + key/stampede/TTL** — `products.service.ts:197-201` fallback `clear()`, filter-blind keys `:61-66`, no singleflight, ms-vs-s TTL ambiguity (§13 RP-CACHE-GUARD deltas). All `[R]` except key-shape change (needs contract check).
+16. **Throttling gaps** — reservation controller (no guard at all), `GET /order` + `GET /order/:id` unthrottled (§13 RP-CACHE-GUARD delta). Add buckets or record explicit exemption; `[S]`-gated.
+17. **Dedup PG-claim-first decision** — `notifications.worker.ts:60-96` fail-open `→ true` sends duplicates on Redis outage (§13 RP-NOTIF delta). Decide: PG `ON CONFLICT DO NOTHING` claim before send (recommended) vs documented at-least-twice. Needs approval.
+18. **Filter throw + 4xx log noise** — `all-exceptions.filter.ts:23-37` throws inside `catch()`; `:17-20` logs stacks for expected 4xx (§13 CC-B/RP-AUTH delta). `[R]` fix + parity test.
+19. **Boundary validation DTOs** — `order.controller.ts:271-289` `parseInt`/`+page` without guards; inline `AvailabilityQueryDto` already moves in RP-INV (§13 CC-B delta). Add shared `PaginationQueryDto`; `[R]`.
+20. **Order stubs + deprecated alias** — `order.service.ts:167-176` throw-stubs, `order.entity.ts:51-52` `order_items?` alias (§13 RP-ORDER delta). Delete with DC-1 evidence; `[R]`.

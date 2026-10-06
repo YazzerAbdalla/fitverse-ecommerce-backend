@@ -9,6 +9,7 @@ import { ReservationStatus } from '../../reservation/entities/reservation-status
 import { Inventory } from '../../inventory/entities/inventory.entity';
 import { Product } from '../../products/entities/product.entity';
 import User from '../../users/entity/user.entity';
+import { RefreshToken } from '../../auth/entities/refresh-token.entity';
 import { Cart } from '../../cart/entities/cart.entity';
 import { CartItem } from '../../cart/entities/cart-items.entity';
 import { OrderCompletionService } from '../order-completion.service';
@@ -42,6 +43,7 @@ describe('Order Completion Integration (real PostgreSQL)', () => {
       logging: false,
       entities: [
         User,
+        RefreshToken,
         Product,
         Inventory,
         Cart,
