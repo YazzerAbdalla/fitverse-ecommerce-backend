@@ -680,9 +680,9 @@ A completed sale permanently decreases stock while releasing its reservation. �
 
 # Phase 8 — Order Cancellation
 
-**Status: NOT DONE**
+**Status: NOT DONE — demo scope 2026-10-06: cancel-before-sale only (post-sale refund deferred)**
 
-**Goal:** Define and implement inventory behavior when orders are cancelled.
+**Goal:** Define and implement inventory behavior when orders are cancelled. **Demo scope:** `PENDING→CANCELLED` only (`reserved_amount -= quantity`, stock unchanged, single tx with Reservation `RESERVED→CANCELLED`). Post-sale refund (`COMPLETED→CANCELLED` + `stock += quantity`, refund behavior, full state-machine matrix) is deferred to post-demo — document as out-of-scope.
 
 ## 8.1 Cancellation Before Sale
 
@@ -718,11 +718,15 @@ Before coding cancellation:
 
 Cancellation cannot accidentally double-release or double-return inventory.
 
+**Demo exit (0.5 day, 1 AI session):** `POST /order/:id/cancel` `PENDING→CANCELLED` + `Reservation RESERVED→CANCELLED` (`reserved-=qty`, stock unchanged, one tx, `FOR UPDATE Order→Reservation→sorted Inventories`, idempotent re-cancel `200` zero delta, `409` on `COMPLETED/FAILED`). Post-sale `COMPLETED→CANCELLED` refund deferred.
+
 ---
 
 # Phase 9 — Redis / Caching
 
-**Status: PARTIALLY DONE / INFRASTRUCTURE EXISTS**
+**Status: PARTIALLY DONE / INFRASTRUCTURE EXISTS — demo close-out 2026-10-06: invalidation fix + miss/hit/invalidation tests only (key redesign + singleflight deferred)**
+
+**Demo scope (with Phase 13, 0.5 day combined, 1–2 AI sessions):** product-list invalidation on mutation + `miss/hit/invalidation` tests + `never-authoritative` proof. Cache-key redesign and singleflight are post-demo.
 
 Redis already exists in the project infrastructure.
 
@@ -942,7 +946,7 @@ The second attempt must not subtract inventory again — **MET**: `POST /reserva
 
 # Phase 13 — Database Constraints & Indexes
 
-**Status: PARTIALLY DONE / DESIGN DEFINED, IMPLEMENTATION NOT COMPLETE**
+**Status: PARTIALLY DONE / DESIGN DEFINED, IMPLEMENTATION NOT COMPLETE — demo close-out 2026-10-06: 2–3 missing indexes + EXPLAIN only (with Phase 9, 0.5 day combined)**
 
 ## Constraints
 
@@ -1531,13 +1535,13 @@ Email service is complete when:
 
 ---
 
-# Phase 19 — Payment (Stripe Test Mode, New Payment Module) (Future)
+# Phase 19 — Payment Simulation (Demo Scope)
 
-**Status: NOT DONE — planned 2026-09-23 (future, before final testing)**
+**Status: NOT DONE — rescoped 2026-10-06 to simulation for portfolio demo (full Stripe deferred)**
 
-**Goal:** Add a **separate `payment` module** that integrates **Stripe in test mode** to validate the real checkout → payment → order completion workflow end-to-end, without making Stripe the source of truth for inventory/orders and without leaking secrets. This replaces the current payment *simulation* (`POST /order/:id/complete` as `PENDING→COMPLETED` in Phase 7) with a realistic **PaymentIntent + webhook** flow that still keeps PostgreSQL authoritative and remains idempotent/concurrency-safe.
+**Goal:** Add a minimal in-repo `payment` simulation that makes the demo checkout → payment → order completion flow clickable end-to-end (`POST /order/checkout → POST /payments/intent → POST /payments/:id/confirm → GET /order`), reusing the existing Phase 7 `OrderCompletionService.complete` path. No Stripe SDK, no webhook, no rawBody. Full Stripe test mode (`PaymentIntent + webhook + signature + evt.id replay`) is deferred to post-demo — see §19.10.
 
-This phase is **orthogonal** to Phases 7-8 (order sale/cancellation) and 9-13 (infra) and extends Phase 7's `PENDING→COMPLETED`/`FAILED` states. It must be implemented **before** `Phase 14 — Testing` so final `npm run test:e2e` can cover `register → cart → checkout → create PaymentIntent (test card 4242) → confirm → webhook → COMPLETED` vs `4000000000000002` → `FAILED` without hitting live Stripe.
+This phase is **orthogonal** to Phases 7-8 (order sale/cancellation) and 9-13 (infra) and extends Phase 7's `PENDING→COMPLETED`/`FAILED` states. It must be implemented **before** `Phase 14 — Testing` so final `npm run test:e2e` can cover `register → cart → checkout → intent → confirm-success → COMPLETED` vs `confirm-decline → FAILED` with zero external network. **Estimate (demo): 0.5–1 day, 2–3 AI sessions** (vs 3–5 days for full Stripe).
 
 ## 19.0 Current Snapshot (what exists, 2026-09-22)
 
@@ -1546,256 +1550,205 @@ order.entity.ts      : Order {id, userId, status PENDING|COMPLETED|CANCELLED|FAI
 order-completion.service.ts : transactional FOR UPDATE Order→Reservation→Inventories, stock-=qty reserved-=qty, idempotent COMPLETED→COMPLETED, CHK 23514→409 — no Stripe call, no Payment row
 reservation.service.ts : RESERVED→COMPLETED inventory math, used by checkout + completion
 checkout               : POST /order/checkout {} cart-only → Order PENDING + Reservation RESERVED + reservedAmount+=qty, total Σ qty*unit_price
-payment module         : DOES NOT EXIST — no Payment entity, no stripe SDK, no webhook, no POST /payments/intent, no Stripe test keys
-config                 : JWT_SECRET, JWT_EXPIRES_IN=15m, RESET_TOKEN_TTL, etc. — no STRIPE_SECRET_KEY, no STRIPE_WEBHOOK_SECRET, no STRIPE_PUBLISHABLE_KEY
+payment module         : DOES NOT EXIST — no Payment entity, no POST /payments/intent, no confirm flow
+config                 : JWT_SECRET, JWT_EXPIRES_IN=15m, RESET_TOKEN_TTL, etc. — no payment config needed for demo (optional PAYMENT_CURRENCY)
 infra                  : RabbitMQ/BullMQ exist (Phase 11) but not used by payment; Redis cache-only
-Gap                    : no test-mode Stripe integration, no PaymentIntent persistence, no webhook signature verification, no PENDING→COMPLETED via webhook (still manual POST /order/:id/complete), no idempotent webhook replay protection
+Gap                    : no Payment persistence, no PENDING→COMPLETED via confirm (still manual POST /order/:id/complete), no idempotent re-confirm guard
 ```
 
-Manual E2E today (`docs/manual-e2e-test-flow.md:§4-6`) calls `POST /order/checkout → POST /order/:id/complete` directly — no `PaymentIntent` and no `4000000000000002` failure path is exercisable.
+Manual E2E today (`docs/manual-e2e-test-flow.md:§4-6`) calls `POST /order/checkout → POST /order/:id/complete` directly — no `Payment` row and no `confirm-decline → FAILED` path is exercisable.
 
-## 19.1 User-facing flows (Stripe test mode)
+## 19.1 User-facing flows (simulation — no external network)
 
-### 19.1.1 Happy path — test card `4242 4242 4242 4242` → COMPLETED
+### 19.1.1 Happy path — `confirm-success` → COMPLETED
 
 ```text
-1. Client: POST /order/checkout {} → 201 Order PENDING total 250 + Reservation RESERVED (Phase 6)
-2. Client: POST /payments/intent {orderId} → 201 {paymentId, clientSecret, amount, currency, status: PENDING, stripePaymentIntentId: pi_xxx}
-        ↓ (server: FOR UPDATE Order PENDING, create Payment PENDING with amount=Order.total, currency, stripePaymentIntentId via stripe.paymentIntents.create {amount: total*100, currency:'usd', metadata:{orderId, userId}, automatic_payment_methods:{enabled:true}} in test mode)
-3. Client (frontend or Postman): confirm with Stripe test card 4242424242424242 (exp 12/34, cvc 123) via stripe.confirmPayment({clientSecret}) → Stripe test → webhook
-   Alternative server-test flow without frontend: POST /payments/intent already confirms test via stripe.paymentIntents.confirm(pi_xxx, {payment_method:'pm_card_visa'}) for E2E (only in test mode, never in prod)
-4. Stripe (test) → POST /payments/webhook {type: 'payment_intent.succeeded', data: {object: {id: pi_xxx, metadata:{orderId}, amount}}}
-        ↓ (server: verify Stripe-Signature with STRIPE_WEBHOOK_SECRET via stripe.webhooks.constructEvent, idempotent key event.id, lookup Payment by stripePaymentIntentId FOR UPDATE, verify amount == Order.total, then transactional Order PENDING→COMPLETED + Reservation RESERVED→COMPLETED + stock-=qty reserved-=qty same as Phase 7, set Payment SUCCEEDED)
-5. Client: GET /order/:id → 200 COMPLETED, GET /payments/:id → 200 SUCCEEDED, GET /inventory/:productId → stock 10→8 reserved 2→0
+1. Client: POST /order/checkout {} → 201 Order PENDING total 250 + Reservation RESERVED (Phase 6, unchanged)
+2. Client: POST /payments/intent {orderId} → 201 {paymentId, status: PENDING, amount: Order.total, currency: 'usd', provider: 'simulation'}
+        ↓ (server: FOR UPDATE Order PENDING + assertOwner, idempotent return existing PENDING for same orderId, INSERT Payment PENDING 1:1 Order — no Stripe call)
+3. Client: POST /payments/:id/confirm {result: 'success'} → 200 {payment SUCCEEDED, order COMPLETED}
+        ↓ (server: single dataSource.transaction FOR UPDATE Payment PENDING → FOR UPDATE Order → Reservation → sorted Inventories, reuse OrderCompletionService.complete path: stock-=qty reserved-=qty, Payment SUCCEEDED + Order COMPLETED + Reservation COMPLETED atomically)
+4. Client: GET /order/:id → 200 COMPLETED, GET /payments/:id → 200 SUCCEEDED, GET /inventory/:productId → stock 10→8 reserved 2→0
 ```
 
-### 19.1.2 Failure path — test card `4000 0000 0000 0002` → FAILED (payment declined)
+### 19.1.2 Failure path — `confirm-decline` → FAILED (card declined)
 
 ```text
-Same 1-2, but Stripe test → payment_intent.payment_failed (or requires_action) → webhook type payment_intent.payment_failed
+Same 1-2, then POST /payments/:id/confirm {result: 'declined', failureReason?: 'card_declined'}
         ↓
-  Transactional Order PENDING→FAILED + Reservation RESERVED→CANCELLED (reserved-=qty only, stock unchanged) + Payment FAILED, client sees  GET /order/:id → FAILED, cart not cleared? Actually cart already cleared at checkout — failure does not restore cart (documented), but Inventory reserved is released so user can re-add and checkout again
+  Transactional Order PENDING→FAILED + Reservation RESERVED→CANCELLED (reserved-=qty only, stock unchanged) + Payment FAILED. Cart stays cleared (documented — user re-adds and checks out again); reserved inventory is released so retry is possible.
 ```
 
-### 19.1.3 Cancel before capture (optional)
+### 19.1.3 Cancel before confirm (optional but cheap)
 
 ```text
-Client cancels before webhook: POST /payments/:id/cancel → 200 Order PENDING→CANCELLED + Reservation →CANCELLED (reserved-=qty) + Payment CANCELLED + stripe.paymentIntents.cancel(pi_xxx) in test mode
+Client cancels before confirm: POST /payments/:id/cancel → 200 Order PENDING→CANCELLED + Reservation →CANCELLED (reserved-=qty) + Payment CANCELLED. Only from PENDING; terminal SUCCEEDED/FAILED/CANCELLED → 409.
 ```
 
-All webhook handling **after commit** per async rule, idempotent on replay.
+All confirm/cancel handling is **inside one DB transaction** (no async webhook in demo scope).
 
-## 19.2 Data model — new `payment` module (PostgreSQL source of truth, Stripe is *not* source)
+## 19.2 Data model — new `payment` module (demo simulation; PostgreSQL source of truth)
 
-**New entity `Payment`:**
+**New entity `Payment` (simulation — no Stripe columns):**
 
 ```text
 Payment
 -------
-id                      uuid PK @PrimaryGeneratedColumn('uuid')
-orderId                 uuid FK → Order.id ON DELETE CASCADE @Unique @Index  // one Payment per Order V1
-userId                  uuid FK → User.id ON DELETE CASCADE @Index
-amount                  int CHECK amount >=0  // copy of Order.total at intent creation, in cents (or same unit as Order.total)
-currency                varchar(3) default 'usd'  // or 'egp' per config, but Stripe test expects 'usd' for 4242
-status                  enum PaymentStatus { PENDING, SUCCEEDED, FAILED, CANCELLED } default PENDING @Index
-stripePaymentIntentId   varchar(64) @Unique @Index  // pi_xxx from Stripe, nullable until created? V1: set on intent creation
-stripeEventId           varchar(64) nullable @Index // last webhook event id for idempotency (evt_xxx)
-provider                varchar default 'stripe'  // future: 'stripe'|'paypal'
-failureReason           varchar nullable  // Stripe failure message or decline code
-createdAt               timestamptz @CreateDateColumn
-updatedAt               timestamptz @UpdateDateColumn
--- constraints: CHECK amount >=0, @Unique(orderId), @Unique(stripePaymentIntentId), @Index([userId, status]), @Index([status, createdAt])
+id              uuid PK @PrimaryGeneratedColumn('uuid')
+orderId         uuid FK → Order.id ON DELETE CASCADE @Unique @Index  // one Payment per Order (demo)
+userId          uuid FK → User.id ON DELETE CASCADE @Index
+amount          int CHECK amount >=0  // copy of Order.total at intent creation (same unit as Order.total, no cents conversion in demo)
+currency        varchar(3) default 'usd'
+status          enum PaymentStatus { PENDING, SUCCEEDED, FAILED, CANCELLED } default PENDING @Index
+provider        varchar default 'simulation'
+failureReason   varchar nullable
+createdAt       timestamptz @CreateDateColumn
+updatedAt       timestamptz @UpdateDateColumn
+-- constraints: CHECK amount >=0, @Unique(orderId), @Index([userId, status]), @Index([status, createdAt])
 ```
 
 **Enum:**
 
 ```text
 PaymentStatus { PENDING, SUCCEEDED, FAILED, CANCELLED }
-Idempotent: PENDING→SUCCEEDED, PENDING→FAILED, PENDING→CANCELLED only; SUCCEEDED/FAILED/CANCELLED are terminal (no transitions). Webhook replays of same event.id → 200 already processed (no second inventory mutation).
+Transitions: PENDING→SUCCEEDED | PENDING→FAILED | PENDING→CANCELLED only; terminal states have no outgoing transitions.
+Idempotency (demo): confirm on SUCCEEDED/FAILED/CANCELLED → 200 already-processed, zero inventory delta (mirrors COMPLETED→COMPLETED in Phase 7).
 ```
 
-**Alter `Order`:** No column change; `Order.status` already `PENDING|COMPLETED|CANCELLED|FAILED` — Payment `SUCCEEDED` ↔ `Order COMPLETED`, `FAILED` ↔ `Order FAILED`, `CANCELLED` ↔ `Order CANCELLED`. Keep single FK direction `Payment.orderId → Order.id`; add optional `OneToOne Payment` relation for `order.payment` eager `false`.
+**Alter `Order`:** No column change; `Order.status` already `PENDING|COMPLETED|CANCELLED|FAILED` — Payment `SUCCEEDED` ↔ `Order COMPLETED`, `FAILED` ↔ `Order FAILED`, `CANCELLED` ↔ `Order CANCELLED`. Keep single FK direction `Payment.orderId → Order.id`; optional `OneToOne Payment` relation eager `false`.
 
-**Idempotency store for webhooks:**
-
-```text
-StripeWebhookEvent (optional, for exactly-once)
-------------------
-id          uuid PK or stripeEventId varchar PK @PrimaryColumn
-type        varchar  // payment_intent.succeeded | payment_intent.payment_failed
-processedAt timestamptz
--- @Unique stripeEventId
-```
-
-Alternative simpler: `Payment.stripeEventId` unique + check before processing; no separate table needed V1 — keep single `Payment` row idempotency via `stripeEventId` column.
+**Deferred (post-demo, not this phase):** `stripePaymentIntentId @Unique`, `stripeEventId @Index`, `StripeWebhookEvent` table, `clientSecret`, cents `amount*100`, `STRIPE_*` keys — see §19.10.
 
 ## 19.3 Business API
 
 **`PaymentService` (`src/modules/payment/payment.service.ts`) — separate module, owns Payment lifecycle, collaborates via `OrderCompletionService`/`ReservationService`/`Inventory` but does not mutate Order stock directly except via transactional helper:**
 
 ```text
-createIntent(manager: EntityManager, userId: string, orderId: string, role?: UserRoles): Promise<{payment: Payment, clientSecret: string}>
+createIntent(userId: string, orderId: string, role?: UserRoles): Promise<Payment>
   - FOR UPDATE Order WHERE id=:orderId → 404, assertOwner → 403
-  - validateOrderTransition(PENDING, PENDING) — only PENDING can create intent; COMPLETED/FAILED/CANCELLED → 409
-  - check existing Payment by orderId → if exists and PENDING → return existing clientSecret (idempotent POST); if SUCCEEDED/FAILED → 409 Already has payment
-  - amount = Order.total, currency = CURRENCY (usd)
-  - call stripe.paymentIntents.create {amount: amount*100, currency, metadata:{orderId, userId}, automatic_payment_methods:{enabled:true}} — in test mode use STRIPE_SECRET_KEY test key (sk_test_...)
-  - create Payment {orderId, userId, amount, currency, status: PENDING, stripePaymentIntentId: pi.id, stripeEventId: null}
-  - return {payment, clientSecret: pi.client_secret}
-  // Note: stripe call is OUTSIDE the DB tx — create Payment row first with PENDING, then call stripe, then update stripePaymentIntentId+clientSecret? Alternative: call stripe before DB, but if DB fails we orphan pi_xxx in Stripe test (acceptable, will expire). V1: DB PENDING → stripe → update.
+  - only PENDING can create intent; COMPLETED/FAILED/CANCELLED → 409
+  - check existing Payment by orderId → if PENDING → return existing (idempotent POST); if SUCCEEDED/FAILED/CANCELLED → 409 Already has payment
+  - amount = Order.total (same unit, no cents), currency = 'usd', provider = 'simulation'
+  - INSERT Payment {orderId, userId, amount, currency, status: PENDING, provider: 'simulation'}
+  - return payment (no external call, no clientSecret in demo)
 
-confirmForTest(paymentId: string): Promise<Payment> // TEST ONLY, not exposed in prod — calls stripe.paymentIntents.confirm(pi) with pm_card_visa or pm_card_chargeDeclined to trigger webhook without frontend
+confirm(paymentId: string, userId: string, result: 'success' | 'declined', role?: UserRoles): Promise<{payment: Payment, order: Order}>
+  - single dataSource.transaction:
+    FOR UPDATE Payment WHERE id=:paymentId → 404, assertOwner → 403
+    if status !== PENDING → 200 already-processed, zero delta (no re-mutation)
+    FOR UPDATE Order → validate transition
+    success: delegate inventory mutation to OrderCompletionService.complete(manager, userId, orderId, role) (stock-=qty reserved-=qty) + Payment SUCCEEDED
+    declined: Order PENDING→FAILED + Reservation RESERVED→CANCELLED (reserved-=qty only) + Payment FAILED (+ failureReason)
+  - commit; any failure → rollback, no partial
 
-handleWebhook(rawBody: Buffer, signature: string, stripeEventId: string): Promise<void>  // called by controller after signature verify, idempotent
-  - stripe.webhooks.constructEvent(rawBody, signature, STRIPE_WEBHOOK_SECRET) → throw 400 if fails
-  - if event.type NOT in [payment_intent.succeeded, payment_intent.payment_failed, payment_intent.canceled] → 200 ack ignore
-  - lookup Payment FOR UPDATE by stripePaymentIntentId → 404 if not found (or 200 ignore for unknown pi)
-  - idempotency: if Payment.stripeEventId === event.id → 200 already processed
-  - if Payment.status !== PENDING → 200 already terminal (ignore duplicate)
-  - verify event.data.object.amount === Payment.amount*100 and metadata.orderId === Payment.orderId → else 400 mismatch
-  - transaction per event.type:
-      succeeded: Order PENDING→COMPLETED + Reservation RESERVED→COMPLETED + stock-=qty reserved-=qty (reuse OrderCompletionService.complete but via manager, or duplicate helper that reuses same FOR UPDATE Ordering Order→Reservation→Inventories + CHK 23514→409) + Payment SUCCEEDED + Payment.stripeEventId = event.id
-      payment_failed / canceled: Order PENDING→FAILED (or CANCELLED if canceled) + Reservation RESERVED→CANCELLED (reserved-=qty only, stock unchanged) + Payment FAILED|CANCELLED + stripeEventId
-  - commit; any failure → rollback, no partial; webhook replays → second call sees stripeEventId match → 200 no re-mutation
-
-cancel(manager, userId, paymentId, role): Promise<Payment> // user cancel before webhook — FOR UPDATE Payment PENDING, assertOwner, Order PENDING→CANCELLED, Reservation CANCELLED, Payment CANCELLED, stripe.paymentIntents.cancel(pi) test mode
+cancel(paymentId: string, userId: string, role?: UserRoles): Promise<Payment> // before confirm only — FOR UPDATE Payment PENDING, assertOwner, Order PENDING→CANCELLED + Reservation CANCELLED + Payment CANCELLED
 ```
 
-All Payment writes via `EntityManager`; Stripe network I/O **outside** DB tx (create Payment PENDING → call stripe → update pi), webhook transactional part stays `FOR UPDATE Payment` + `FOR UPDATE Order/Reservation/Inventories` same ordering as Phase 7 (Order→Reservation→sorted Inventories).
+All Payment + Order + Reservation + Inventory writes share **one `EntityManager` tx** (caller owns commit/rollback). No network I/O inside tx (nothing to call in demo). Lock order mirrors Phase 7: Payment → Order → Reservation → sorted Inventories.
 
 **`PaymentModule` (`src/modules/payment/payment.module.ts`):**
 
 ```text
-imports: TypeOrmModule.forFeature([Payment, StripeWebhookEvent?]), OrderModule (OrderCompletionService, OrderService), ReservationModule, InventoryModule, CartModule (not mutated), UsersModule
-providers: PaymentService, StripeClient (wrapper around stripe npm, inject STRIPE_SECRET_KEY), Logger
+imports: TypeOrmModule.forFeature([Payment]), OrderModule (OrderCompletionService, OrderService), ReservationModule, InventoryModule, UsersModule
+providers: PaymentService, Logger
 exports: PaymentService
 ```
 
-Stripe client wrapper for testability:
+No Stripe client in demo scope (post-demo: add `StripeClient` port + `STRIPE_*` keys — see §19.10).
 
-```text
-interface StripeClient { createPaymentIntent(params): Promise<{id, client_secret}>, confirmPaymentIntent(id, pm), cancelPaymentIntent(id), constructWebhookEvent(rawBody, sig, secret): Stripe.Event }
-Implementation: StripeStripeClient (real stripe npm with test key), NoopStripeClient (dev/test — returns fake pi_xxx and clientSecret without network, for unit)
-```
-
-## 19.4 REST API — new `payment` module
+## 19.4 REST API — new `payment` module (demo)
 
 | Method | Path | Auth | Body | Success | Errors |
 |--------|------|------|------|---------|--------|
-| POST | `/payments/intent` | `JwtGuard @Auth()` owner | `{orderId: uuid}` | `201 {id, orderId, amount, currency, status:PENDING, stripePaymentIntentId: pi_xxx, clientSecret: pi_secret}` | `400` validation (missing orderId), `401`, `403` not owner, `404` Order not found, `409` Order not PENDING or already has SUCCEEDED Payment |
+| POST | `/payments/intent` | `JwtGuard @Auth()` owner | `{orderId: uuid}` | `201 {id, orderId, amount, currency, status:PENDING, provider: 'simulation'}` | `400` validation, `401`, `403` not owner, `404` Order not found, `409` Order not PENDING or already has terminal Payment |
 | GET | `/payments/:id` | `JwtGuard` owner-or-Admin | — | `200 Payment` | `403`, `404` |
-| GET | `/payments` | `JwtGuard` owner-or-Admin | `?page,limit,orderId?,status?` | `200 {data: Payment[], meta}` paginated `createdAt DESC`, owner-scoped (Admin may ?userId) | `401`, `400` |
-| POST | `/payments/webhook` | public (Stripe Signature) | raw JSON `event` body (Stripe) — `Content-Type: application/json` + header `Stripe-Signature: t=...,v1=...` | `200 {received:true}` (always 200 on success, Stripe expects 2xx; replay idempotent) | `400` invalid signature, `400` unknown event type ignored but 200 |
-| POST | `/payments/:id/cancel` | `JwtGuard` owner | `{}` | `200 Payment CANCELLED` + `Order CANCELLED` | `403`, `404`, `409` if already SUCCEEDED/FAILED |
-| POST | `/payments/:id/confirm-test` | `JwtGuard` owner (or `Admin`) — **test mode only** (`NODE_ENV !== 'production'`) | `{paymentMethod?: 'pm_card_visa'|'pm_card_chargeDeclined'}` | `200` triggers Stripe test confirm (creates webhook) | `403` in prod |
+| GET | `/payments` | `JwtGuard` owner-or-Admin | `?page,limit,orderId?,status?` | `200 {data: Payment[], meta}` paginated `createdAt DESC`, owner-scoped (Admin may `?userId=`) | `401`, `400` |
+| POST | `/payments/:id/confirm` | `JwtGuard` owner | `{result: 'success' \| 'declined', failureReason?: string}` | `200 {payment, order}` (success → Order COMPLETED; declined → Order FAILED) | `400` validation, `403`, `404`, `409` never (terminal re-confirm → 200 idempotent) |
+| POST | `/payments/:id/cancel` | `JwtGuard` owner | `{}` | `200 Payment CANCELLED` + `Order CANCELLED` | `403`, `404`, `409` if already SUCCEEDED/FAILED/CANCELLED |
 
-DTOs: `CreatePaymentIntentDto { @IsUUID orderId }`, `WebhookDto` raw body passthrough. All `@ApiProperty`, global `ValidationPipe`. Swagger adds `Bearer` for intent, none for webhook (Stripe-Signature header).
+DTOs: `CreatePaymentIntentDto { @IsUUID orderId }`, `ConfirmPaymentDto { @IsIn(['success','declined']) result, @IsOptional @IsString failureReason }`. All `@ApiProperty`, global `ValidationPipe`.
 
-**Frontend (test) flow without real Stripe Elements (for manual):**
+**Manual demo flow (no frontend, no Stripe CLI):**
 
 ```bash
 # After checkout
-curl -X POST http://localhost:3000/payments/intent -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" -d '{"orderId":"<orderId>"}' # 201 pi_xxx
-# Test confirm (server test helper, avoids frontend)
-curl -X POST http://localhost:3000/payments/<paymentId>/confirm-test -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" -d '{"paymentMethod":"pm_card_visa"}' # 200 → triggers webhook → order COMPLETED
-# Failure
-curl -X POST http://localhost:3000/payments/<paymentId>/confirm-test -H "Authorization: Bearer $JWT" -d '{"paymentMethod":"pm_card_chargeDeclined"}' # → webhook payment_failed → order FAILED
+curl -X POST http://localhost:3000/payments/intent -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" -d '{"orderId":"<orderId>"}' # 201 PENDING
+# Success
+curl -X POST http://localhost:3000/payments/<paymentId>/confirm -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" -d '{"result":"success"}' # 200 → order COMPLETED
+# Failure (new order + intent first)
+curl -X POST http://localhost:3000/payments/<paymentId>/confirm -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" -d '{"result":"declined","failureReason":"card_declined"}' # 200 → order FAILED
 ```
 
-Production flow uses Stripe Elements `stripe.confirmPayment({clientSecret, payment_method: {card}})` — server does not need `confirm-test`.
+## 19.5 Security / constraints (demo — minimal)
 
-## 19.5 Security / constraints
+* [ ] `assertOwner` on `intent/confirm/cancel` (owner or Admin); `401/403/404` via `AllExceptionsFilter`; no public webhook to secure in demo scope
+* [ ] Idempotent re-confirm: terminal `SUCCEEDED/FAILED/CANCELLED` → `200` already-processed, zero inventory delta (`FOR UPDATE Payment` check before any `Order/Reservation/Inventory` lock)
+* [ ] `amount` is server-copied from `Order.total` at intent time — client `orderId` only, never client amount; `CHECK amount >= 0`
+* [ ] Rate limit `POST /payments/intent` + `POST /payments/:id/confirm` via existing `RateLimitGuard` (same buckets as `order/checkout` 10/h); fail-open preserved
+* [ ] No secrets in demo scope (no Stripe keys, no `clientSecret`, no signatures to log); `Logger` logs `paymentId/orderId` only
 
-* [ ] `STRIPE_SECRET_KEY` (`sk_test_...`) and `STRIPE_WEBHOOK_SECRET` (`whsec_...`) never committed, via `.env` + `ConfigService`, `STRIPE_PUBLISHABLE_KEY` (`pk_test_...`) exposed via `GET /payments/config` if frontend needs it (or env on frontend)
-* [ ] Webhook signature verified via `stripe.webhooks.constructEvent(rawBody, sigHeader, secret)` — raw body needed, so controller must use `@Req() req.rawBody` (Nest `rawBody: true` in `main.ts`/`app.module` `bodyParser: {verify}`), `400` on fail (Stripe will retry)
-* [ ] Idempotent webhook: `Payment.stripeEventId === event.id` → `200` already processed; second replay of same `evt_xxx` must not re-apply `stock-=qty`. Use `SELECT Payment FOR UPDATE` + check before mutation.
-* [ ] Amount check: `event.data.object.amount === Payment.amount*100` (Stripe amount in cents) else `400` mismatch → no inventory mutation, log `Logger.error` with hashed pi prefix
-* [ ] Rate limit `POST /payments/intent` per IP `10/hour` + per `orderId` `5/hour` via Redis `INCR+EXPIRE` fail-open (`RateLimitGuard`), webhook `POST /payments/webhook` per IP `100/hour` (Stripe retries) + verify signature before rate check
-* [ ] `Payment` row is source of truth for `orderId→pi` mapping; Stripe is *not* source for inventory/order — Stripe event is trigger, but DB transaction is authoritative (constitution async rule: commit then publish → here webhook commit then inventory)
-* [ ] Never log `clientSecret` or raw `Stripe-Signature` header; Logger logs `pi_xxx` prefix + `evt_xxx` prefix only
-* [ ] Test mode only: `STRIPE_SECRET_KEY` must be `sk_test_*` in `DEV`/`TEST`; in `PROD` `sk_live_*` required, `confirm-test` endpoint disabled (`403` if `MODE=PROD`)
-* [ ] On `POST /auth/refresh` per Phase 17, ensure `Payment` webhook still checks `tokenVersion` via `Order.userId→User`? Not needed — webhook is public via signature, not JWT. Owner check for `createIntent` via `assertOwner` only.
-
-## 19.6 Configuration (`.env` additions, `ConfigService`)
+## 19.6 Configuration (demo — none required)
 
 ```text
-# Stripe Payment Test Mode (new, Phase 19)
-STRIPE_SECRET_KEY=sk_test_51...           # test key, never commit
-STRIPE_PUBLISHABLE_KEY=pk_test_51...      # for frontend Stripe Elements
-STRIPE_WEBHOOK_SECRET=whsec_1...          # stripe listen --forward-to localhost:3000/payments/webhook
-STRIPE_CURRENCY=usd                       # or egp if Stripe supports, but test card 4242 expects usd
-STRIPE_API_VERSION=2024-06-20
-# Existing
-JWT_SECRET=...
-JWT_EXPIRES_IN=15m
-REFRESH_TOKEN_TTL=7d
-PORT=3000
-MODE=DEV|PROD
+# No new .env for demo simulation. Optional:
+PAYMENT_CURRENCY=usd   # default if column default ever needs override (keep 'usd' hardcoded V1 is acceptable)
 ```
 
-All via `ConfigService`; `stripe` npm `new Stripe(STRIPE_SECRET_KEY, {apiVersion})`.
+Post-demo Stripe additions (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_CURRENCY`, `STRIPE_API_VERSION`) are listed in §19.10 and must come via `ConfigService`, never hardcoded.
+* [ ] On `POST /auth/refresh` per Phase 17, ensure `Payment` confirm still checks `tokenVersion` via `Order.userId→User`? Not needed — confirm is owner-checked via `assertOwner` on JWT, not via token version lookup. Owner check for `createIntent` via `assertOwner` only.
 
-## 19.7 Implementation Plan (Spec Kit tasks, before Testing)
+## 19.7 Implementation Plan (Spec Kit tasks — demo, 2–3 sessions)
 
 ```text
-1. Spec: /speckit.specify stripe-payment (intent + webhook + confirm-test) → clarify Q&A (amount in cents vs Order.total int, pi per order 1:1, idempotent intent, cancel before capture, test vs live keys, rawBody verify)
-2. Design: data-model.md (Payment entity 1:1 Order, PaymentStatus, StripeWebhookEvent optional), research.md (stripe npm vs HTTP, webhook rawBody verify, test card 4242 vs 0002, NoopStripeClient, amount*100)
-3. Contract: OpenAPI for POST /payments/intent, POST /payments/webhook (raw + Stripe-Signature header), GET /payments/:id, POST /payments/:id/cancel|confirm-test
-4. Migration 1: Payment {orderId @Unique FK CASCADE, userId FK CASCADE, amount CHECK>=0, currency, status enum, stripePaymentIntentId @Unique @Index, stripeEventId @Index, provider} + indexes
-5. Module: payment.module.ts (TypeOrmModule.forFeature([Payment]), imports OrderModule/ReservationModule/InventoryModule, providers PaymentService, StripeClient wrapper, controllers PaymentController/WebhookController, rawBody true)
-6. Service: PaymentService.createIntent (FOR UPDATE Order PENDING, assertOwner, idempotent existing PENDING, stripe.createPaymentIntent test mode, save), handleWebhook (constructEvent, FOR UPDATE Payment, idempotency stripeEventId, amount check, transaction Order PENDING→COMPLETED/FAILED + Reservation + stock math same as Phase 7), cancel
-7. Controller: POST /payments/intent (JwtGuard, RateLimitGuard, @Auth), GET /payments/:id|GET /payments, POST /payments/webhook (public, rawBody, Stripe-Signature header, 200 ack), POST /payments/:id/cancel|confirm-test (JwtGuard, test mode guard)
-8. Stripe client: StripeStripeClient (real stripe npm) + NoopStripeClient (dev/test — returns fake pi_xxx without network, for unit), STRIPE_SECRET_KEY switch, Logger prefix
-9. Hook: OrderCompletionService still usable for webhook path (reuse same FOR UPDATE Order→Reservation→Inventories helper) — or extract helper to avoid duplication; dashboard metrics can join Payment for revenue
-10. Unit tests: createIntent PENDING→201, duplicate intent idempotent 201, COMPLETED order 409, webhook succeeded → Order COMPLETED stock-=qty, failed → Order FAILED reserved-=qty, replay same evt → 200 no re-mutation, amount mismatch 400, invalid signature 400, confirm-test pm_card_visa → event
-11. Integration tests: real PG — checkout 2 orders → create intents → concurrent webhook succeeded vs failed for different orders (both succeed without deadlock), webhook replay same evt twice → stock once, cancel before webhook → Order CANCELLED stock unchanged, test card 4242 vs 0002 E2E
-12. E2E: register→login→cart→checkout→POST /payments/intent→POST /payments/:id/confirm-test pm_card_visa→GET /order COMPLETED + GET /payments SUCCEEDED + inventory stock decremented; second E2E with pm_card_chargeDeclined → FAILED + reserved released; manual Stripe CLI `stripe trigger payment_intent.succeeded` → webhook → COMPLETED
-13. Docs: docs/architecture/modules.md, docs/decisions/ADR-payment-stripe.md (test mode, pi per order, rawBody verify, Noop vs Stripe), Swagger (Payment schema), Postman (intent + webhook + confirm-test), docs/manual-e2e-test-flow.md §4-6 updated (intent + webhook)
+1. Spec: /speckit.specify payment-simulation (intent + confirm + cancel) → clarify (1:1 Payment:Order, idempotent intent, terminal re-confirm 200, lock order Payment→Order→Reservation→Inventories)
+2. Design: data-model.md (Payment entity, no Stripe columns); contract: OpenAPI POST /payments/intent, POST /payments/:id/confirm, POST /payments/:id/cancel, GET /payments/:id, GET /payments
+3. Migration: Payment {orderId @Unique FK CASCADE, userId FK CASCADE, amount CHECK>=0, currency 'usd', status enum, provider 'simulation'} + indexes
+4. Module: payment.module.ts (TypeOrmModule.forFeature([Payment]), imports OrderModule/ReservationModule/InventoryModule/UsersModule; providers PaymentService; NO Stripe client, NO rawBody)
+5. Service: PaymentService.createIntent/confirm/cancel (single-tx confirm reusing OrderCompletionService.complete for success path)
+6. Controller: thin intent/confirm/cancel/get/list (@Auth, RateLimitGuard, ValidationPipe, Swagger)
+7. Tests + docs: unit (intent idempotent, confirm success/decline, re-confirm 200, cancel guards) + real-PG (concurrent confirm same payment → one mutation) + E2E (checkout→intent→confirm→COMPLETED vs declined→FAILED); ADR-payment-simulation; manual-e2e §4-6 update
 ```
 
 ## 19.8 Testing (must cover)
 
-**Unit (mock repos, mock StripeClient, mock Redis):**
-* [ ] createIntent: valid → 201 pi_xxx, duplicate same order PENDING → 201 idempotent same clientSecret, order COMPLETED → 409, non-owner 403, stripe.create called with amount*100 and metadata orderId
-* [ ] handleWebhook: valid succeeded → Order COMPLETED + stock-=qty, failed → Order FAILED reserved-=qty, replay same evt → 200 no re-mutation, invalid signature → 400, amount mismatch → 400, unknown pi → 200 ignore
-* [ ] cancel: owner cancels PENDING → CANCELLED + Payment CANCELLED + stripe.cancel called
+**Unit (mock repos):**
+* [ ] createIntent: valid → 201 PENDING, duplicate same order PENDING → 201 idempotent same row, order COMPLETED → 409, non-owner 403
+* [ ] confirm: `success` → Order COMPLETED + stock-=qty + Payment SUCCEEDED; `declined` → Order FAILED + reserved-=qty + Payment FAILED; re-confirm terminal → 200 zero delta
+* [ ] cancel: owner cancels PENDING → CANCELLED; terminal → 409
 
-**Integration (real PostgreSQL, real Redis when available, stripe mocked as Noop or stripe-mock):**
-* [ ] DB constraints: @Unique orderId, @Unique stripePaymentIntentId, amount CHECK>=0, status enum
-* [ ] Transaction: concurrent `POST /payments/webhook` with same evt → one 200 COMPLETED stock once, second 200 idempotent
-* [ ] E2E test mode: `4000000000000002` → FAILED not COMPLETED, `4242` → COMPLETED, stock math per Phase 7
+**Integration (real PostgreSQL):**
+* [ ] DB constraints: @Unique orderId, amount CHECK>=0, status enum
+* [ ] Transaction: concurrent `POST /payments/:id/confirm` same payment → one mutation, second 200 idempotent, stock decremented once
 
-**E2E (supertest + stripe-mock or Noop, test mode only):**
-* [ ] `POST /auth/register` → `POST /auth/login` → `POST /cart` → `POST /order/checkout` → `POST /payments/intent` → `POST /payments/:id/confirm-test pm_card_visa` → `GET /order/:id` → COMPLETED + `GET /payments/:id` → SUCCEEDED
-* [ ] Same but `pm_card_chargeDeclined` → `GET /order` → FAILED + `GET /payments` → FAILED + `GET /inventory` reserved 0
-* [ ] `POST /payments/webhook` with tampered Stripe-Signature → 400, Stripe CLI `stripe trigger payment_intent.succeeded` → 200
+**E2E (supertest, no external network):**
+* [ ] `POST /auth/register` → `POST /auth/login` → `POST /cart` → `POST /order/checkout` → `POST /payments/intent` → `POST /payments/:id/confirm {success}` → `GET /order/:id` → COMPLETED + `GET /payments/:id` → SUCCEEDED
+* [ ] Same but `{declined}` → `GET /order` → FAILED + `GET /payments` → FAILED + `GET /inventory` reserved released
 
 ## 19.9 Exit Criteria
 
-Payment (Stripe test) is complete when:
+Payment simulation (demo) is complete when:
 
 ```text
-[x] POST /payments/intent creates sha256? no — Stripe pi_xxx PENDING Payment 1:1 Order with amount=Order.total, returns clientSecret, idempotent on same order PENDING (201 same pi), 409 if already SUCCEEDED
-[x] POST /payments/webhook verifies Stripe-Signature via STRIPE_WEBHOOK_SECRET on rawBody, handles payment_intent.succeeded → Order PENDING→COMPLETED + Reservation RESERVED→COMPLETED + stock-=qty reserved-=qty + Payment SUCCEEDED (transactional FOR UPDATE), and payment_intent.payment_failed → Order FAILED + Reservation CANCELLED reserved-=qty + Payment FAILED, both idempotent on event replay (same evt.id → 200 no re-mutation) and amount-checked
-[x] POST /payments/:id/confirm-test (test mode only, JwtGuard) triggers Stripe test confirm with pm_card_visa / pm_card_chargeDeclined without frontend, disabled in PROD
-[x] POST /payments/:id/cancel + GET /payments/:id|GET /payments owner-or-Admin paginated work, rate-limited, Swagger documented, NoopStripeClient in dev/test (no real network)
-[x] Payment migration applied (@Unique orderId, stripePaymentIntentId, amount CHECK>=0, status enum, indexes), Order COMPLETED still via webhook path (POST /order/:id/complete kept as Admin fallback but not user-facing for paid orders)
-[x] Unit 12+ and integration 7+ and E2E 2 flows PASS, including concurrent webhook replay → single winner + failure card 0002 → FAILED
+[x] POST /payments/intent creates PENDING Payment 1:1 Order with amount=Order.total, idempotent on same order PENDING (201 same row), 409 if already terminal
+[x] POST /payments/:id/confirm {success} → Order PENDING→COMPLETED + Reservation RESERVED→COMPLETED + stock-=qty reserved-=qty + Payment SUCCEEDED (single tx, FOR UPDATE Payment→Order→Reservation→sorted Inventories); {declined} → Order FAILED + Reservation CANCELLED + Payment FAILED; re-confirm terminal → 200 zero delta
+[x] POST /payments/:id/cancel + GET /payments/:id | GET /payments owner-or-Admin paginated work, rate-limited, Swagger documented; POST /order/:id/complete kept as Admin fallback
+[x] Payment migration applied (@Unique orderId, amount CHECK>=0, status enum, indexes)
+[x] Unit 8+ and integration 4+ and E2E 2 flows PASS, including concurrent confirm same payment → single mutation
 ```
 
-## 19.10 Out of Scope (this phase)
+## 19.10 Out of Scope — deferred to post-demo full Stripe (not this phase)
 
-* Live Stripe `sk_live_` + real card charges (keep test keys, never hit live in CI; live needs separate verification, Apple Pay/Google Pay, 3DS redirect).
-* Multiple PaymentIntents per Order or partial capture (V1 1:1, full amount).
-* Refund `stock+=qty` on Payment SUCCEEDED → later refund (Phase 8 cancellation covers, not Stripe refund webhook `charge.refunded`).
-* Subscriptions / recurring billing (future, add `Subscription` entity).
-* Frontend Stripe Elements UI (backend provides clientSecret only, frontend consumes per Stripe docs).
+* Full Stripe test mode: `stripe` npm + `STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET/STRIPE_PUBLISHABLE_KEY`, `PaymentIntent pi_xxx + clientSecret`, `POST /payments/webhook` rawBody + `Stripe-Signature` verify (`stripe.webhooks.constructEvent`), `evt.id` replay table, cents `amount*100`, `confirm-test` (`pm_card_visa` vs `pm_card_chargeDeclined`), Stripe CLI `stripe trigger` — **estimate 3–5 days, 5–8 sessions if revived**
+* Live `sk_live_` + real charges, Apple Pay/Google Pay, 3DS redirect
+* Multiple intents per order / partial capture (V1 stays 1:1 full amount)
+* Refund `stock+=qty` via `charge.refunded` (Phase 8 covers cancellation, not Stripe refunds)
+* Subscriptions, Stripe Elements frontend
 
-# Phase 20 — Dashboard, RBAC & Metrics (Future)
+# Phase 20 — Dashboard, RBAC & Metrics (Demo Scope)
 
-**Status: NOT DONE — planned 2026-09-23 (future, before final testing)**
+**Status: NOT DONE — rescoped 2026-10-06 to demo-slim (full 5-role / 5-metric scope deferred to post-demo — see §20.9)**
 
-**Goal:** Provide an admin/operational dashboard via a **separate `dashboard` module** (thin, service-aggregating) that exposes **CRUD for products, CRUD for users, R for orders, R for carts, CRUD for stock (inventory)**, **RBAC with role hierarchy and admin-controlled upgrade/downgrade**, and **five business/system metrics** with date-range filtering — all without breaking modular-monolith boundaries or making Redis authoritative.
+**Goal:** Provide an admin/operational dashboard via a **separate `dashboard` module** (thin, service-aggregating). **Demo scope:** existing `Customer/Admin` roles only (no new enum values, no role upgrade/downgrade endpoint), read-only admin reads (`GET /admin/orders`, `GET /admin/stock`) + **2 metrics** (`revenue SUM`, `low-stock FILTER`) with date-range filtering — all without breaking modular-monolith boundaries or making Redis authoritative. **Deferred post-demo:** `CoAdmin/ContentManager/FulfillmentStaff`, `PATCH /admin/users/:id/role` + last-Admin guard, products/stock CRUD, carts R, AOV/abandonment/health metrics (§§20.1–20.5 full text retained as post-demo spec). **Estimate (demo): 0.5–1 day, 2–3 AI sessions** (vs 4–6 days for full scope).
 
 This phase is **orthogonal** to Phases 7-8 (order) and 9-13 (infra) and extends Phases 5-6/16 (reservation/order/auth). It must be implemented **before** `Phase 14 — Testing` so final `npm run test:e2e` can cover `admin → role change → dashboard metrics → stock alert` without mocking dashboard.
 
@@ -2023,6 +1976,20 @@ All metrics support `?from&to&` date-range (default last 30d) and `period` group
 
 ## 20.9 Exit Criteria
 
+**Demo exit (0.5–1 day, 2–3 AI sessions) — dashboard-slim is complete when:**
+
+```text
+[x] No UserRoles enum change (Customer/Admin only); no PATCH /admin/users/:id/role; no last-Admin guard; no tokenVersion++ on role change (all deferred to post-demo §§20.1–20.3)
+[x] GET /admin/orders (Admin, paginated, ?status=&?from=&?to=) + GET /admin/orders/:id (owner-or-Admin shape reused)
+[x] GET /admin/stock (Admin, ?lowThreshold=) read-only via InventoryService (no PATCH/bulk stock writes in demo)
+[x] GET /admin/dashboard/revenue?from=&to= returns {revenue, salesCount} via SUM+COUNT WHERE status='COMPLETED' BETWEEN (no ?period chart grouping in demo)
+[x] GET /admin/dashboard/low-stock?threshold=5 returns {lowCount, outCount, items} via available <= threshold FILTER
+[x] dashboard.module.ts (separate module, read-only aggregator) thin controllers, @Auth(Admin) (+ owner reads unchanged), service-only collaboration per AGENTS.md §2
+[x] Unit 5+ and integration 3+ and E2E 1 flow PASS (Admin revenue/low-stock reads; Customer 403 on admin routes)
+```
+
+**Full scope (post-demo — §§20.1–20.8 retained as spec, 4–6 days):**
+
 Dashboard is complete when:
 
 ```text
@@ -2051,7 +2018,9 @@ Dashboard is complete when:
 
 # Phase 14 — Testing
 
-**Status: NOT DONE**
+**Status: NOT DONE — demo scope 2026-10-06: happy-path E2E + 1 concurrency proof (full matrix deferred)**
+
+**Demo scope (0.5–1 day, 1–2 AI sessions):** one happy-path E2E (`register → login → cart → checkout → intent → confirm-success → COMPLETED`, plus `confirm-decline → FAILED`) + one last-unit concurrency proof (`Promise.all` single-winner) + existing suites green. Full unit/integration/concurrency/E2E matrix below is retained as post-demo spec.
 
 Testing should be implemented progressively rather than postponed until the end.
 
@@ -2863,7 +2832,7 @@ Deferred to Phase 16.x / Phase 17:
 
 [x] Email service — DONE 2026-10-02 (Phase 18, merged `d0d540b` — verify/resend/reset emails, dual-channel dispatch, WS history/unread, delivery states; `specs/014-email-service` 73 tasks, unit PASS, real-PG E2E deferred)
 
-[ ] Payment (Stripe Test Mode, New Payment Module) (Future, Phase 19 before Testing) — separate payment.module (stripe npm test mode), Payment {orderId @Unique FK, userId FK, amount, currency, status PENDING|SUCCEEDED|FAILED|CANCELLED, stripePaymentIntentId @Unique, stripeEventId, provider}, POST /payments/intent (orderId) → pi_xxx clientSecret, POST /payments/webhook (rawBody + Stripe-Signature verify, idempotent evt.id, amount check, transactional Order PENDING→COMPLETED/FAILED + Reservation + stock), POST /payments/:id/confirm-test (test card 4242 vs 0002) — see Phase 19 spec
+[ ] Payment (Simulation, Demo, Phase 19 before Testing) — separate payment.module (no Stripe), Payment {orderId @Unique FK, userId FK, amount, currency 'usd', status PENDING|SUCCEEDED|FAILED|CANCELLED, provider 'simulation'}, POST /payments/intent (orderId) → 201 PENDING, POST /payments/:id/confirm {success|declined} (single-tx Order + Reservation + stock via OrderCompletionService), POST /payments/:id/cancel — see Phase 19 spec
 
 [ ] Dashboard, RBAC & Metrics (Future, Phase 20 before Testing) — separate dashboard.module, UserRoles {Customer/Admin/CoAdmin/ContentManager/FulfillmentStaff} with Admin full / CoAdmin limited role management + last Admin guard + tokenVersion++ , CRUD products (ContentManager/Admin), CRUD users, R orders/carts, CRUD stock (PATCH bulk FOR UPDATE, low-stock query), metrics: revenue/sales SUM, AOV NULLIF, low-stock FILTER, cart abandonment windowed join, API health Redis/pg counters — see Phase 20 spec
 
@@ -2961,7 +2930,7 @@ Phase 18
 Email Service — DONE 2026-10-02 (verify + reset + sales/news + history/unread + delivery states)
         ↓
 Phase 19
-Payment (Stripe Test Mode, New Payment Module) — separate payment.module, Payment 1:1 Order, PaymentIntent pi_xxx, webhook signature + idempotent evt.id, test cards 4242/0002
+Payment (Simulation, Demo, Phase 19 before Testing) — separate payment.module (no Stripe), Payment 1:1 Order, POST /payments/intent → POST /payments/:id/confirm {success|declined} → Order COMPLETED/FAILED (single tx, 0.5–1 day demo)
         ↓
 Phase 20
 Dashboard, RBAC & Metrics (Future) — separate dashboard module, role hierarchy, CRUD products/users/stock, 5 metrics (revenue, AOV, low-stock, abandonment, health)
@@ -3059,13 +3028,12 @@ Phases 1–7, 10, 12, 17, 18 are done and merged to `master`. Open tracks
 
 * **Phase 8 — Order Cancellation**: define the state machine first (statuses,
   per-status inventory effect, refund behavior), then implement. Exit bar:
-  no double-release / double-return.
-* **Phase 19 — Payment (Stripe test mode)**: separate `payment` module,
-  `PaymentIntent + webhook` flow; keeps PostgreSQL authoritative.
-* **Phase 20 — Dashboard, RBAC & Metrics**: separate `dashboard` module,
-  role hierarchy + 5 metrics.
-* **Phase 14 — Testing**: full E2E incl. real-PG proofs deferred from Phase 18
-  (`register → verify → forgot → reset → checkout`, bulk gate/dedup replay).
+  no double-release / double-return. **Demo: cancel-before-sale only (0.5 day).**
+* **Phase 19 — Payment (Simulation, Demo, Phase 19 before Testing)**: separate `payment` module (no Stripe), Payment 1:1 Order, `POST /payments/intent → POST /payments/:id/confirm {success|declined}` → Order COMPLETED/FAILED (single tx, 0.5–1 day demo)
+* **Phase 20 — Dashboard, RBAC & Metrics (Demo-slim)**: read-only `GET /admin/orders`, `GET /admin/stock` + 2 metrics (`revenue`, `low-stock`), Customer/Admin only (0.5–1 day; full 5-role/5-metric scope deferred).
+* **Phase 14 — Testing (Demo-min)**: happy-path E2E + 1 concurrency proof (0.5–1 day; full matrix deferred).
+* **Phase 9 + 13 close-out (combined 0.5 day):** invalidation fix + 2–3 indexes + EXPLAIN. Key redesign / singleflight deferred.
+* **Refactor track (`docs/REFACTOR_PLAN.md` S1–S7, 9.5–16 days): skipped for portfolio demo** — no visible demo output; revisit post-demo.
 
 Do not implement future phases prematurely; each follows Spec Kit
 (specify → clarify → plan → tasks → implement → verify).
