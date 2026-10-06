@@ -47,17 +47,19 @@ describe('OutboxCleanupService retention (real PG)', () => {
 
   beforeAll(async () => {
     try {
-      // Hardcoded isolated database: NEVER derive this from env. Test
-      // suites using dropSchema:true with the dev database name wipe the
-      // dev schema (observed 2026-10-06 on `ecommerce`). The database must
-      // exist (created once by ops); the schema is rebuilt per run.
+      // Dedicated database, NEVER shared and NEVER derived from env. The
+      // shared `test_ecommerce_races` DB is rebuilt by several suites with
+      // different entity lists (dropSchema), so sharing it causes mass
+      // failures in suites without dropSchema (observed 2026-10-06: 18
+      // failures). This DB must exist (created once by ops); schema rebuilt
+      // per run and invisible to every other suite.
       dataSource = new DataSource({
         type: 'postgres',
         host: process.env.POSTGRES_HOST || '127.0.0.1',
         port: parseInt(process.env.POSTGRES_PORT || '5432', 10),
         username: process.env.POSTGRES_USER || 'postgres',
         password: process.env.POSTGRES_PASSWORD || 'mysecretpassword',
-        database: 'test_ecommerce_races',
+        database: 'test_s1_outbox',
         entities: [OutboxEvent],
         synchronize: true,
         dropSchema: true,
