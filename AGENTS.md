@@ -19,7 +19,7 @@ For additional context about technologies to be used, project structure,
 
 shell commands, and other important information, read the current plan
 
-at `specs/015-auth-user-refactor/plan.md` (RP-AUTH — Auth + Users Refactor).
+at `specs/016-baseline/plan.md` (S1 — Reconcile + Baseline).
 
 <!-- SPECKIT END -->
 

@@ -2,6 +2,7 @@ import { DataSource } from 'typeorm';
 import { Product } from '../../products/entities/product.entity';
 import { Inventory } from '../entities/inventory.entity';
 import User from '../../users/entity/user.entity';
+import { RefreshToken } from '../../auth/entities/refresh-token.entity';
 import { Cart } from '../../cart/entities/cart.entity';
 import { CartItem } from '../../cart/entities/cart-items.entity';
 import { Order } from '../../order/entities/order.entity';
@@ -28,7 +29,16 @@ describe('Inventory Integration (real PostgreSQL)', () => {
       synchronize: true,
       dropSchema: false,
       logging: false,
-      entities: [User, Product, Inventory, Cart, CartItem, Order, OrderItem],
+      entities: [
+        User,
+        RefreshToken,
+        Product,
+        Inventory,
+        Cart,
+        CartItem,
+        Order,
+        OrderItem,
+      ],
     });
 
     if (!dataSource.isInitialized) {

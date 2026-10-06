@@ -1,0 +1,4 @@
+#!/bin/sh
+# S1 P0-6 (T012): local pre-commit secret gate.
+# Enable once per clone: git config core.hooksPath .githooks
+node scripts/scan-secrets.mjs --staged

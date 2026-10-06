@@ -7,6 +7,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import cookieParser from 'cookie-parser';
+import { configureCors } from './common/cors';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -63,11 +64,12 @@ async function bootstrap() {
   const documentFactory = () => SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api', app, documentFactory);
 
-  // CORS Configuration
-
-  app.enableCors({
-    origin: true,
-    credentials: true,
+  // CORS allow-list (S1 P0-7): credentialed access is limited to the
+  // configured origins; origin-less (non-browser) clients are unaffected.
+  configureCors(app, {
+    frontendUrl: configService.get<string>('FRONTEND_URL'),
+    extraOrigins: configService.get<string>('CORS_ORIGINS'),
+    nodeEnv: configService.get<string>('NODE_ENV'),
   });
 
   await app.listen(process.env.PORT ?? 3000);
