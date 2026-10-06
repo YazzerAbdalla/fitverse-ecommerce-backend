@@ -19,5 +19,5 @@
 |---|---|---|---|
 | 1 | Listed (`FRONTEND_URL` value) | yes | accepted, `Access-Control-Allow-Origin` echoes origin, `Allow-Credentials: true` |
 | 2 | Listed (second entry via `CORS_ORIGINS`) | yes | accepted as in 1 |
-| 3 | Unlisted (`https://evil.example`) | yes | rejected (no credentialed access) |
+| 3 | Unlisted (`https://evil.example`) | yes | rejected: no `Access-Control-Allow-Origin` echo, so browsers block credentialed access (the `cors` package still emits `Allow-Credentials` alone, which grants nothing without the echo) |
 | 4 | No `Origin` header | n/a | served normally |
