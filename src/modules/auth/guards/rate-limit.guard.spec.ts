@@ -520,6 +520,46 @@ describe('RateLimitGuard', () => {
     });
   });
 
+  /**
+   * Payment simulation (018 F1): cancel shares the checkout 10/h per-user quota.
+   * The concrete id in the path must normalize to the parameterized route key.
+   */
+  describe('payment cancel per-user 10/h (018 F1)', () => {
+    const makePaymentCancelCtx = (sub: string) => {
+      const res = { setHeader: jest.fn() };
+      const req: any = {
+        method: 'POST',
+        route: { path: '/payments/:id/cancel' },
+        path: '/payments/9f4c2a1b-3d5e-4f6a-8b7c-1d2e3f4a5b6c/cancel',
+        ip: '1.1.1.1',
+        headers: {},
+        body: {},
+        user: { sub },
+      };
+      const ctx: any = {
+        switchToHttp: () => ({ getRequest: () => req, getResponse: () => res }),
+        getType: () => 'http',
+      };
+      return { ctx, req, res };
+    };
+    it('should throttle cancel under the parameterized key per user', async () => {
+      cacheMock.get.mockResolvedValue(9);
+      const { ctx } = makePaymentCancelCtx('user-A-uuid');
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
+      // Concrete payment id must map to the parameterized bucket key.
+      expect(cacheMock.get).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'rl:POST /payments/:id/cancel:user:user-A-uuid',
+        ),
+      );
+      cacheMock.get.mockResolvedValue(10);
+      const { ctx: ctx2 } = makePaymentCancelCtx('user-A-uuid');
+      await expect(guard.canActivate(ctx2)).rejects.toMatchObject({
+        status: 429,
+      });
+    });
+  });
+
   describe('cart 60/h per-user shared bucket (SC-004)', () => {
     it('should allow 60 and block 61st shared across POST/PATCH/DELETE', async () => {
       const makeCartCtx = (method: string, path: string, sub: string) => {

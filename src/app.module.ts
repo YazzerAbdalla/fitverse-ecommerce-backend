@@ -19,6 +19,7 @@ import { ProductsModule } from './modules/products/products.module';
 import { ReservationModule } from './modules/reservation/reservation.module';
 import { UsersModule } from './modules/users/users.module';
 import { OutboxModule } from './modules/outbox/outbox.module';
+import { PaymentModule } from './modules/payment/payment.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { MessagingModule } from './modules/messaging/messaging.module';
 
@@ -74,6 +75,7 @@ import { MessagingModule } from './modules/messaging/messaging.module';
     ReservationModule,
     OutboxModule,
     NotificationsModule,
+    PaymentModule,
   ],
   controllers: [AppController],
   providers: [AppService, CacheTestService],

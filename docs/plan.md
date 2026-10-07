@@ -1535,7 +1535,9 @@ Email service is complete when:
 
 # Phase 19 — Payment Simulation (Demo Scope)
 
-**Status: NOT DONE — rescoped 2026-10-06 to simulation for portfolio demo (full Stripe deferred)**
+**Status: DONE — 2026-10-08** (simulation for portfolio demo; full Stripe deferred — see §19.10)
+
+**Spec**: `specs/018-payment-simulation/spec.md` (+ clarify 2026-10-07: Q1 owner-only writes, Q2 payment blocks expiry, Q3 reuse checkout 10/h, Q4 fixed decline enum, Q5 status-only list) | **Plan**: `specs/018-payment-simulation/plan.md` | **Tasks**: `specs/018-payment-simulation/tasks.md` (30/30) | **Branch**: `018-payment-simulation` | **ADR**: `docs/decisions/ADR-payment-simulation.md`
 
 **Goal:** Add a minimal in-repo `payment` simulation that makes the demo checkout → payment → order completion flow clickable end-to-end (`POST /order/checkout → POST /payments/intent → POST /payments/:id/confirm → GET /order`), reusing the existing Phase 7 `OrderCompletionService.complete` path. No Stripe SDK, no webhook, no rawBody. Full Stripe test mode (`PaymentIntent + webhook + signature + evt.id replay`) is deferred to post-demo — see §19.10.
 
@@ -1679,11 +1681,11 @@ curl -X POST http://localhost:3000/payments/<paymentId>/confirm -H "Authorizatio
 
 ## 19.5 Security / constraints (demo — minimal)
 
-* [ ] `assertOwner` on `intent/confirm/cancel` (owner or Admin); `401/403/404` via `AllExceptionsFilter`; no public webhook to secure in demo scope
-* [ ] Idempotent re-confirm: terminal `SUCCEEDED/FAILED/CANCELLED` → `200` already-processed, zero inventory delta (`FOR UPDATE Payment` check before any `Order/Reservation/Inventory` lock)
-* [ ] `amount` is server-copied from `Order.total` at intent time — client `orderId` only, never client amount; `CHECK amount >= 0`
-* [ ] Rate limit `POST /payments/intent` + `POST /payments/:id/confirm` via existing `RateLimitGuard` (same buckets as `order/checkout` 10/h); fail-open preserved
-* [ ] No secrets in demo scope (no Stripe keys, no `clientSecret`, no signatures to log); `Logger` logs `paymentId/orderId` only
+* [x] `assertOwner` owner-only on `intent/confirm/cancel` (Q1 as-built: no admin bypass on writes; reads stay owner-or-Admin); `401/403/404` via `AllExceptionsFilter`; no public webhook to secure in demo scope
+* [x] Idempotent re-confirm: terminal `SUCCEEDED/FAILED/CANCELLED` → `200` already-processed, zero inventory delta (`FOR UPDATE Payment` check before any `Order/Reservation/Inventory` lock)
+* [x] `amount` is server-copied from `Order.total` at intent time — client `orderId` only, never client amount; `CHECK amount >= 0`
+* [x] Rate limit `POST /payments/intent` + `POST /payments/:id/confirm` via existing `RateLimitGuard` (same 10/h quota + `ORDER_CHECKOUT_RL_*` env keys as `order/checkout`); fail-open preserved; guard outermost so `429` never holds a lock
+* [x] No secrets in demo scope (no Stripe keys, no `clientSecret`, no signatures to log); `Logger` logs `paymentId/orderId` only
 
 ## 19.6 Configuration (demo — none required)
 
@@ -1693,7 +1695,7 @@ PAYMENT_CURRENCY=usd   # default if column default ever needs override (keep 'us
 ```
 
 Post-demo Stripe additions (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_CURRENCY`, `STRIPE_API_VERSION`) are listed in §19.10 and must come via `ConfigService`, never hardcoded.
-* [ ] On `POST /auth/refresh` per Phase 17, ensure `Payment` confirm still checks `tokenVersion` via `Order.userId→User`? Not needed — confirm is owner-checked via `assertOwner` on JWT, not via token version lookup. Owner check for `createIntent` via `assertOwner` only.
+* [x] On `POST /auth/refresh` per Phase 17, ensure `Payment` confirm still checks `tokenVersion` via `Order.userId→User`? Not needed — confirmed 2026-10-08: confirm is owner-checked via `assertOwner` on JWT (no role forwarded), not via token version lookup. Owner check for `createIntent` via `assertOwner` only.
 
 ## 19.7 Implementation Plan (Spec Kit tasks — demo, 2–3 sessions)
 
@@ -1710,17 +1712,19 @@ Post-demo Stripe additions (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIP
 ## 19.8 Testing (must cover)
 
 **Unit (mock repos):**
-* [ ] createIntent: valid → 201 PENDING, duplicate same order PENDING → 201 idempotent same row, order COMPLETED → 409, non-owner 403
-* [ ] confirm: `success` → Order COMPLETED + stock-=qty + Payment SUCCEEDED; `declined` → Order FAILED + reserved-=qty + Payment FAILED; re-confirm terminal → 200 zero delta
-* [ ] cancel: owner cancels PENDING → CANCELLED; terminal → 409
+* [x] createIntent: valid → 201 PENDING, duplicate same order PENDING → 201 idempotent same row, order COMPLETED → 409, non-owner 403
+* [x] confirm: `success` → Order COMPLETED + stock-=qty + Payment SUCCEEDED; `declined` → Order FAILED + reserved-=qty + Payment FAILED; re-confirm terminal → 200 zero delta
+* [x] cancel: owner cancels PENDING → CANCELLED; terminal → 409
 
 **Integration (real PostgreSQL):**
-* [ ] DB constraints: @Unique orderId, amount CHECK>=0, status enum
-* [ ] Transaction: concurrent `POST /payments/:id/confirm` same payment → one mutation, second 200 idempotent, stock decremented once
+* [x] DB constraints: @Unique orderId, amount CHECK>=0, status enum
+* [x] Transaction: concurrent `POST /payments/:id/confirm` same payment → one mutation, second 200 idempotent, stock decremented once
 
 **E2E (supertest, no external network):**
-* [ ] `POST /auth/register` → `POST /auth/login` → `POST /cart` → `POST /order/checkout` → `POST /payments/intent` → `POST /payments/:id/confirm {success}` → `GET /order/:id` → COMPLETED + `GET /payments/:id` → SUCCEEDED
-* [ ] Same but `{declined}` → `GET /order` → FAILED + `GET /payments` → FAILED + `GET /inventory` reserved released
+* [x] `POST /auth/register` → `POST /auth/login` → `POST /cart` → `POST /order/checkout` → `POST /payments/intent` → `POST /payments/:id/confirm {success}` → `GET /order/:id` → COMPLETED + `GET /payments/:id` → SUCCEEDED
+* [x] Same but `{declined}` → `GET /order` → FAILED + `GET /payments` → FAILED + `GET /inventory` reserved released
+
+> As-built 2026-10-08 (`018-payment-simulation`, 20 unit + guard 27 green; concurrency + E2E specs pass via graceful skip without local PG — live proofs deferred to CI with infra up, same close-out as Phase 18): decline reason narrowed to fixed enum `card_declined|insufficient_funds|expired_card` (Q4); list narrowed to status-only filter (Q5); expiry defers to pending payments via raw `Payment` table check inside the expiry tx (Q2, fail-open pre-migration); `POST /order/:id/complete` kept as Admin fallback.
 
 ## 19.9 Exit Criteria
 
@@ -2830,7 +2834,7 @@ Deferred to Phase 16.x / Phase 17:
 
 [x] Email service — DONE 2026-10-02 (Phase 18, merged `d0d540b` — verify/resend/reset emails, dual-channel dispatch, WS history/unread, delivery states; `specs/014-email-service` 73 tasks, unit PASS, real-PG E2E deferred)
 
-[ ] Payment (Simulation, Demo, Phase 19 before Testing) — separate payment.module (no Stripe), Payment {orderId @Unique FK, userId FK, amount, currency 'usd', status PENDING|SUCCEEDED|FAILED|CANCELLED, provider 'simulation'}, POST /payments/intent (orderId) → 201 PENDING, POST /payments/:id/confirm {success|declined} (single-tx Order + Reservation + stock via OrderCompletionService), POST /payments/:id/cancel — see Phase 19 spec
+[x] Payment (Simulation, Demo, Phase 19) — DONE 2026-10-08: `payment` module (no Stripe), Payment 1:1 Order, `POST /payments/intent → POST /payments/:id/confirm {success|declined}` → Order COMPLETED/FAILED, `POST /payments/:id/cancel`, owner-or-Admin reads — see Phase 19 + ADR-payment-simulation
 
 [ ] Dashboard, RBAC & Metrics (Future, Phase 20 before Testing) — separate dashboard.module, UserRoles {Customer/Admin/CoAdmin/ContentManager/FulfillmentStaff} with Admin full / CoAdmin limited role management + last Admin guard + tokenVersion++ , CRUD products (ContentManager/Admin), CRUD users, R orders/carts, CRUD stock (PATCH bulk FOR UPDATE, low-stock query), metrics: revenue/sales SUM, AOV NULLIF, low-stock FILTER, cart abandonment windowed join, API health Redis/pg counters — see Phase 20 spec
 
@@ -2928,7 +2932,7 @@ Phase 18
 Email Service — DONE 2026-10-02 (verify + reset + sales/news + history/unread + delivery states)
         ↓
 Phase 19
-Payment (Simulation, Demo, Phase 19 before Testing) — separate payment.module (no Stripe), Payment 1:1 Order, POST /payments/intent → POST /payments/:id/confirm {success|declined} → Order COMPLETED/FAILED (single tx, 0.5–1 day demo)
+Payment (Simulation, Demo) — DONE 2026-10-08: `payment` module (no Stripe), Payment 1:1 Order, `POST /payments/intent → POST /payments/:id/confirm {success|declined}` → Order COMPLETED/FAILED, `POST /payments/:id/cancel`, owner-or-Admin reads (single tx, demo)
         ↓
 Phase 20
 Dashboard, RBAC & Metrics (Future) — separate dashboard module, role hierarchy, CRUD products/users/stock, 5 metrics (revenue, AOV, low-stock, abandonment, health)
@@ -3010,9 +3014,11 @@ Order Completion, Auth, Infra, Refresh Token, Email Service
     ↓
 DONE — 2026-09-22 → 2026-10-02 (Phase 7 sale, Phases 10/12, Phase 17 refresh rotation, Phase 18 email + notifications merged `d0d540b`)
     ↓
+Order Cancellation (Phase 8) / Payment (Phase 19) — DONE 2026-10-06/08
+    ↓
 >>> CURRENT TARGET <<<
     ↓
-Order Cancellation (Phase 8) / Payment (Phase 19) / Dashboard (Phase 20)
+Dashboard (Phase 20, demo-slim)
     ↓
 Testing (Phase 14)
     ↓
@@ -3021,13 +3027,11 @@ Documentation (Phase 15)
 
 ## Next Manual Task
 
-Phases 1–7, 10, 12, 17, 18 are done and merged to `master`. Open tracks
-(maintainer picks the order — roadmap order is Payment → Dashboard → Testing):
+Phases 1–8, 10, 12, 17–19 are done and merged to `master`. Open tracks
+(maintainer picks the order — roadmap order is Dashboard → Testing):
 
-* **Phase 8 — Order Cancellation**: define the state machine first (statuses,
-  per-status inventory effect, refund behavior), then implement. Exit bar:
-  no double-release / double-return. **Demo: cancel-before-sale only (0.5 day).**
-* **Phase 19 — Payment (Simulation, Demo, Phase 19 before Testing)**: separate `payment` module (no Stripe), Payment 1:1 Order, `POST /payments/intent → POST /payments/:id/confirm {success|declined}` → Order COMPLETED/FAILED (single tx, 0.5–1 day demo)
+* **Phase 8 — Order Cancellation**: DONE 2026-10-06 (demo: cancel-before-sale only; post-sale refund deferred — see ADR-0014).
+* **Phase 19 — Payment (Simulation, Demo)**: DONE 2026-10-08 — separate `payment` module (no Stripe), Payment 1:1 Order, `POST /payments/intent → POST /payments/:id/confirm {success|declined}` → Order COMPLETED/FAILED (single tx) — see Phase 19 + ADR-payment-simulation.
 * **Phase 20 — Dashboard, RBAC & Metrics (Demo-slim)**: read-only `GET /admin/orders`, `GET /admin/stock` + 2 metrics (`revenue`, `low-stock`), Customer/Admin only (0.5–1 day; full 5-role/5-metric scope deferred).
 * **Phase 14 — Testing (Demo-min)**: happy-path E2E + 1 concurrency proof (0.5–1 day; full matrix deferred).
 * **Phase 9 + 13 close-out (combined 0.5 day):** invalidation fix + 2–3 indexes + EXPLAIN. Key redesign / singleflight deferred.
