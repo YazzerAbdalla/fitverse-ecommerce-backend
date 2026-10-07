@@ -19,7 +19,7 @@ For additional context about technologies to be used, project structure,
 
 shell commands, and other important information, read the current plan
 
-at `specs/017-order-cancellation/plan.md` (Phase 8 — Order Cancellation).
+at `specs/018-payment-simulation/plan.md` (Phase 19 — Payment Simulation).
 
 <!-- SPECKIT END -->
 
