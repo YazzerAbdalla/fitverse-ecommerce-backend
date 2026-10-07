@@ -357,6 +357,8 @@ curl "http://localhost:3000/order?page=0&limit=200" -H "Authorization: Bearer $J
 
 Converts `Order PENDING→COMPLETED` + `Reservation RESERVED→COMPLETED` + `Inventory stock-=qty reserved-=qty` atomically (`FOR UPDATE` Order→Reservation→sorted Inventories, `CHK 23514→409`, idempotent `COMPLETED→COMPLETED 200`).
 
+> Phase 19 (018, demo) adds the normal shopper path: `POST /payments/intent {orderId}` → `POST /payments/:id/confirm {success|declined}` (see §6.5). Direct `POST /order/:id/complete` stays as the Admin fallback.
+
 ### 6.1 Complete — success (owner)
 
 ```bash
@@ -429,6 +431,34 @@ curl -X PATCH http://localhost:3000/reservations/$RES_ID/complete \
 # → 403 Reservation transitions via Order lifecycle only (User)
 # As Admin (role Admin JWT):
 curl -X PATCH http://localhost:3000/reservations/$RES_ID/complete -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" -d '{"orderId":".."}'  # 200 Admin-only
+```
+
+### 6.5 Payment simulation (Phase 19 demo — normal shopper path, no Stripe)
+
+```bash
+# After checkout ($ORDER_ID PENDING, $JWT = owner)
+curl -X POST http://localhost:3000/payments/intent -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+  -d '{"orderId":"'$ORDER_ID'"}'  # 201 {id, orderId, amount, currency:'usd', status:'PENDING', provider:'simulation'}
+PAY_ID=$(curl -s -X POST http://localhost:3000/payments/intent -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" -d '{"orderId":"'$ORDER_ID'"}' | jq -r .id)
+
+# Success → Order COMPLETED, stock decremented once
+curl -X POST http://localhost:3000/payments/$PAY_ID/confirm -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+  -d '{"result":"success"}'  # 200 {payment:{status:'SUCCEEDED'}, order:{status:'COMPLETED'}}
+# Re-confirm → 200 idempotent, zero delta
+curl -X POST http://localhost:3000/payments/$PAY_ID/confirm -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+  -d '{"result":"success"}'  # 200 already-processed
+
+# Decline (new checkout + intent first) → Order FAILED, hold released, stock unchanged
+curl -X POST http://localhost:3000/payments/$PAY_ID2/confirm -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+  -d '{"result":"declined","failureReason":"card_declined"}'  # 200 {payment:{status:'FAILED'}, order:{status:'FAILED'}}
+# Bad reason → 400 (fixed enum: card_declined|insufficient_funds|expired_card)
+
+# Cancel before confirm → Order CANCELLED, hold released
+curl -X POST http://localhost:3000/payments/$PAY_ID/cancel -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" -d '{}'  # 200
+
+# Reads: owner sees own, stranger 403, admin sees any
+curl http://localhost:3000/payments/$PAY_ID -H "Authorization: Bearer $JWT"  # 200
+curl "http://localhost:3000/payments?status=SUCCEEDED" -H "Authorization: Bearer $JWT"  # 200 {data, meta}
 ```
 
 ---

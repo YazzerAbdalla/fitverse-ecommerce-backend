@@ -18,10 +18,10 @@
 
 **Purpose**: Scaffold payment module shell and migration placeholder (no business logic yet)
 
-- [ ] T001 Create payment module directory shell `src/modules/payment/` with placeholder `payment.module.ts`
-- [ ] T002 [P] Create `PaymentStatus` enum in `src/modules/payment/entities/payment-status.enum.ts`
-- [ ] T003 [P] Create `CreatePaymentIntentDto` in `src/modules/payment/dto/create-payment-intent.dto.ts`
-- [ ] T004 [P] Create `ConfirmPaymentDto` in `src/modules/payment/dto/confirm-payment.dto.ts` (result enum + fixed failureReason enum)
+- [x] T001 Create payment module directory shell `src/modules/payment/` with placeholder `payment.module.ts`
+- [x] T002 [P] Create `PaymentStatus` enum in `src/modules/payment/entities/payment-status.enum.ts`
+- [x] T003 [P] Create `CreatePaymentIntentDto` in `src/modules/payment/dto/create-payment-intent.dto.ts`
+- [x] T004 [P] Create `ConfirmPaymentDto` in `src/modules/payment/dto/confirm-payment.dto.ts` (result enum + fixed failureReason enum)
 
 ---
 
@@ -31,11 +31,11 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T005 Create `Payment` entity in `src/modules/payment/entities/payment.entity.ts` (orderId UNIQUE FK CASCADE, userId, amount CHECK>=0, usd, status, simulation, failureReason, indexes per data-model.md)
-- [ ] T006 Create migration `src/migration/17XXXXXXXXXX-CreatePayment.ts` (up: create table + indexes + checks; down: drop; never edit committed migrations)
-- [ ] T007 Wire `PaymentModule` in `src/modules/payment/payment.module.ts` (forFeature([Payment]) + imports Order/Reservation/Inventory/Users via services, providers/exports PaymentService)
-- [ ] T008 Register `PaymentModule` in `src/app.module.ts` imports
-- [ ] T009 Add pending-payment expiry skip in `src/modules/reservation/reservation-expiration.service.ts` (skip candidates with PENDING payment per Q2/D5)
+- [x] T005 Create `Payment` entity in `src/modules/payment/entities/payment.entity.ts` (orderId UNIQUE FK CASCADE, userId, amount CHECK>=0, usd, status, simulation, failureReason, indexes per data-model.md)
+- [x] T006 Create migration `src/migration/17XXXXXXXXXX-CreatePayment.ts` (up: create table + indexes + checks; down: drop; never edit committed migrations)
+- [x] T007 Wire `PaymentModule` in `src/modules/payment/payment.module.ts` (forFeature([Payment]) + imports Order/Reservation/Inventory/Users via services, providers/exports PaymentService)
+- [x] T008 Register `PaymentModule` in `src/app.module.ts` imports
+- [x] T009 Add pending-payment expiry skip in `src/modules/reservation/reservation-expiration.service.ts` (skip candidates with PENDING payment per Q2/D5)
 
 **Checkpoint**: Foundation ready — `npm run build` passes with empty service/controller stubs; story work can begin
 
@@ -49,16 +49,16 @@
 
 ### Tests for User Story 1
 
-- [ ] T010 [P] [US1] Unit tests for `createIntent` in `src/modules/payment/payment.service.spec.ts` (valid 201, duplicate PENDING idempotent, non-PENDING 409, non-owner 403, missing 404)
-- [ ] T011 [P] [US1] Unit tests for `confirm success` in `src/modules/payment/payment.service.spec.ts` (success path, terminal re-confirm 200 zero-delta, validation 400)
-- [ ] T012 [P] [US1] Real-PG concurrency test in `src/modules/payment/test/payment.confirm-concurrency.integration.spec.ts` (Promise.all confirm ×2 → one mutation, second idempotent)
+- [x] T010 [P] [US1] Unit tests for `createIntent` in `src/modules/payment/payment.service.spec.ts` (valid 201, duplicate PENDING idempotent, non-PENDING 409, non-owner 403, missing 404)
+- [x] T011 [P] [US1] Unit tests for `confirm success` in `src/modules/payment/payment.service.spec.ts` (success path, terminal re-confirm 200 zero-delta, validation 400)
+- [x] T012 [P] [US1] Real-PG concurrency test in `src/modules/payment/test/payment.confirm-concurrency.integration.spec.ts` (Promise.all confirm ×2 → one mutation, second idempotent)
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Implement `PaymentService.createIntent` in `src/modules/payment/payment.service.ts` (FOR UPDATE Order, assertOwner owner-only Q1, PENDING-only, 1:1 idempotent, amount=Order.total)
-- [ ] T014 [US1] Implement `PaymentService.confirmSuccess` path in `src/modules/payment/payment.service.ts` (single tx FOR UPDATE Payment→Order→Reservation→sorted Inventories, delegate to OrderCompletionService core per D1, mark SUCCEEDED)
-- [ ] T015 [US1] Implement `PaymentController` intent + confirm-success routes in `src/modules/payment/payment.controller.ts` (thin, @Auth() + RateLimitGuard shared checkout bucket Q3/D6 + ValidationPipe + Swagger + owner-only writes)
-- [ ] T016 [US1] E2E success flow in `test/payment.e2e-spec.ts` (checkout→intent→confirm→COMPLETED per quickstart.md)
+- [x] T013 [US1] Implement `PaymentService.createIntent` in `src/modules/payment/payment.service.ts` (FOR UPDATE Order, assertOwner owner-only Q1, PENDING-only, 1:1 idempotent, amount=Order.total)
+- [x] T014 [US1] Implement `PaymentService.confirmSuccess` path in `src/modules/payment/payment.service.ts` (single tx FOR UPDATE Payment→Order→Reservation→sorted Inventories, delegate to OrderCompletionService core per D1, mark SUCCEEDED)
+- [x] T015 [US1] Implement `PaymentController` intent + confirm-success routes in `src/modules/payment/payment.controller.ts` (thin, @Auth() + RateLimitGuard shared checkout bucket Q3/D6 + ValidationPipe + Swagger + owner-only writes)
+- [x] T016 [US1] E2E success flow in `test/payment.e2e-spec.ts` (checkout→intent→confirm→COMPLETED per quickstart.md)
 
 **Checkpoint**: US1 fully functional and demoable independently (MVP!)
 
@@ -72,13 +72,13 @@
 
 ### Tests for User Story 2
 
-- [ ] T017 [P] [US2] Unit tests for `confirm declined` in `src/modules/payment/payment.service.spec.ts` (FAILED mapping, enum enforcement Q4/D7, invalid reason 400, terminal re-confirm 200)
+- [x] T017 [P] [US2] Unit tests for `confirm declined` in `src/modules/payment/payment.service.spec.ts` (FAILED mapping, enum enforcement Q4/D7, invalid reason 400, terminal re-confirm 200)
 
 ### Implementation for User Story 2
 
-- [ ] T018 [US2] Implement `PaymentService.confirmDeclined` path in `src/modules/payment/payment.service.ts` (reuse OrderCancellationService reason=failed core per D2, mark FAILED + failureReason)
-- [ ] T019 [US2] Extend `PaymentController` confirm route in `src/modules/payment/payment.controller.ts` to accept declined branch (no new route; DTO enum already from T004)
-- [ ] T020 [US2] E2E decline flow in `test/payment.e2e-spec.ts` (checkout→intent→declined→FAILED + inventory released)
+- [x] T018 [US2] Implement `PaymentService.confirmDeclined` path in `src/modules/payment/payment.service.ts` (reuse OrderCancellationService reason=failed core per D2, mark FAILED + failureReason)
+- [x] T019 [US2] Extend `PaymentController` confirm route in `src/modules/payment/payment.controller.ts` to accept declined branch (no new route; DTO enum already from T004)
+- [x] T020 [US2] E2E decline flow in `test/payment.e2e-spec.ts` (checkout→intent→declined→FAILED + inventory released)
 
 **Checkpoint**: US1 + US2 both work independently (success vs decline)
 
@@ -92,12 +92,12 @@
 
 ### Tests for User Story 3
 
-- [ ] T021 [P] [US3] Unit tests for `cancel` in `src/modules/payment/payment.service.spec.ts` (PENDING→CANCELLED, terminal 409, non-owner 403, missing 404)
+- [x] T021 [P] [US3] Unit tests for `cancel` in `src/modules/payment/payment.service.spec.ts` (PENDING→CANCELLED, terminal 409, non-owner 403, missing 404)
 
 ### Implementation for User Story 3
 
-- [ ] T022 [US3] Implement `PaymentService.cancel` in `src/modules/payment/payment.service.ts` (single tx, reuse cancellation core reason=cancelled per D2)
-- [ ] T023 [US3] Add cancel route in `src/modules/payment/payment.controller.ts` (POST /payments/:id/cancel, owner-only, RateLimitGuard)
+- [x] T022 [US3] Implement `PaymentService.cancel` in `src/modules/payment/payment.service.ts` (single tx, reuse cancellation core reason=cancelled per D2)
+- [x] T023 [US3] Add cancel route in `src/modules/payment/payment.controller.ts` (POST /payments/:id/cancel, owner-only, RateLimitGuard)
 
 **Checkpoint**: Cancel path works without affecting US1/US2
 
@@ -111,12 +111,12 @@
 
 ### Tests for User Story 4
 
-- [ ] T024 [P] [US4] Unit tests for `get/list` in `src/modules/payment/payment.service.spec.ts` (owner scope, admin bypass on reads, status filter, pagination defaults page=1 limit=20 max=100)
+- [x] T024 [P] [US4] Unit tests for `get/list` in `src/modules/payment/payment.service.spec.ts` (owner scope, admin bypass on reads, status filter, pagination defaults page=1 limit=20 max=100)
 
 ### Implementation for User Story 4
 
-- [ ] T025 [US4] Implement `PaymentService.getById/listByUser` in `src/modules/payment/payment.service.ts` (createdAt DESC, skip=(page-1)*limit, {data, meta})
-- [ ] T026 [US4] Add read routes in `src/modules/payment/payment.controller.ts` (GET /payments/:id + GET /payments, owner-or-Admin)
+- [x] T025 [US4] Implement `PaymentService.getById/listByUser` in `src/modules/payment/payment.service.ts` (createdAt DESC, skip=(page-1)*limit, {data, meta})
+- [x] T026 [US4] Add read routes in `src/modules/payment/payment.controller.ts` (GET /payments/:id + GET /payments, owner-or-Admin)
 
 **Checkpoint**: All stories independently functional
 
@@ -126,10 +126,10 @@
 
 **Purpose**: Docs, contract parity, and verification gates (exit criteria §19.9)
 
-- [ ] T027 Write ADR `docs/decisions/ADR-payment-simulation.md` (1:1, reuse cores, owner-only, expiry-block, no outbox event, Stripe deferred)
-- [ ] T028 [P] Update `docs/manual-e2e-test-flow.md` payment section (intent→confirm success/decline curls per quickstart.md)
-- [ ] T029 [P] Swagger polish on `src/modules/payment/payment.controller.ts` + DTOs (`@ApiOperation/@ApiResponse`, 400/401/403/404/409/429)
-- [ ] T030 Run verification gates: `npm run lint`, `npm run build`, `npm run test -- --runInBand src/modules/payment`, E2E `test/payment.e2e-spec.ts`, quickstart validation
+- [x] T027 Write ADR `docs/decisions/ADR-payment-simulation.md` (1:1, reuse cores, owner-only, expiry-block, no outbox event, Stripe deferred)
+- [x] T028 [P] Update `docs/manual-e2e-test-flow.md` payment section (intent→confirm success/decline curls per quickstart.md)
+- [x] T029 [P] Swagger polish on `src/modules/payment/payment.controller.ts` + DTOs (`@ApiOperation/@ApiResponse`, 400/401/403/404/409/429)
+- [x] T030 Run verification gates: `npm run lint`, `npm run build`, `npm run test -- --runInBand src/modules/payment`, E2E `test/payment.e2e-spec.ts`, quickstart validation
 
 ---
 

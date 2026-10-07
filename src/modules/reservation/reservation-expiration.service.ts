@@ -232,6 +232,35 @@ export class ReservationExpirationService {
     return this.reservationService.expire(manager, reservationId);
   }
 
+  /**
+   * Checks whether an order has a pending simulated payment.
+   * A pending payment defers automatic expiry so a shopper mid-pay is never
+   * expired out (018-payment-simulation Q2/D5, best-effort rechecked inside
+   * the expiry transaction).
+   *
+   * @param manager - EntityManager of the enclosing transaction.
+   * @param orderId - Order id to check.
+   * @returns True when a PENDING payment row exists; false otherwise (including when the payment table is absent pre-migration).
+   */
+  private async hasPendingPaymentForOrder(
+    manager: EntityManager,
+    orderId: string,
+  ): Promise<boolean> {
+    // Raw table check avoids importing the payment entity here: the payment
+    // module depends on the order/reservation boundary, so a direct entity
+    // import would reverse the dependency direction (TI-1).
+    try {
+      const matchingRows: Array<{ id: string }> = await manager.query(
+        'SELECT 1 AS "id" FROM "Payment" WHERE "orderId" = $1 AND "status" = $2 LIMIT 1',
+        [orderId, 'PENDING'],
+      );
+      return matchingRows.length > 0;
+    } catch {
+      // Payment table absent (migration not applied) — preserve legacy behavior and expire.
+      return false;
+    }
+  }
+
   async processExpiredBatch(limit?: number): Promise<{
     scanned: number;
     expired: number;
@@ -268,15 +297,18 @@ export class ReservationExpirationService {
         let result: Reservation | null = null;
         let reservationBeforeStatus: ReservationStatus | null = null;
         let isIdempotentDuplicate = false;
+        let isPaymentBlocked = false;
         await this.dataSource.transaction(async (manager) => {
           // Capture reservation status BEFORE expire to detect idempotent duplicate (RESERVED vs already terminal)
           // Idempotent guard is inside ReservationService before any Inventory FOR UPDATE; 200 duplicate must not poison (D2)
+          let preOrderId: string | null = null;
           try {
             const pre = await manager.getRepository(Reservation).findOne({
               where: { id },
             });
             reservationBeforeStatus =
               (pre?.status as ReservationStatus) ?? null;
+            preOrderId = pre?.orderId ?? null;
             // Also capture order status before expire to detect newly cancelled order (FR-006)
             if (pre?.orderId) {
               const ordBefore = await manager
@@ -291,6 +323,19 @@ export class ReservationExpirationService {
           } catch {
             // ignore pre-fetch errors — best effort
             (manager as any).__orderBeforeStatus = null;
+          }
+
+          // Phase 19 (018): a pending payment defers expiry until the payment
+          // resolves (confirm/decline/cancel). Rechecked inside the transaction
+          // so a payment created after the scan still blocks this candidate.
+          // The candidate-level check is best-effort: check errors fail open
+          // toward legacy behavior (expire as before).
+          if (preOrderId !== null) {
+            const blockedOrderId: string = preOrderId;
+            if (await this.hasPendingPaymentForOrder(manager, blockedOrderId)) {
+              isPaymentBlocked = true;
+              return;
+            }
           }
 
           result = await this.expireOne(manager, id);
@@ -371,6 +416,14 @@ export class ReservationExpirationService {
           }
         });
         // Handle idempotent duplicate 200 after commit: do not increment poison, INCR counter, count as skipped
+        if (isPaymentBlocked) {
+          // Phase 19 (018): pending payment defers expiry — not a failure, not poison.
+          skipped++;
+          this.logger.log(
+            `reservation skip id=${id}: pending payment blocks expiry until confirm/decline/cancel`,
+          );
+          continue;
+        }
         if (isIdempotentDuplicate) {
           await this.clearPoison(id);
           skipped++;

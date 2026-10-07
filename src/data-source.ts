@@ -21,6 +21,7 @@ import { Reservation } from './modules/reservation/entities/reservation.entity';
 import { ReservationItem } from './modules/reservation/entities/reservation-item.entity';
 import { OutboxEvent } from './modules/outbox/entities/outbox-event.entity';
 import { RefreshToken } from './modules/auth/entities/refresh-token.entity';
+import { Payment } from './modules/payment/entities/payment.entity';
 import { PasswordResetToken } from './modules/auth/entities/password-reset-token.entity';
 import { OtpVerification } from './modules/auth/entities/otp-verification.entity';
 
@@ -72,6 +73,7 @@ export const AppDataSource = new DataSource({
     ReservationItem,
     OutboxEvent,
     RefreshToken,
+    Payment,
     // B3: auth token entities were missing from metadata (tables already exist
     // via migrations; metadata-only change, no schema delta). Notification*
     // entities stay out: their tables do not exist yet (pre-existing gap,
