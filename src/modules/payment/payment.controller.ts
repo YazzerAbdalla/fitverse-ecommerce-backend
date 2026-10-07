@@ -94,6 +94,7 @@ export class PaymentController {
    * @returns The payment paired with its order.
    */
   @Post(':id/confirm')
+  @HttpCode(200)
   @UseGuards(RateLimitGuard)
   @Auth()
   @ApiBearerAuth('JWT-auth')
@@ -132,6 +133,7 @@ export class PaymentController {
    */
   @Post(':id/cancel')
   @HttpCode(200)
+  @UseGuards(RateLimitGuard)
   @Auth()
   @ApiBearerAuth('JWT-auth')
   @ApiOperation({ summary: 'Cancel own pending payment → CANCELLED' })
@@ -140,6 +142,7 @@ export class PaymentController {
   @ApiForbiddenResponse({ description: 'Not the payment owner' })
   @ApiNotFoundResponse({ description: 'Payment or order not found' })
   @ApiConflictResponse({ description: 'Payment already terminal' })
+  @ApiTooManyRequestsResponse({ description: 'Rate limit exceeded' })
   async cancel(
     @CurrentUser('sub') userId: string,
     @Param('id') paymentId: string,

@@ -133,6 +133,18 @@
 
 ---
 
+## Phase 8: Senior-review fixes (F1–F3, 2026-10-08)
+
+**Purpose**: Close the three review findings with contract-preserving (R-class) changes.
+
+- [x] F1 Throttle + status-code parity: `POST /payments/:id/confirm` returns `200` (`@HttpCode(200)`; Nest `@Post` defaults to 201); `POST /payments/:id/cancel` gains outermost `@UseGuards(RateLimitGuard)` + `429` Swagger entry; `RateLimitGuard` gains the `POST /payments/:id/cancel` bucket (10/h per-user, same `ORDER_CHECKOUT_RL_*` quota + route-key normalization as intent/confirm)
+- [x] F2 Dead-code removal (DC-1): deleted uncalled `PaymentService.createPaymentIntentWithManager` (~40-line duplicate of `createIntent` core; zero static/DI/route/spec references) + now-unused `EntityManager` import
+- [x] F3 Honest result typing: `ConfirmPaymentResult.order` is `CompleteOrderResult | Order` (enriched completion result on success, plain `Order` on decline/cancel/idempotent re-read); deleted the `as unknown as Order` cast
+
+---
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

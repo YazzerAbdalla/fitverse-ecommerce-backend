@@ -51,6 +51,7 @@ const DEFAULT_LIMITS: Record<string, { max: number; windowMs: number }> = {
   // Phase 19 — Payment simulation (018): same 10/h quota as checkout (Q3/D6)
   'POST /payments/intent': { max: 10, windowMs: 3600_000 },
   'POST /payments/:id/confirm': { max: 10, windowMs: 3600_000 },
+  'POST /payments/:id/cancel': { max: 10, windowMs: 3600_000 },
 };
 
 /** Single fixed-window bucket resolved for a request. */
@@ -255,6 +256,9 @@ export class RateLimitGuard implements CanActivate {
     if (path.includes('/payments/') && path.includes('/confirm')) {
       if (method === 'POST') return 'POST /payments/:id/confirm';
     }
+    if (path.includes('/payments/') && path.includes('/cancel')) {
+      if (method === 'POST') return 'POST /payments/:id/cancel';
+    }
     if (path.includes('/cart/') && method === 'DELETE') {
       return 'DELETE /cart/:cartItemId';
     }
@@ -442,6 +446,7 @@ export class RateLimitGuard implements CanActivate {
       // Phase 19 — Payment simulation (018): per-user buckets, same quota as checkout
       'POST /payments/intent',
       'POST /payments/:id/confirm',
+      'POST /payments/:id/cancel',
     ]);
 
     if (perUserRoutes.has(routeKey)) {
@@ -577,6 +582,7 @@ export class RateLimitGuard implements CanActivate {
       // Phase 19 — Payment simulation (018): driven by the checkout quota (Q3/D6)
       'POST /payments/intent': 'ORDER_CHECKOUT_RL_MAX',
       'POST /payments/:id/confirm': 'ORDER_CHECKOUT_RL_MAX',
+      'POST /payments/:id/cancel': 'ORDER_CHECKOUT_RL_MAX',
     };
     const envKey = envMap[routeKey];
     if (!envKey) return fallback;
@@ -614,6 +620,7 @@ export class RateLimitGuard implements CanActivate {
       // Phase 19 — Payment simulation (018): driven by the checkout window (Q3/D6)
       'POST /payments/intent': 'ORDER_CHECKOUT_RL_WINDOW_MS',
       'POST /payments/:id/confirm': 'ORDER_CHECKOUT_RL_WINDOW_MS',
+      'POST /payments/:id/cancel': 'ORDER_CHECKOUT_RL_WINDOW_MS',
     };
     const envKey = envMap[routeKey];
     if (!envKey) return fallback;

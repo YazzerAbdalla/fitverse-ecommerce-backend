@@ -1,6 +1,6 @@
 # Contract: Payment API (Demo)
 
-**Feature**: `018-payment-simulation` | **Base**: same host/auth as order APIs (`@Auth()` + `JwtGuard`, `RateLimitGuard` outermost on intent/confirm, global `ValidationPipe` + `AllExceptionsFilter`).
+**Feature**: `018-payment-simulation` | **Base**: same host/auth as order APIs (`@Auth()` + `JwtGuard`, `RateLimitGuard` outermost on intent/confirm/cancel, global `ValidationPipe` + `AllExceptionsFilter`).
 
 ## Endpoints
 

@@ -11,7 +11,7 @@ import {
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Payment } from './entities/payment.entity';
 import { PaymentStatus } from './entities/payment-status.enum';
@@ -22,6 +22,7 @@ import type {
 import { Order } from '../order/entities/order.entity';
 import { OrderStatus } from '../order/order-status.enum';
 import { OrderCompletionService } from '../order/order-completion.service';
+import type { CompleteOrderResult } from '../order/order-completion.service';
 import {
   OrderCancellationService,
   type OrderCancelReason,
@@ -29,11 +30,13 @@ import {
 import { UserRoles } from '../users/enum/roles';
 
 /**
- * Outcome of confirming a simulated payment, pairing the payment with its order.
+ * Outcome of confirming or cancelling a simulated payment, pairing the payment with its order.
+ * The order side is the enriched completion result on the success path and the plain
+ * Order entity on the decline/cancel/idempotent paths (which re-read the row).
  */
 export interface ConfirmPaymentResult {
   payment: Payment;
-  order: Order;
+  order: CompleteOrderResult | Order;
 }
 
 /**
@@ -280,10 +283,7 @@ export class PaymentService {
         this.logger.log(
           `payment confirmed success paymentId=${paymentId} orderId=${lockedPayment.orderId}`,
         );
-        return {
-          payment: succeededPayment,
-          order: completionResult as unknown as Order,
-        };
+        return { payment: succeededPayment, order: completionResult };
       }
       // Declined: fail the order and release the hold (stock untouched, D2).
       const validatedReason = failureReason as PaymentFailureReason;
@@ -492,56 +492,5 @@ export class PaymentService {
         currentPage: parsedPage,
       },
     };
-  }
-
-  /**
-   * Composes a payment inside the caller's transaction (reserved for composed flows).
-   *
-   * @param manager - EntityManager of the enclosing transaction (caller owns commit/rollback).
-   * @param requestingUserId - Owner of the order.
-   * @param orderId - Order to pay for.
-   * @returns The pending payment.
-   */
-  async createPaymentIntentWithManager(
-    manager: EntityManager,
-    requestingUserId: string,
-    orderId: string,
-  ): Promise<Payment> {
-    const orderRepository = manager.getRepository(Order);
-    const lockedOrder = await orderRepository.findOne({
-      where: { id: orderId },
-      lock: { mode: 'pessimistic_write' },
-    });
-    if (!lockedOrder) {
-      throw new NotFoundException(`Order ${orderId} not found`);
-    }
-    this.assertOrderOwnerForIntent(lockedOrder, requestingUserId);
-    if (lockedOrder.status !== OrderStatus.PENDING) {
-      throw new ConflictException(
-        `Order ${orderId} is ${lockedOrder.status}, only PENDING orders can start a payment`,
-      );
-    }
-    const paymentRepository = manager.getRepository(Payment);
-    const existingPayment = await paymentRepository.findOne({
-      where: { orderId },
-    });
-    if (existingPayment) {
-      if (existingPayment.status === PaymentStatus.PENDING) {
-        return existingPayment;
-      }
-      throw new ConflictException(
-        `Order ${orderId} already has a terminal payment ${existingPayment.id}`,
-      );
-    }
-    const pendingPayment = paymentRepository.create({
-      orderId: lockedOrder.id,
-      userId: lockedOrder.userId,
-      amount: lockedOrder.total,
-      currency: 'usd',
-      status: PaymentStatus.PENDING,
-      provider: 'simulation',
-      failureReason: null,
-    });
-    return paymentRepository.save(pendingPayment);
   }
 }
