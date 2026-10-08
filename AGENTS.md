@@ -19,7 +19,7 @@ For additional context about technologies to be used, project structure,
 
 shell commands, and other important information, read the current plan
 
-at `specs/018-payment-simulation/plan.md` (Phase 19 — Payment Simulation).
+at `specs/019-admin-product-stock/plan.md` (Phase 20 — Admin Product & Stock, demo scope).
 
 <!-- SPECKIT END -->
 

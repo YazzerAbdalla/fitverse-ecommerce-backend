@@ -1750,6 +1750,8 @@ Payment simulation (demo) is complete when:
 
 **Status: NOT DONE — rescoped 2026-10-06 to demo-slim (full 5-role / 5-metric scope deferred to post-demo — see §20.9)**
 
+**Demo scope (locked 2026-10-08, spec `specs/019-admin-product-stock/spec.md`):** Admin role only, no user/role manipulation. Demo user stories: (P1) view current products with search/filters + auto-calculated stock status (`in-stock` / `low-stock` / `out-of-stock`, derived `available = stock − reserved`, never stored); (P1) add new product with initial stock; (P2) update stock (delta-only, rejected below reserved/zero). Everything else in §§20.1–20.5 (new roles, role endpoints, orders/carts reads, bulk stock, all 5 metrics) is post-demo.
+
 **Goal:** Provide an admin/operational dashboard via a **separate `dashboard` module** (thin, service-aggregating). **Demo scope:** existing `Customer/Admin` roles only (no new enum values, no role upgrade/downgrade endpoint), read-only admin reads (`GET /admin/orders`, `GET /admin/stock`) + **2 metrics** (`revenue SUM`, `low-stock FILTER`) with date-range filtering — all without breaking modular-monolith boundaries or making Redis authoritative. **Deferred post-demo:** `CoAdmin/ContentManager/FulfillmentStaff`, `PATCH /admin/users/:id/role` + last-Admin guard, products/stock CRUD, carts R, AOV/abandonment/health metrics (§§20.1–20.5 full text retained as post-demo spec). **Estimate (demo): 0.5–1 day, 2–3 AI sessions** (vs 4–6 days for full scope).
 
 This phase is **orthogonal** to Phases 7-8 (order) and 9-13 (infra) and extends Phases 5-6/16 (reservation/order/auth). It must be implemented **before** `Phase 14 — Testing` so final `npm run test:e2e` can cover `admin → role change → dashboard metrics → stock alert` without mocking dashboard.
