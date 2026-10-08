@@ -347,4 +347,79 @@ describe('InventoryService', () => {
       );
     });
   });
+
+  describe('adjustStockByDelta (019 T004 delegation matrix)', () => {
+    it('delegates positive delta to increaseStock with the same amount', async () => {
+      const increaseSpy = jest
+        .spyOn(service, 'increaseStock')
+        .mockResolvedValue({ stock: 15 } as Inventory);
+      const decreaseSpy = jest.spyOn(service, 'decreaseStock');
+
+      const result = await service.adjustStockByDelta('p1', 5);
+
+      expect(increaseSpy).toHaveBeenCalledWith('p1', 5);
+      expect(decreaseSpy).not.toHaveBeenCalled();
+      expect(result.stock).toBe(15);
+    });
+
+    it('delegates negative delta to decreaseStock with the absolute amount', async () => {
+      const increaseSpy = jest.spyOn(service, 'increaseStock');
+      const decreaseSpy = jest
+        .spyOn(service, 'decreaseStock')
+        .mockResolvedValue({ stock: 7 } as Inventory);
+
+      const result = await service.adjustStockByDelta('p1', -3);
+
+      expect(decreaseSpy).toHaveBeenCalledWith('p1', 3);
+      expect(increaseSpy).not.toHaveBeenCalled();
+      expect(result.stock).toBe(7);
+    });
+
+    it('auto-creates the row then increases on positive delta with no row', async () => {
+      // Call order: getInventory (null) -> createForProduct check (null)
+      // -> retried getInventory (created row).
+      const created = { productId: 'p1', stock: 0, reservedAmount: 0 };
+      inventoryRepo.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue(created as Inventory);
+      inventoryRepo.create.mockReturnValue(created as Inventory);
+      inventoryRepo.save.mockImplementation(async (entity) =>
+        Promise.resolve(entity as Inventory),
+      );
+
+      const result = await service.adjustStockByDelta('p1', 4);
+
+      expect(inventoryRepo.create).toHaveBeenCalledWith({
+        productId: 'p1',
+        stock: 0,
+        reservedAmount: 0,
+      });
+      expect(result.stock).toBe(4);
+    });
+
+    it('throws NotFound on negative delta with no row (nothing to subtract)', async () => {
+      inventoryRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.adjustStockByDelta('p1', -2)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(inventoryRepo.create).not.toHaveBeenCalled();
+    });
+
+    it('preserves the below-reserved guard (409, nothing persisted)', async () => {
+      const inv = new Inventory();
+      inv.stock = 5;
+      inv.reservedAmount = 5;
+      inventoryRepo.findOne.mockResolvedValue(inv);
+
+      await expect(service.adjustStockByDelta('p1', -1)).rejects.toThrow(
+        ConflictException,
+      );
+      // decreaseStock validates before persisting: no save means
+      // the stored row is unchanged even though the in-memory
+      // entity was decremented before the guard threw.
+      expect(inventoryRepo.save).not.toHaveBeenCalled();
+    });
+  });
 });

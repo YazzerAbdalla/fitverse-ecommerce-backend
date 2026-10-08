@@ -1748,27 +1748,29 @@ Payment simulation (demo) is complete when:
 
 # Phase 20 — Dashboard, RBAC & Metrics (Demo Scope)
 
-**Status: NOT DONE — rescoped 2026-10-06 to demo-slim (full 5-role / 5-metric scope deferred to post-demo — see §20.9)**
+**Status: DONE (demo slice) — 2026-10-08, branch `019-admin-product-stock`, spec `specs/019-admin-product-stock/`, ADR-0015** (full 5-role / 5-metric scope deferred to post-demo — see §20.9)
 
-**Goal:** Provide an admin/operational dashboard via a **separate `dashboard` module** (thin, service-aggregating). **Demo scope:** existing `Customer/Admin` roles only (no new enum values, no role upgrade/downgrade endpoint), read-only admin reads (`GET /admin/orders`, `GET /admin/stock`) + **2 metrics** (`revenue SUM`, `low-stock FILTER`) with date-range filtering — all without breaking modular-monolith boundaries or making Redis authoritative. **Deferred post-demo:** `CoAdmin/ContentManager/FulfillmentStaff`, `PATCH /admin/users/:id/role` + last-Admin guard, products/stock CRUD, carts R, AOV/abandonment/health metrics (§§20.1–20.5 full text retained as post-demo spec). **Estimate (demo): 0.5–1 day, 2–3 AI sessions** (vs 4–6 days for full scope).
+**Demo scope (locked 2026-10-08, spec `specs/019-admin-product-stock/spec.md` — shipped):** Admin role only, no user/role manipulation. Demo user stories: (P1) view current products with search/filters + auto-calculated stock status (`in-stock` / `low-stock` / `out-of-stock`, derived `available = stock − reserved`, never stored); (P1) add new product with initial stock; (P2) update stock (delta-only, rejected below reserved/zero). Everything else in §§20.1–20.5 (new roles, role endpoints, orders/carts reads, bulk stock, all 5 metrics) is post-demo.
 
-This phase is **orthogonal** to Phases 7-8 (order) and 9-13 (infra) and extends Phases 5-6/16 (reservation/order/auth). It must be implemented **before** `Phase 14 — Testing` so final `npm run test:e2e` can cover `admin → role change → dashboard metrics → stock alert` without mocking dashboard.
+**Goal:** Provide an admin/operational dashboard via a **separate `dashboard` module** (thin, service-aggregating). **Demo scope (shipped):** existing `Admin` role only (no new enum values, no role upgrade/downgrade endpoint): `GET /admin/products` (search/filter/status/pagination, uncached) + `POST /admin/products` (explicit field map, `stock ?? 0`) + `PATCH /admin/products/:id/stock` (delta-only, `ParseUUIDPipe`) — all without breaking modular-monolith boundaries or making Redis authoritative; legacy `POST /inventory/:productId/increase|decrease` tightened to `@Auth(Admin)` in the same slice. **Deferred post-demo:** `CoAdmin/ContentManager/FulfillmentStaff`, `PATCH /admin/users/:id/role` + last-Admin guard, users CRUD, orders/carts R, bulk stock, all 5 metrics (§§20.1–20.5 full text retained as post-demo spec).
+
+This phase is **orthogonal** to Phases 7-8 (order) and 9-13 (infra) and extends Phases 5-6/16 (reservation/order/auth). It was implemented **before** `Phase 14 — Testing`: `test/admin-products.e2e-spec.ts` covers `admin list → create → adjust → re-list + 409s + customer 403 matrix + legacy 403 proof` (4/4 live on dev PG) without mocking dashboard.
 
 ## 20.0 Current Snapshot (what exists, 2026-09-22)
 
 ```text
 users.entity.ts    : User {id uuid, firstName, lastName, email @Unique, password nullable, role enum User|Admin default User, phoneNumber/@Index, phoneVerified, googleId/@Index, provider local|google, tokenVersion int, passwordChangedAt, emailVerified, orders OneToMany, cart OneToOne} — only 2 roles
 auth               : JwtGuard (validates tokenVersion), RolesGuard via @Auth(...roles) (checks role === required), RegisterDto {firstName,lastName,email,password}, LoginDto {email,password}
-products           : GraphQL Product entity + resolver + ProductsService (create, createMany, findAll cached, findOne, update, updateMany FOR UPDATE, remove) — NO REST CRUD for dashboard, NO stock in Product (stock in Inventory)
-inventory          : Inventory {id, productId FK @Unique, stock int, reservedAmount int, available derived} + InventoryService (getInventory, checkAvailability, increaseStock, decreaseStock, reserve/release/completeSale stubs, decreaseStockForOrderMany) + InventoryController (GET /inventory/:productId, availability, increase/decrease) — no dashboard bulk stock CRUD, no low-stock query
+products           : GraphQL Product entity + resolver + ProductsService (create, createMany, findAll cached, findOne, update, updateMany FOR UPDATE, remove) — NO stock in Product (stock in Inventory); admin REST create reuses `ProductsService.create` unchanged (019)
+inventory          : Inventory {id, productId FK @Unique, stock int, reservedAmount int, available derived} + InventoryService (+ `adjustStockByDelta` delta dispatcher, 019) + InventoryController (GET reads any-role; increase/decrease `@Auth(Admin)` since 019 T002b)
 order              : Order {id, userId FK, status PENDING|COMPLETED|CANCELLED|FAILED, total, orderItems} + OrderCheckoutService (POST /order/checkout cart-only) + OrderCompletionService (POST /order/:id/complete) + OrderService.findAll/findOne owner-or-Admin paginated
 cart               : Cart {id, userId FK, cartItems OneToMany} + CartItem {id, cart, product eager, quantity} + CartService (getUserCart, addCartItem, increase/decrease, remove, clear, clearCartForCheckout via EntityManager)
 admin              : Only @Auth(Admin) checks; no Co-Admin, no Content Manager, no Fulfillment; no role upgrade/downgrade endpoint
-dashboard          : DOES NOT EXIST — no module, no metrics
-Gap                : no expanded roles, no POST /admin/users/:id/role, no REST products CRUD for dashboard, no dashboard stock bulk, no dashboard metrics
+dashboard          : EXISTS since 019 — `dashboard` module (no tables) with `GET /admin/products` + `POST /admin/products` + `PATCH /admin/products/:id/stock`, all `@Auth(Admin)`; metrics not built
+Gap (post-demo)    : expanded roles, POST /admin/users/:id/role, users CRUD, orders/carts R, bulk stock, all 5 dashboard metrics
 ```
 
-Manual E2E today uses GraphQL for products and `@Auth(Admin)` for order reads only; dashboard CRUD and metrics are not testable.
+Manual E2E covers `admin list → create → adjust → re-list + 409s + customer 403 matrix` via `test/admin-products.e2e-spec.ts` (4/4 live 2026-10-08); metrics remain untestable (post-demo).
 
 ## 20.1 Roles — expanded hierarchy and RBAC
 
@@ -1982,12 +1984,12 @@ All metrics support `?from&to&` date-range (default last 30d) and `period` group
 
 ```text
 [x] No UserRoles enum change (Customer/Admin only); no PATCH /admin/users/:id/role; no last-Admin guard; no tokenVersion++ on role change (all deferred to post-demo §§20.1–20.3)
-[x] GET /admin/orders (Admin, paginated, ?status=&?from=&?to=) + GET /admin/orders/:id (owner-or-Admin shape reused)
-[x] GET /admin/stock (Admin, ?lowThreshold=) read-only via InventoryService (no PATCH/bulk stock writes in demo)
-[x] GET /admin/dashboard/revenue?from=&to= returns {revenue, salesCount} via SUM+COUNT WHERE status='COMPLETED' BETWEEN (no ?period chart grouping in demo)
-[x] GET /admin/dashboard/low-stock?threshold=5 returns {lowCount, outCount, items} via available <= threshold FILTER
-[x] dashboard.module.ts (separate module, read-only aggregator) thin controllers, @Auth(Admin) (+ owner reads unchanged), service-only collaboration per AGENTS.md §2
-[x] Unit 5+ and integration 3+ and E2E 1 flow PASS (Admin revenue/low-stock reads; Customer 403 on admin routes)
+[x] GET /admin/products (Admin; search/status/minPrice/maxPrice/lowThreshold/page/limit, uncached, SQL-CASE status filtered before pagination so meta stays correct)
+[x] POST /admin/products (Admin; explicit field map into ProductsService.create, stock ?? 0, duplicate → 409 nothing created, 201 view with status)
+[x] PATCH /admin/products/:id/stock (Admin; delta-only ParseUUIDPipe, missing-row auto-create on restock, 409 below-reserved/zero unchanged, no cache invalidation per research D7)
+[x] Legacy POST /inventory/:productId/increase|decrease tightened to @Auth(Admin) (reads stay any-role)
+[x] dashboard.module.ts (separate module, owns no tables) thin controllers, @Auth(Admin), writes via RateLimitGuard 30/h-per-admin counters; read-only list join is the documented §20.5 aggregator exception
+[x] Dashboard 36 (27 unit + 9 live integration) + E2E 4/4 PASS (admin list→create→adjust→re-list; customer 403 ×5 paths) — see ADR-0015
 ```
 
 **Full scope (post-demo — §§20.1–20.8 retained as spec, 4–6 days):**
@@ -2836,7 +2838,8 @@ Deferred to Phase 16.x / Phase 17:
 
 [x] Payment (Simulation, Demo, Phase 19) — DONE 2026-10-08: `payment` module (no Stripe), Payment 1:1 Order, `POST /payments/intent → POST /payments/:id/confirm {success|declined}` → Order COMPLETED/FAILED, `POST /payments/:id/cancel`, owner-or-Admin reads — see Phase 19 + ADR-payment-simulation
 
-[ ] Dashboard, RBAC & Metrics (Future, Phase 20 before Testing) — separate dashboard.module, UserRoles {Customer/Admin/CoAdmin/ContentManager/FulfillmentStaff} with Admin full / CoAdmin limited role management + last Admin guard + tokenVersion++ , CRUD products (ContentManager/Admin), CRUD users, R orders/carts, CRUD stock (PATCH bulk FOR UPDATE, low-stock query), metrics: revenue/sales SUM, AOV NULLIF, low-stock FILTER, cart abandonment windowed join, API health Redis/pg counters — see Phase 20 spec
+[x] Dashboard, RBAC & Metrics (Demo slice, Phase 20) — DONE 2026-10-08: `dashboard` module, `GET /admin/products` + `POST /admin/products` + `PATCH /admin/products/:id/stock` (@Auth(Admin), throttled writes), legacy inventory writes tightened to Admin — see Phase 20 + ADR-0015
+[ ] Dashboard, RBAC & Metrics (Full scope, post-demo) — UserRoles {Customer/Admin/CoAdmin/ContentManager/FulfillmentStaff} + role management + last Admin guard, users CRUD, R orders/carts, bulk stock, all 5 metrics (revenue, AOV, low-stock, abandonment, health) — see Phase 20 §§20.1–20.5
 
 [ ] Async events
 [ ] Notification workers
@@ -3016,9 +3019,11 @@ DONE — 2026-09-22 → 2026-10-02 (Phase 7 sale, Phases 10/12, Phase 17 refresh
     ↓
 Order Cancellation (Phase 8) / Payment (Phase 19) — DONE 2026-10-06/08
     ↓
->>> CURRENT TARGET <<<
+Dashboard (Phase 20, demo slice)
     ↓
-Dashboard (Phase 20, demo-slim)
+DONE — 2026-10-08 (admin list/create/stock-adjust, ADR-0015, E2E 4/4 live)
+    ↓
+>>> CURRENT TARGET <<<
     ↓
 Testing (Phase 14)
     ↓
@@ -3027,12 +3032,13 @@ Documentation (Phase 15)
 
 ## Next Manual Task
 
-Phases 1–8, 10, 12, 17–19 are done and merged to `master`. Open tracks
-(maintainer picks the order — roadmap order is Dashboard → Testing):
+Phases 1–8, 10, 12, 17–20 (demo slice) are done; 019 lives on branch
+`019-admin-product-stock` (not yet merged to `master`). Open tracks
+(maintainer picks the order — roadmap order is Testing next):
 
 * **Phase 8 — Order Cancellation**: DONE 2026-10-06 (demo: cancel-before-sale only; post-sale refund deferred — see ADR-0014).
 * **Phase 19 — Payment (Simulation, Demo)**: DONE 2026-10-08 — separate `payment` module (no Stripe), Payment 1:1 Order, `POST /payments/intent → POST /payments/:id/confirm {success|declined}` → Order COMPLETED/FAILED (single tx) — see Phase 19 + ADR-payment-simulation.
-* **Phase 20 — Dashboard, RBAC & Metrics (Demo-slim)**: read-only `GET /admin/orders`, `GET /admin/stock` + 2 metrics (`revenue`, `low-stock`), Customer/Admin only (0.5–1 day; full 5-role/5-metric scope deferred).
+* **Phase 20 — Dashboard, RBAC & Metrics (Demo slice)**: DONE 2026-10-08 — `GET /admin/products` + `POST /admin/products` + `PATCH /admin/products/:id/stock` (@Auth(Admin)), legacy inventory writes tightened to Admin, E2E 4/4 live — see ADR-0015 (full 5-role/5-metric scope deferred post-demo).
 * **Phase 14 — Testing (Demo-min)**: happy-path E2E + 1 concurrency proof (0.5–1 day; full matrix deferred).
 * **Phase 9 + 13 close-out (combined 0.5 day):** invalidation fix + 2–3 indexes + EXPLAIN. Key redesign / singleflight deferred.
 * **Refactor track (`docs/REFACTOR_PLAN.md` S1–S7, 9.5–16 days): skipped for portfolio demo** — no visible demo output; revisit post-demo.

@@ -11,6 +11,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   HttpException,
   HttpStatus,
   Inject,
@@ -129,6 +130,7 @@ export class AuthController {
     status: 429,
     description: 'Too Many Requests — Retry-After: 3600',
   })
+  @HttpCode(200)
   /** Logs in with password credentials; sets the HttpOnly refresh cookie. */
   async login(
     @Request() req: ExpressRequest & { user: Partial<User> },

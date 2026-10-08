@@ -52,6 +52,10 @@ const DEFAULT_LIMITS: Record<string, { max: number; windowMs: number }> = {
   'POST /payments/intent': { max: 10, windowMs: 3600_000 },
   'POST /payments/:id/confirm': { max: 10, windowMs: 3600_000 },
   'POST /payments/:id/cancel': { max: 10, windowMs: 3600_000 },
+  // Phase 20 demo (019): admin product/stock writes — separate 30/h-per-admin
+  // counters with identical limits (NOT a shared bucket with products:mutation)
+  'POST /admin/products': { max: 30, windowMs: 3600_000 },
+  'PATCH /admin/products/:id/stock': { max: 30, windowMs: 3600_000 },
 };
 
 /** Single fixed-window bucket resolved for a request. */
@@ -447,6 +451,10 @@ export class RateLimitGuard implements CanActivate {
       'POST /payments/intent',
       'POST /payments/:id/confirm',
       'POST /payments/:id/cancel',
+      // Phase 20 demo (019): admin product/stock writes are user-dimensioned
+      // (req.user.sub, set by JwtGuard which runs before this guard)
+      'POST /admin/products',
+      'PATCH /admin/products/:id/stock',
     ]);
 
     if (perUserRoutes.has(routeKey)) {

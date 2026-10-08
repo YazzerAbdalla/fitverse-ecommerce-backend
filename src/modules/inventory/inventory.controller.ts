@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
+import { UserRoles } from '../users/enum/roles';
 import { InventoryService } from './inventory.service';
 import { IncreaseStockDto } from './dto/increase-stock.dto';
 import { DecreaseStockDto } from './dto/decrease-stock.dto';
@@ -60,7 +61,9 @@ export class InventoryController {
     };
   }
 
-  @Auth()
+  // Admin-only (019 T002b): any-role stock writes would bypass the
+  // dashboard's admin-only + throttled path (FR-009). Reads stay any-role.
+  @Auth(UserRoles.Admin)
   @Post(':productId/increase')
   async increaseStock(
     @Param('productId', ParseUUIDPipe) productId: string,
@@ -81,7 +84,8 @@ export class InventoryController {
     };
   }
 
-  @Auth()
+  // Admin-only (019 T002b): see increaseStock above. Reads stay any-role.
+  @Auth(UserRoles.Admin)
   @Post(':productId/decrease')
   async decreaseStock(
     @Param('productId', ParseUUIDPipe) productId: string,
