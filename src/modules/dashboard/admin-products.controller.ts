@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -14,9 +24,11 @@ import {
   AdminProductsService,
   AdminProductView,
   AdminProductListMeta,
+  AdminStockView,
   DEFAULT_LOW_THRESHOLD,
   mapStockStatus,
 } from './admin-products.service';
+import { AdjustStockDto } from './dto/adjust-stock.dto';
 import { AdminCreateProductDto } from './dto/admin-create-product.dto';
 import { AdminProductListQueryDto } from './dto/admin-product-list.query.dto';
 
@@ -101,6 +113,55 @@ export class AdminProductsController {
       slug: created.slug,
       description: created.description,
       price: Number(created.price),
+      stock,
+      reservedAmount,
+      available,
+      status: mapStockStatus(available, DEFAULT_LOW_THRESHOLD),
+    };
+  }
+
+  /**
+   * Adjusts on-hand stock by a signed delta for admins.
+   * Delegates to InventoryService.adjustStockByDelta (missing-row
+   * policy, guards, and 409 semantics all reused); this handler only
+   * maps the updated row to the inventory view.
+   *
+   * @param productId - Product UUID from the route (malformed is 400).
+   * @param dto - Validated signed delta (zero rejected by the DTO).
+   * @returns Updated inventory view with recalculated status.
+   * @throws ConflictException if the adjust would drop stock below
+   * zero or below reserved units (stock unchanged).
+   */
+  @Patch(':id/stock')
+  @UseGuards(RateLimitGuard)
+  @Auth(UserRoles.Admin)
+  @ApiOperation({ summary: 'Adjust stock by delta (admin)' })
+  @ApiResponse({ status: 200, description: 'Updated inventory view' })
+  @ApiResponse({ status: 400, description: 'Invalid delta or product id' })
+  @ApiResponse({ status: 401, description: 'Unauthenticated' })
+  @ApiResponse({ status: 403, description: 'Non-admin caller' })
+  @ApiResponse({ status: 404, description: 'Product or inventory not found' })
+  @ApiResponse({
+    status: 409,
+    description: 'Adjustment would drop stock below zero or reserved',
+  })
+  @ApiResponse({ status: 429, description: 'Rate limited (30/h per admin)' })
+  async adjustProductStock(
+    @Param('id', ParseUUIDPipe) productId: string,
+    @Body() dto: AdjustStockDto,
+  ): Promise<AdminStockView> {
+    // No cache invalidation here (research D7): no cached view embeds
+    // inventory quantities, so a stock-only adjust stales nothing.
+    const updated = await this.inventoryService.adjustStockByDelta(
+      productId,
+      dto.delta,
+    );
+    const stock = Number(updated.stock);
+    const reservedAmount = Number(updated.reservedAmount);
+    const available = Number(updated.available);
+    return {
+      id: updated.id,
+      productId: updated.productId,
       stock,
       reservedAmount,
       available,

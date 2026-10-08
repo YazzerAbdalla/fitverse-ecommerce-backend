@@ -20,6 +20,16 @@ export interface AdminProductView {
   status: StockStatus;
 }
 
+/** Updated inventory view returned by the stock-adjust endpoint. */
+export interface AdminStockView {
+  id: string;
+  productId: string;
+  stock: number;
+  reservedAmount: number;
+  available: number;
+  status: StockStatus;
+}
+
 /** Pagination envelope reused from the repo listing shape. */
 export interface AdminProductListMeta {
   totalItems: number;

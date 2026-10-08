@@ -92,13 +92,13 @@
 
 > NOTE: Write these tests FIRST, ensure they FAIL before implementation (T016–T017)
 
-- [ ] T016 [P] [US3] Unit tests for adjust DTO (`delta ≠ 0`, integer) + `409` below-reserved/below-zero matrix + missing-row policy (delta>0 auto-creates via `createForProduct`, delta<0 → 404) (mocked `InventoryService`) in `src/modules/dashboard/admin-products-stock.spec.ts`
-- [ ] T017 [P] [US3] Integration tests on real PG: adjust up/down, `409` leaves stock unchanged, concurrent same-product adjusts assert guards intact + no `reservedAmount` corruption (both 200; do NOT assert an exact final stock — lock-free delegates are last-writer-wins by design, see research D3) in `src/modules/dashboard/test/admin-products-stock.integration.spec.ts`
+- [X] T016 [P] [US3] Unit tests for adjust DTO (`delta ≠ 0`, integer) + `409` below-reserved/below-zero matrix + missing-row policy (delta>0 auto-creates via `createForProduct`, delta<0 → 404) (mocked `InventoryService`) in `src/modules/dashboard/admin-products-stock.spec.ts` (5/5 green)
+- [X] T017 [P] [US3] Integration tests on real PG: adjust up/down, `409` leaves stock unchanged, concurrent same-product adjusts assert guards intact + no `reservedAmount` corruption (both 200; do NOT assert an exact final stock — lock-free delegates are last-writer-wins by design, see research D3) in `src/modules/dashboard/test/admin-products-stock.integration.spec.ts` (skips cleanly without PG; live proof deferred to CI)
 
 ### Implementation for User Story 3
 
-- [ ] T018 [P] [US3] Create adjust DTO (`delta: int, @NotEquals(0)`) in `src/modules/dashboard/dto/adjust-stock.dto.ts`
-- [ ] T019 [US3] Implement `PATCH /admin/products/:id/stock` thin handler (`:id` via `ParseUUIDPipe`, missing-row policy: delta>0 auto-creates via `createForProduct` then adjusts, delta<0 on missing row → 404) delegating to `adjustStockByDelta` + post-commit list-cache invalidation fail-open (`TODO(CACHE-1a)`, never inside a tx; `//` intent comment on the guard) (`@Auth(Admin)`, separate 30/h counter with identical limits; Swagger 200/400/401/403/404/409/429) in `src/modules/dashboard/admin-products.controller.ts` (depends on T018 and Phase 2)
+- [X] T018 [P] [US3] Create adjust DTO (`delta: int, @NotEquals(0)`) in `src/modules/dashboard/dto/adjust-stock.dto.ts`
+- [X] T019 [US3] Implement `PATCH /admin/products/:id/stock` thin handler (`:id` via `ParseUUIDPipe`, missing-row policy: delta>0 auto-creates via `createForProduct` then adjusts, delta<0 on missing row → 404) delegating to `adjustStockByDelta` with NO cache invalidation (proven unnecessary in research D7: no cached view embeds inventory quantities; `//` comment citing D7 at the call site) (`@Auth(Admin)` + `RateLimitGuard` outermost, separate 30/h counter with identical limits; Swagger 200/400/401/403/404/409/429) in `src/modules/dashboard/admin-products.controller.ts` (depends on T018 and Phase 2) — returns `AdminStockView` inventory shape
 
 **Checkpoint**: All user stories independently functional (quickstart §4–§5 green)
 
