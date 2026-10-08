@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { ProductsModule } from '../products/products.module';
+import { AdminProductsController } from './admin-products.controller';
+import { AdminProductsService } from './admin-products.service';
 
 /**
  * This module exposes the admin/operational dashboard surface.
@@ -11,7 +13,8 @@ import { ProductsModule } from '../products/products.module';
  */
 @Module({
   imports: [ProductsModule, InventoryModule, AuthModule],
-  controllers: [],
-  providers: [],
+  controllers: [AdminProductsController],
+  providers: [AdminProductsService],
+  exports: [AdminProductsService],
 })
 export class DashboardModule {}

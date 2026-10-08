@@ -5,7 +5,7 @@
 
 ## D1 — New `dashboard` module for the admin surface
 
-- **Decision**: Create `src/modules/dashboard/` with `dashboard.module.ts` (imports `ProductsModule`, `InventoryModule`, `AuthModule`), a thin `admin-products.controller.ts`, and `admin-products.service.ts` for list math. Controllers parse + delegate; all persistence goes through `ProductsService` / `InventoryService`.
+- **Decision**: Create `src/modules/dashboard/` with `dashboard.module.ts` (imports `ProductsModule`, `InventoryModule`, `AuthModule`), a thin `admin-products.controller.ts`, and `admin-products.service.ts` for list math. Controllers parse + delegate; all **writes** go through `ProductsService` / `InventoryService`. The single exception is the admin **list read**: it uses the shared `DataSource` for one read-only join (LEFT JOIN Product→Inventory, no N+1) per the plan §20.5 read-only-aggregator allowance — never `@InjectRepository` of another module's entity, never a write, never inside a tx. This keeps the SQL `CASE` status filter + filter-before-paginate (B1) in the dashboard instead of leaking admin presentation logic into `ProductsService`.
 - **Rationale**: `docs/plan.md` §20.5 mandates a separate module for the admin/operational surface; keeps customer GraphQL (`products.resolver.ts`) and admin REST in separate bounded concerns while sharing one service truth.
 - **Alternatives considered**: Extending `products` module with a REST controller — rejected (mixes customer browse + admin write concerns in one module, harder to split later); generic `admin` module — rejected (`dashboard` is the plan-mandated name and future metrics home).
 
