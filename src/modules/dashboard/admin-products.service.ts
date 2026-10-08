@@ -29,7 +29,8 @@ export interface AdminProductListMeta {
   currentPage: number;
 }
 
-const DEFAULT_LOW_THRESHOLD = 5;
+/** Default low-stock threshold (request-overridable, never persisted). */
+export const DEFAULT_LOW_THRESHOLD = 5;
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;

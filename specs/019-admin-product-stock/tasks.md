@@ -70,13 +70,13 @@
 
 > NOTE: Write these tests FIRST, ensure they FAIL before implementation (T012–T013)
 
-- [ ] T012 [P] [US2] Unit tests for create DTO validation + duplicate/negative rejection + explicit REST-DTO→`CreateProductInput` field mapping (mocked `ProductsService`, no DTO pass-through) in `src/modules/dashboard/admin-products-create.spec.ts`
-- [ ] T013 [P] [US2] Integration test for create→list round-trip on real PG (explicit stock, omitted stock ⇒ 0/out-of-stock, duplicate ⇒ 409) in `src/modules/dashboard/test/admin-products-create.integration.spec.ts`
+- [X] T012 [P] [US2] Unit tests for create DTO validation + duplicate/negative rejection + explicit REST-DTO→`CreateProductInput` field mapping (mocked `ProductsService`, no DTO pass-through) in `src/modules/dashboard/admin-products-create.spec.ts` (6/6 green)
+- [X] T013 [P] [US2] Integration test for create→list round-trip on real PG (explicit stock, omitted stock ⇒ 0/out-of-stock, duplicate ⇒ 409) in `src/modules/dashboard/test/admin-products-create.integration.spec.ts` (skips cleanly without PG; live proof deferred to CI)
 
 ### Implementation for User Story 2
 
-- [ ] T014 [P] [US2] Create product DTO (`name/description/price/stock?`, stock optional `>= 0`) in `src/modules/dashboard/dto/admin-create-product.dto.ts`
-- [ ] T015 [US2] Implement `POST /admin/products` thin handler with explicit REST-DTO→`CreateProductInput` field map + `stock` forwarded separately (`stock ?? 0` — `CreateProductInput.stock` is typed required but the service tolerates omission; never pass the REST DTO straight through — `slug` is server-derived) delegating to `ProductsService.create` (`@Auth(Admin)`, separate 30/h counter with identical limits — not a shared bucket, see research D5; Swagger 201/400/401/403/409/429) in `src/modules/dashboard/admin-products.controller.ts` (depends on T014)
+- [X] T014 [P] [US2] Create product DTO (`name/description/price/stock?`, stock optional `>= 0`) in `src/modules/dashboard/dto/admin-create-product.dto.ts`
+- [X] T015 [US2] Implement `POST /admin/products` thin handler with explicit REST-DTO→`CreateProductInput` field map + `stock` forwarded separately (`stock ?? 0` — `CreateProductInput.stock` is typed required but the service tolerates omission; never pass the REST DTO straight through — `slug` is server-derived) delegating to `ProductsService.create` (`@Auth(Admin)` + `RateLimitGuard` outermost, separate 30/h counter with identical limits — not a shared bucket, see research D5; Swagger 201/400/401/403/409/429) in `src/modules/dashboard/admin-products.controller.ts` (depends on T014) — 201 view composed via `InventoryService.getInventory` + `mapStockStatus(available, 5)`
 
 **Checkpoint**: US1 AND US2 both work independently (quickstart §3 green)
 

@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -6,12 +6,18 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
+import { RateLimitGuard } from '../auth/guards/rate-limit.guard';
 import { UserRoles } from '../users/enum/roles';
+import { InventoryService } from '../inventory/inventory.service';
+import { ProductsService } from '../products/products.service';
 import {
   AdminProductsService,
   AdminProductView,
   AdminProductListMeta,
+  DEFAULT_LOW_THRESHOLD,
+  mapStockStatus,
 } from './admin-products.service';
+import { AdminCreateProductDto } from './dto/admin-create-product.dto';
 import { AdminProductListQueryDto } from './dto/admin-product-list.query.dto';
 
 /**
@@ -25,7 +31,11 @@ import { AdminProductListQueryDto } from './dto/admin-product-list.query.dto';
 @ApiBearerAuth()
 @Controller('admin/products')
 export class AdminProductsController {
-  constructor(private readonly adminProductsService: AdminProductsService) {}
+  constructor(
+    private readonly adminProductsService: AdminProductsService,
+    private readonly productsService: ProductsService,
+    private readonly inventoryService: InventoryService,
+  ) {}
 
   /**
    * Lists products with derived stock status for admins.
@@ -48,5 +58,53 @@ export class AdminProductsController {
     @Query() query: AdminProductListQueryDto,
   ): Promise<{ data: AdminProductView[]; meta: AdminProductListMeta }> {
     return this.adminProductsService.listAdminProducts(query);
+  }
+
+  /**
+   * Creates a product with optional initial stock for admins.
+   * Delegates persistence to ProductsService.create (slug, duplicate
+   * 409, inventory row, cache invalidation all reused); this handler
+   * only maps the REST body field-by-field and composes the 201 view.
+   *
+   * @param dto - Validated creation body (stock omitted defaults to zero).
+   * @returns Created product view with derived availability and status.
+   * @throws ConflictException on duplicate name/slug (nothing created).
+   */
+  @Post()
+  @UseGuards(RateLimitGuard)
+  @Auth(UserRoles.Admin)
+  @ApiOperation({ summary: 'Create product with initial stock (admin)' })
+  @ApiResponse({ status: 201, description: 'Created product view' })
+  @ApiResponse({ status: 400, description: 'Validation failure' })
+  @ApiResponse({ status: 401, description: 'Unauthenticated' })
+  @ApiResponse({ status: 403, description: 'Non-admin caller' })
+  @ApiResponse({ status: 409, description: 'Duplicate name/slug' })
+  @ApiResponse({ status: 429, description: 'Rate limited (30/h per admin)' })
+  async createAdminProduct(
+    @Body() dto: AdminCreateProductDto,
+  ): Promise<AdminProductView> {
+    // Explicit field map: never pass the REST DTO straight through —
+    // slug is server-derived inside ProductsService.create.
+    const created = await this.productsService.create({
+      name: dto.name,
+      description: dto.description,
+      price: dto.price,
+      stock: dto.stock ?? 0,
+    });
+    const inventory = await this.inventoryService.getInventory(created.id);
+    const stock = Number(inventory.stock);
+    const reservedAmount = Number(inventory.reservedAmount);
+    const available = Number(inventory.available);
+    return {
+      id: created.id,
+      name: created.name,
+      slug: created.slug,
+      description: created.description,
+      price: Number(created.price),
+      stock,
+      reservedAmount,
+      available,
+      status: mapStockStatus(available, DEFAULT_LOW_THRESHOLD),
+    };
   }
 }
