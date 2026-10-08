@@ -108,6 +108,6 @@ tests (spec-adjacent):
 | # | Finding | Resolution |
 |---|---------|------------|
 | 1 | T019's required stock-path cache invalidation is unnecessary: customer `findAll`/`findOne` cache plain `Product` rows (no stock field/join) and the admin list is uncached. | D7 + T019 rewritten to require **no** invalidation (with `//` cite); widening the private invalidator API for zero benefit rejected. |
-| 2 | `POST /auth/login` returns **201**, not 200 (no `@HttpCode`, Nest POST default). | E2E expects 201; `payment.e2e-spec`'s `.expect(200)` on login is stale (pre-existing, out of scope, noted in ADR-0015). |
+| 2 | `POST /auth/login` returned **201** at implementation time (no `@HttpCode`, Nest POST default). | E2E first expected 201; `553fa3e` later set `@HttpCode(200)` on login, E2E updated to match (200) and re-proven green. |
 | 3 | `User` entity is a **default export only** (`export default class User`); named imports resolve to `undefined` and surface as `Entity metadata for X was not found` at DataSource init. | All three dashboard integration specs use the default import (same as `cancel-fixtures.ts`). |
 | 4 | `order-cancel-expiry.race.spec.ts` fails in this environment (`relation "reservation" does not exist` in its own test DB). | Proven unrelated to 019 (fails identically with 019 changes stashed); recorded in T025, not fixed here. |

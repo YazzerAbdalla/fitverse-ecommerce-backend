@@ -40,7 +40,7 @@ describe('AdminProducts E2E - list → create → adjust (supertest)', () => {
     const loginResponse = await request(app.getHttpServer())
       .post('/auth/login')
       .send({ email, password: 'Password123!' })
-      .expect(201);
+      .expect(200);
     const body = loginResponse.body as { accessToken?: string };
     expect(body.accessToken?.length).toBeGreaterThan(0);
     return body.accessToken as string;
@@ -77,7 +77,7 @@ describe('AdminProducts E2E - list → create → adjust (supertest)', () => {
       const relogin = await request(app.getHttpServer())
         .post('/auth/login')
         .send({ email: adminEmail, password: 'Password123!' })
-        .expect(201);
+        .expect(200);
       adminJwt = (relogin.body as { accessToken?: string }).accessToken ?? '';
       expect(adminJwt.length).toBeGreaterThan(0);
     } catch (setupError: unknown) {

@@ -76,6 +76,7 @@ could become a stock authority.
   out-of-stock, dupe-409-single-row), stock 3/3 (up/down, 409-unchanged,
   `Promise.all` guards-intact).
 - E2E `test/admin-products.e2e-spec.ts` 4/4 live (create→list→adjust→
-  relist, 409s, customer 403 ×3, legacy 403 ×2). Incidental find: login
-  returns 201 (no `@HttpCode`), not 200 — payment.e2e-spec's `.expect(200)`
-  on login is stale (pre-existing, out of scope).
+  relist, 409s, customer 403 ×3, legacy 403 ×2). Note: login returned 201
+  (no `@HttpCode`) at implementation time, so the E2E first expected 201;
+  `553fa3e` later set `@HttpCode(200)` on login and the E2E was updated to
+  match (200) and re-proven green.
