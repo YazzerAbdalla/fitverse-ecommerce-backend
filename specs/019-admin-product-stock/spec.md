@@ -86,11 +86,12 @@ No admin user-management capability ships in the demo. There is no role upgrade/
 
 ### Edge Cases
 
-- What happens when two admins update the same product's stock at the same time? Exactly one update wins per write; the loser sees current state on re-read and no reserved units are lost or double-counted.
-- How does the system handle a product whose inventory row is missing? The product still lists as `out-of-stock` with zero available quantity — no separate flag, no error.
+- What happens when two admins update the same product's stock at the same time? Last-writer-wins per write (lock-free delegates, REFACTOR_PLAN B-3); the loser sees current state on re-read and no reserved units are lost or double-counted (guards re-checked per write; tests assert guards-intact, never an exact final stock).
+- How does the system handle a product whose inventory row is missing? The product still lists as `out-of-stock` with zero available quantity — no separate flag, no error. A positive stock adjustment auto-creates the row (`createForProduct` then increase); a negative adjustment on a missing row returns `404`.
 - What happens when a search/filter combination matches nothing? An empty list with correct pagination totals is returned (not an error).
 - What happens when stock is updated while reservations hold units? Available quantity and status recalculate from the new stock minus unchanged reserved units; held units are never released by a stock edit.
-- How does the system handle invalid pagination (page 0, huge limit)? Request is rejected or safely clamped with documented bounds.
+- How does the system handle invalid pagination (page 0, huge limit)? Request is rejected or safely clamped with documented bounds (`page >= 1`, `1 <= limit <= 100`).
+- How are search wildcards handled? `%`, `_`, `\` in `search` are escaped before `ILIKE` (a search for `%` matches a literal percent, not everything); `search` is capped at 100 chars.
 
 ## Requirements *(mandatory)*
 
@@ -104,10 +105,10 @@ No admin user-management capability ships in the demo. There is no role upgrade/
 - **FR-006 (DEMO)**: System MUST reject product creation with a duplicate name, negative price, or negative stock, creating nothing.
 - **FR-007 (DEMO)**: System MUST let an admin update stock for an existing product as a signed adjustment (delta: positive to add, negative to subtract).
 - **FR-008 (DEMO)**: System MUST reject any stock update that would leave on-hand stock negative or below currently reserved units, leaving stock unchanged.
-- **FR-009 (DEMO)**: System MUST restrict all demo-scope admin capabilities (product list, product creation, stock update) to the admin role; non-admin callers MUST be denied.
+- **FR-009 (DEMO)**: System MUST restrict all stock-mutation paths to the admin role — the new dashboard routes (product list, product creation, stock update) AND the legacy `POST /inventory/:productId/increase|decrease` (tightened to `@Auth(Admin)` in this spec, T002b); non-admin callers MUST be denied on every path. Reads (`GET /inventory/:productId`, `/availability`) stay any-role.
 - **FR-010 (DEMO)**: System MUST NOT expose any user/role management capability in demo scope (no role changes, no new roles, no admin user CRUD).
 - **FR-011 (DEMO)**: System MUST re-validate all client-supplied quantities and prices on the server and never trust client-computed availability or status.
-- **FR-013 (DEMO)**: System MUST apply the existing product-mutation rate limit to product creation and stock updates (excess requests denied without touching inventory).
+- **FR-013 (DEMO)**: System MUST apply the existing product-mutation rate limit numbers (30/h per admin) to product creation and stock updates as separate per-route counters (not a shared bucket; excess requests denied without touching inventory). The admin list read is explicitly unthrottled (recorded exemption, consistent with existing `GET` policy).
 - **FR-012 (POST-DEMO, explicitly deferred)**: Full Phase 20 RBAC (new roles, role upgrade/downgrade, last-admin guard), order/cart admin reads, bulk stock writes, and dashboard metrics (revenue, average order value, abandonment, API health) MUST remain out of demo scope.
 
 ### Key Entities

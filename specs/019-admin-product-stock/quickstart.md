@@ -31,7 +31,7 @@ curl -s -X POST http://localhost:3000/admin/products \
   -d '{"name":"Demo Widget","description":"dup","price":150}' | jq .statusCode  # 409
 ```
 
-## 4. Adjust stock (delta-only)
+## 4. Adjust stock (delta-only; positive on a missing row auto-creates it, negative on a missing row → 404)
 
 ```bash
 PID="<product id>"
@@ -40,7 +40,7 @@ curl -s -X PATCH http://localhost:3000/admin/products/$PID/stock \
   -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
   -d '{"delta":10}' | jq '{stock, available, status}'
 # Set absolute 50 by diffing: read stock first, then send (50 - stock)
-STOCK=$(curl -s http://localhost:3000/admin/products?search="Demo%20Widget" -H "Authorization: Bearer $ADMIN_JWT" | jq '.data[0].stock')
+STOCK=$(curl -s "http://localhost:3000/admin/products?search=Demo%20Widget" -H "Authorization: Bearer $ADMIN_JWT" | jq '.data[0].stock')
 curl -s -X PATCH http://localhost:3000/admin/products/$PID/stock \
   -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
   -d "{\"delta\":$((50 - STOCK))}" | jq '{stock, available, status}'

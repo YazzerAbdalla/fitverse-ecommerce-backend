@@ -26,7 +26,7 @@ Relationships: `1:1` → `Inventory` (inverse, read-only); `1:N` → `CartItem`,
 | `reservedAmount` | int | `>= 0`, `<= stock`; **never written by admin paths** (only checkout/lifecycle flows mutate it) |
 | `available` | derived | `stock − reservedAmount`, getter only, never persisted |
 
-New behavior (code only): `adjustStockByDelta(productId, delta)` — `delta > 0` → stock increases; `delta < 0` → stock decreases subject to the two guards above; `delta = 0` rejected before the service.
+New behavior (code only): `adjustStockByDelta(productId, delta)` (JSDoc `@param/@returns/@throws`; thin sign-dispatcher, guards stay in `increase/decreaseStock`) — `delta > 0` → stock increases (auto-creates the row via `createForProduct(productId, 0)` first when missing); `delta < 0` → stock decreases subject to the two guards above (`404` when the row is missing); `delta = 0` rejected before the service.
 
 ## AdminProductView (derived read model — not a table)
 
@@ -47,8 +47,8 @@ available <= 0                          → out-of-stock
 available > lowThreshold                → in-stock
 ```
 
-- `lowThreshold`: per-request query param, default `5`, validated `0..1000`. Not persisted.
-- Missing `Inventory` row ⇒ `available = 0` ⇒ `out-of-stock` (clarification Q3/B).
+- `lowThreshold`: per-request query param, default `5`, validated `0..1000`. Not persisted. `0` ⇒ `low-stock` unreachable (`0 < available <= 0` is empty — pinned by test).
+- Missing `Inventory` row ⇒ `available = 0` ⇒ `out-of-stock` (clarification Q3/B) via `COALESCE`; the single SQL `CASE` expression (research D4) is the filter path, the TS mapper is the response path — tested as one behavior (T007/T008).
 
 ## Actors
 
@@ -56,6 +56,6 @@ available > lowThreshold                → in-stock
 
 ## Validation summary (server-side, all re-checked in service)
 
-- Create: name/description non-empty + lengths, `price` int `>= 0`, `stock` optional int `>= 0` (omitted ⇒ `0`); duplicate name/slug ⇒ `409`, nothing created.
-- List: `page >= 1`, `1 <= limit <= 100`, `lowThreshold 0..1000`, `minPrice/maxPrice >= 0` (`minPrice <= maxPrice` else `400`), `status ∈ {in-stock, low-stock, out-of-stock}`.
-- Adjust: `delta` int `≠ 0`; resulting `stock >= 0` and `>= reservedAmount` else `409`, stock unchanged.
+- Create: name/description non-empty + lengths, `price` int `>= 0` (DTO/service-only — no DB `@Check`, known gap per research D2), `stock` optional int `>= 0` (omitted ⇒ `0`); duplicate name/slug ⇒ `409`, nothing created. REST DTO maps field-by-field onto `CreateProductInput` (never pass-through; `slug` server-derived).
+- List: `search` `@MaxLength(100)` with `%_\\` escaping, `page >= 1`, `1 <= limit <= 100` (extend shared pagination DTO), `lowThreshold 0..1000`, `minPrice/maxPrice >= 0` (`minPrice <= maxPrice` enforced in service else `400`), `status ∈ {in-stock, low-stock, out-of-stock}`. Response via explicit `toAdminProductView()` allow-list (never spread entities).
+- Adjust: `:id` via `ParseUUIDPipe`, `delta` int `≠ 0`; resulting `stock >= 0` and `>= reservedAmount` else `409`, stock unchanged; invalidation post-commit fail-open (`TODO(CACHE-1a)`).

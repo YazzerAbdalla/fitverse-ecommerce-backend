@@ -6,7 +6,7 @@
 
 ## Summary
 
-Admin-only product operations for the Phase 20 demo: a paginated admin product list with search/filters and auto-calculated stock status, product creation with optional initial stock, and delta-only stock adjustments. Delivered as a thin new `dashboard` module that aggregates the existing `ProductsService` and `InventoryService` (service-only collaboration, no new tables, no migration, no role changes). Stock status is derived on read (`available = stock − reservedAmount`, threshold default 5 overridable per request); missing inventory rows list as `out-of-stock` with zero quantity. Writes reuse the existing `products:mutation` 30/h throttle quota.
+Admin-only product operations for the Phase 20 demo: a paginated admin product list with search/filters and auto-calculated stock status, product creation with optional initial stock, and delta-only stock adjustments. Delivered as a thin new `dashboard` module that aggregates the existing `ProductsService` and `InventoryService` (service-only collaboration, one-way edges, no new tables, no migration, no role changes). Stock status is derived on read via a single SQL `CASE` + shared TS mapper (`available = stock − reservedAmount`, threshold default 5 overridable per request, filter applied in SQL before pagination); missing inventory rows list as `out-of-stock` with zero quantity (positive stock-adjust auto-creates the row). Writes use separate 30/h-per-admin counters with identical limits (not a shared bucket); legacy `POST /inventory/:productId/increase|decrease` are tightened to `@Auth(Admin)` in this spec (T002b). Admin list reads bypass the filter-blind `products:list:*` cache.
 
 ## Technical Context
 
@@ -29,7 +29,7 @@ Admin-only product operations for the Phase 20 demo: a paginated admin product l
 | I | PostgreSQL source of truth | **Pass** — all reads/writes go through `ProductsService`/`InventoryService` to PG. Redis stays cache (product list) + throttle counters only; status math never reads cache. |
 | II | Modular monolith, service-only collaboration | **Pass** — new `dashboard` module imports `ProductsModule`, `InventoryModule`, `AuthModule` and calls only exported services. No `@InjectRepository` of another module's entity. |
 | III | Inventory separate domain, `available` derived | **Pass** — no `Product.stock`; `available = stock − reservedAmount` computed on read; status label derived, never stored. |
-| IV | DB-level concurrency, no overselling | **Pass with note** — customer oversell path (checkout `FOR UPDATE`) untouched. Admin delta writes reuse existing lock-free `increase/decreaseStock`; concurrent same-product admin edits are last-writer-wins (proven by test). Atomic admin helper is tracked post-demo (REFACTOR_PLAN B-3), not demo scope. |
+| IV | DB-level concurrency, no overselling | **Pass with note** — customer oversell path (checkout `FOR UPDATE`) untouched. Admin delta writes reuse existing lock-free `increase/decreaseStock`; concurrent same-product admin edits are last-writer-wins by design (tests assert guards-intact + no `reservedAmount` corruption, never an exact final stock). Atomic admin helper is tracked post-demo (REFACTOR_PLAN B-3), not demo scope. |
 | V | Thin controllers, services own logic | **Pass** — dashboard controllers parse + delegate; listing math + validation live in services. |
 | VI | Spec-driven, no future phases | **Pass** — spec + 5 clarifications done; roles/metrics/bulk explicitly deferred (FR-012). |
 | VII | Mandatory DB-backed tests | **Pass** — plan includes unit + real-PG integration + E2E (see quickstart). |
@@ -80,7 +80,7 @@ tests (spec-adjacent):
 └── e2e (supertest): admin flow + customer 403 matrix
 ```
 
-**Structure Decision**: New `dashboard` module per `docs/plan.md` §20.5 (separate module, service-aggregating). Demo populates it with only the three product/stock capabilities; metrics and order/cart reads arrive post-demo without restructuring.
+**Structure Decision**: New `dashboard` module per `docs/plan.md` §20.5 (separate module, service-aggregating). Demo populates it with only the three product/stock capabilities; metrics and order/cart reads arrive post-demo without restructuring. Edges are one-way only (dashboard → Products/Inventory/Auth; nothing imports Dashboard; no `@InjectRepository` of another module's entity). Review deltas applied 2026-10-08: SQL-CASE status + filter-before-paginate (B1), legacy `@Auth(Admin)` tightening T002b (B2), TDD-ID + phase-gating fixes (B3/S5), missing-row auto-create policy (B4), throttle-counter semantics + read exemption + cache containment (S1/S2), input hardening + mapper + pagination-reuse notes (S3–S5/clean-code).
 
 ## Complexity Tracking
 

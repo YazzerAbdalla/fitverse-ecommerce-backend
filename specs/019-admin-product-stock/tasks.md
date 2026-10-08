@@ -16,23 +16,24 @@
 
 **Purpose**: Dashboard module shell + shared throttle keys so story work has a place to land
 
-- [ ] T001 Create dashboard module shell per plan.md structure in `src/modules/dashboard/dashboard.module.ts` (imports ProductsModule, InventoryModule, AuthModule) and register DashboardModule in `src/app.module.ts`
-- [ ] T002 [P] Add `POST /admin/products` and `PATCH /admin/products/:id/stock` route keys (30/h per admin, same quota family) in `src/modules/auth/guards/rate-limit.guard.ts`
-- [ ] T003 Verify setup compiles via `npm run build` (scope: `src/modules/dashboard/`, `src/app.module.ts`, `src/modules/auth/guards/rate-limit.guard.ts`)
+- [ ] T001 Create dashboard module shell per plan.md structure in `src/modules/dashboard/dashboard.module.ts` (imports ProductsModule, InventoryModule, AuthModule — one-way edges only, nothing imports Dashboard, no `@InjectRepository` of another module's entity) and register DashboardModule in `src/app.module.ts`
+- [ ] T002 [P] Add `POST /admin/products` and `PATCH /admin/products/:id/stock` route keys (separate 30/h-per-admin counters with identical limits — NOT a shared bucket with `products:mutation`) in `src/modules/auth/guards/rate-limit.guard.ts`
+- [ ] T002b Tighten legacy `POST /inventory/:productId/increase|decrease` from `@Auth()` to `@Auth(Admin)` in `src/modules/inventory/inventory.controller.ts` (closes the any-role stock-write bypass behind FR-009; demo admin writes go through dashboard routes, legacy stays as admin-only compat) + regression test (customer 403, admin 200)
+- [ ] T003 Verify setup compiles via `npm run build` (scope: `src/modules/dashboard/`, `src/app.module.ts`, `src/modules/auth/guards/rate-limit.guard.ts`, `src/modules/inventory/inventory.controller.ts`)
 
 ---
 
-## Phase 2: Foundational (Blocking Prerequisites)
+## Phase 2: Foundational (Blocking Prerequisites for US3 only)
 
-**Purpose**: Shared stock-adjust primitive every write story builds on (US3 directly; US2's create path is independent but shares the module)
+**Purpose**: Shared stock-adjust primitive US3 builds on (`adjustStockByDelta` + delegation matrix)
 
-**⚠️ CRITICAL**: No user story work can begin until this phase is complete
+**⚠️ CRITICAL**: US3 work cannot begin until this phase is complete. US1 (list) and US2 (create via `ProductsService.create`) do NOT use `adjustStockByDelta` and may proceed in parallel with — or before — this phase once Setup (Phase 1) is done.
 
-- [ ] T004 Unit tests for `adjustStockByDelta` delegation matrix (positive→increase, negative→decrease, guards preserved) in `src/modules/inventory/inventory.service.spec.ts` (write first, fail before T005)
-- [ ] T005 Implement `InventoryService.adjustStockByDelta` with JSDoc in `src/modules/inventory/inventory.service.ts` (delegates to `increaseStock`/`decreaseStock`, zero rejected by DTO)
+- [ ] T004 Unit tests for `adjustStockByDelta` delegation matrix (positive→increase, negative→decrease, delegates own no guard logic; missing-row: delta>0 auto-creates, delta<0 → 404) in `src/modules/inventory/inventory.service.spec.ts` (write first, fail before T005)
+- [ ] T005 Implement `InventoryService.adjustStockByDelta` with full JSDoc (`@param/@returns/@throws`, `//` intent on the sign dispatch) in `src/modules/inventory/inventory.service.ts` (thin sign-dispatcher to `increaseStock`/`decreaseStock`, zero rejected by DTO)
 - [ ] T006 Verify foundation via `npm run build` and `npm run test -- --runInBand src/modules/inventory` (scope: `src/modules/inventory/inventory.service.ts`, `src/modules/inventory/inventory.service.spec.ts`)
 
-**Checkpoint**: Foundation ready — user story implementation can now begin in parallel
+**Checkpoint**: Foundation ready — US3 implementation can now begin (US1/US2 were never blocked on it)
 
 ---
 
@@ -44,16 +45,16 @@
 
 ### Tests for User Story 1 ⚠️
 
-> NOTE: Write these tests FIRST, ensure they FAIL before implementation (T009–T011)
+> NOTE: Write these tests FIRST, ensure they FAIL before implementation (T007–T008)
 
-- [ ] T007 [P] [US1] Unit tests for list math (status matrix, threshold override, missing-inventory→out-of-stock, combined filters, pagination meta) in `src/modules/dashboard/admin-products.service.spec.ts`
-- [ ] T008 [P] [US1] Integration test for admin list round-trip on real PG (seeded products + threshold/filter variants) in `src/modules/dashboard/test/admin-products.integration.spec.ts`
+- [ ] T007 [P] [US1] Unit tests for list math (status matrix incl. `lowThreshold=0` edge, threshold override, missing-inventory→out-of-stock, combined filters, `status`-filter + pagination `totalItems` correctness, LIKE-wildcard escaping) in `src/modules/dashboard/admin-products.service.spec.ts`
+- [ ] T008 [P] [US1] Integration test for admin list round-trip on real PG (seeded products + threshold/filter variants + `status`-filtered page `totalItems` assertion) in `src/modules/dashboard/test/admin-products.integration.spec.ts`
 
 ### Implementation for User Story 1
 
-- [ ] T009 [P] [US1] Create list query DTO (`search/status/minPrice/maxPrice/lowThreshold/page/limit` with bounds) in `src/modules/dashboard/dto/admin-product-list.query.dto.ts`
-- [ ] T010 [US1] Implement `listAdminProducts` (single join query, derived `available`/`status`, envelope `{data, meta}`) with JSDoc in `src/modules/dashboard/admin-products.service.ts` (depends on T009)
-- [ ] T011 [US1] Implement `GET /admin/products` thin handler (`@Auth(Admin)`, Swagger `@ApiResponse` 200/400/401/403) in `src/modules/dashboard/admin-products.controller.ts` (depends on T010)
+- [ ] T009 [P] [US1] Create REST list query DTO with own bounds (`page >= 1` default 1, `1 <= limit <= 100` default 20 — do NOT extend GraphQL `PaginationArgs` (`products/dto/pagination.dto.ts`, wrong transport, no upper bound); align with the CC-B shared `PaginationQueryDto` when it lands; add `search` `@MaxLength(100)`, `status` enum, `minPrice/maxPrice >= 0`, `lowThreshold` `@IsInt @Min(0) @Max(1000)` default 5) in `src/modules/dashboard/dto/admin-product-list.query.dto.ts`
+- [ ] T010 [US1] Implement `listAdminProducts` (single join query with SQL `CASE` status expression shared with the TS mapper, derived `available`/`status`, `status`-filter applied in SQL before pagination so `meta.totalItems` stays correct, explicit `toAdminProductView()` allow-list mapper — never spread entity/join rows, admin list UNCACHED bypassing `products:list:*`, LIKE wildcards `%_\\` escaped + search `@MaxLength(100)`, `minPrice <= maxPrice` service guard → 400) with JSDoc in `src/modules/dashboard/admin-products.service.ts` (depends on T009)
+- [ ] T011 [US1] Implement `GET /admin/products` thin handler (`@Auth(Admin)` — `RateLimitGuard` outermost, unthrottled-read exemption recorded per THROTTLE rule; Swagger `@ApiResponse` 200/400/401/403) in `src/modules/dashboard/admin-products.controller.ts` (depends on T010)
 
 **Checkpoint**: US1 fully functional and testable independently (quickstart §1–§2 green)
 
@@ -67,15 +68,15 @@
 
 ### Tests for User Story 2 ⚠️
 
-> NOTE: Write these tests FIRST, ensure they FAIL before implementation (T014)
+> NOTE: Write these tests FIRST, ensure they FAIL before implementation (T012–T013)
 
-- [ ] T012 [P] [US2] Unit tests for create DTO validation + duplicate/negative rejection (mocked `ProductsService`) in `src/modules/dashboard/admin-products-create.spec.ts`
+- [ ] T012 [P] [US2] Unit tests for create DTO validation + duplicate/negative rejection + explicit REST-DTO→`CreateProductInput` field mapping (mocked `ProductsService`, no DTO pass-through) in `src/modules/dashboard/admin-products-create.spec.ts`
 - [ ] T013 [P] [US2] Integration test for create→list round-trip on real PG (explicit stock, omitted stock ⇒ 0/out-of-stock, duplicate ⇒ 409) in `src/modules/dashboard/test/admin-products-create.integration.spec.ts`
 
 ### Implementation for User Story 2
 
 - [ ] T014 [P] [US2] Create product DTO (`name/description/price/stock?`, stock optional `>= 0`) in `src/modules/dashboard/dto/admin-create-product.dto.ts`
-- [ ] T015 [US2] Implement `POST /admin/products` thin handler delegating to `ProductsService.create` (`@Auth(Admin)`, `RateLimitGuard` quota, Swagger 201/400/401/403/409/429) in `src/modules/dashboard/admin-products.controller.ts` (depends on T014)
+- [ ] T015 [US2] Implement `POST /admin/products` thin handler with explicit REST-DTO→`CreateProductInput` field map + `stock` forwarded separately (`stock ?? 0` — `CreateProductInput.stock` is typed required but the service tolerates omission; never pass the REST DTO straight through — `slug` is server-derived) delegating to `ProductsService.create` (`@Auth(Admin)`, separate 30/h counter with identical limits — not a shared bucket, see research D5; Swagger 201/400/401/403/409/429) in `src/modules/dashboard/admin-products.controller.ts` (depends on T014)
 
 **Checkpoint**: US1 AND US2 both work independently (quickstart §3 green)
 
@@ -89,15 +90,15 @@
 
 ### Tests for User Story 3 ⚠️
 
-> NOTE: Write these tests FIRST, ensure they FAIL before implementation (T018–T019)
+> NOTE: Write these tests FIRST, ensure they FAIL before implementation (T016–T017)
 
-- [ ] T016 [P] [US3] Unit tests for adjust DTO (`delta ≠ 0`, integer) + `409` below-reserved/below-zero matrix (mocked `InventoryService`) in `src/modules/dashboard/admin-products-stock.spec.ts`
-- [ ] T017 [P] [US3] Integration tests on real PG: adjust up/down, `409` leaves stock unchanged, concurrent same-product adjusts last-writer-wins with guards intact in `src/modules/dashboard/test/admin-products-stock.integration.spec.ts`
+- [ ] T016 [P] [US3] Unit tests for adjust DTO (`delta ≠ 0`, integer) + `409` below-reserved/below-zero matrix + missing-row policy (delta>0 auto-creates via `createForProduct`, delta<0 → 404) (mocked `InventoryService`) in `src/modules/dashboard/admin-products-stock.spec.ts`
+- [ ] T017 [P] [US3] Integration tests on real PG: adjust up/down, `409` leaves stock unchanged, concurrent same-product adjusts assert guards intact + no `reservedAmount` corruption (both 200; do NOT assert an exact final stock — lock-free delegates are last-writer-wins by design, see research D3) in `src/modules/dashboard/test/admin-products-stock.integration.spec.ts`
 
 ### Implementation for User Story 3
 
 - [ ] T018 [P] [US3] Create adjust DTO (`delta: int, @NotEquals(0)`) in `src/modules/dashboard/dto/adjust-stock.dto.ts`
-- [ ] T019 [US3] Implement `PATCH /admin/products/:id/stock` thin handler delegating to `adjustStockByDelta` + post-commit list-cache invalidation (`@Auth(Admin)`, throttle quota, Swagger 200/400/401/403/404/409/429) in `src/modules/dashboard/admin-products.controller.ts` (depends on T018 and Phase 2)
+- [ ] T019 [US3] Implement `PATCH /admin/products/:id/stock` thin handler (`:id` via `ParseUUIDPipe`, missing-row policy: delta>0 auto-creates via `createForProduct` then adjusts, delta<0 on missing row → 404) delegating to `adjustStockByDelta` + post-commit list-cache invalidation fail-open (`TODO(CACHE-1a)`, never inside a tx; `//` intent comment on the guard) (`@Auth(Admin)`, separate 30/h counter with identical limits; Swagger 200/400/401/403/404/409/429) in `src/modules/dashboard/admin-products.controller.ts` (depends on T018 and Phase 2)
 
 **Checkpoint**: All user stories independently functional (quickstart §4–§5 green)
 
@@ -109,7 +110,7 @@
 
 - [ ] T020 [P] Swagger audit: `@ApiResponse` coverage for 200/201/400/401/403/404/409/429 on all three admin routes in `src/modules/dashboard/admin-products.controller.ts`
 - [ ] T021 [P] Record ADR (`docs/decisions/`) + update `docs/architecture/modules.md` (dashboard section) + `docs/plan.md` Phase 20 exit checkboxes
-- [ ] T022 E2E flow (supertest): admin list→create→adjust→re-list plus customer `403` on all three routes in `test/admin-products.e2e-spec.ts`
+- [ ] T022 E2E flow (supertest): admin list→create→adjust→re-list plus customer `403` on all three dashboard routes AND on legacy `POST /inventory/:productId/increase|decrease` in `test/admin-products.e2e-spec.ts`
 - [ ] T023 JSDoc/lint pass: class + method JSDoc per AGENTS.md §3 on all touched files, zero new `any`, `npm run lint` clean on touched scope
 - [ ] T024 Run quickstart validation end-to-end (scope: `specs/019-admin-product-stock/quickstart.md` §1–§6 against local dev boot)
 - [ ] T025 Full verification: `npm run build`, `npm run test -- --runInBand`, `npm run test:e2e` (scope: full repo; relevant suites green, pre-existing failures documented)
@@ -120,16 +121,16 @@
 
 ### Phase Dependencies
 
-- **Setup (Phase 1)**: No dependencies — can start immediately
-- **Foundational (Phase 2)**: Depends on Setup completion — BLOCKS all user stories
-- **User Stories (Phase 3–5)**: All depend on Foundational completion; US1/US2/US3 can then proceed in parallel (shared files: `admin-products.controller.ts` / `admin-products.service.ts` — coordinate or sequence controller edits)
+- **Setup (Phase 1)**: No dependencies — can start immediately (includes T002b legacy tightening)
+- **Foundational (Phase 2)**: Depends on Setup completion — BLOCKS US3 only
+- **User Stories (Phase 3–5)**: US1/US2 depend on Setup only; US3 additionally depends on Foundational (T005). US1/US2/US3 can then proceed in parallel subject to shared-file sequencing (all touch `admin-products.controller.ts` / `admin-products.service.ts` — coordinate or sequence controller edits)
 - **Polish (Phase 6)**: Depends on all three stories complete
 
 ### User Story Dependencies
 
-- **US1 (P1)**: After Foundational — no story dependencies (MVP)
-- **US2 (P1)**: After Foundational — integrates with US1 list for verification, independently testable
-- **US3 (P2)**: After Foundational (+ T005 `adjustStockByDelta`) — integrates with US1 list for verification, independently testable
+- **US1 (P1)**: After Setup — no story dependencies (MVP)
+- **US2 (P1)**: After Setup — integrates with US1 list for verification, independently testable
+- **US3 (P2)**: After Setup + Foundational (+ T005 `adjustStockByDelta`) — integrates with US1 list for verification, independently testable
 - **US4 (P3)**: No tasks — out-of-scope boundary marker only
 
 ### Shared-file caution
@@ -159,16 +160,16 @@ Task: "Create list query DTO in src/modules/dashboard/dto/admin-product-list.que
 
 ### MVP First (User Story 1 Only)
 
-1. Complete Phase 1: Setup (T001–T003)
-2. Complete Phase 2: Foundational (T004–T006)
-3. Complete Phase 3: US1 (T007–T011)
+1. Complete Phase 1: Setup (T001–T003 incl. T002b legacy tightening)
+2. Complete Phase 3: US1 (T007–T011) — may run in parallel with Phase 2
+3. Complete Phase 2: Foundational (T004–T006) — required before US3 only
 4. **STOP and VALIDATE**: quickstart §1–§2 + SC-001/SC-002 spot-check
 5. Deploy/demo if ready (read-only admin catalog with live statuses)
 
 ### Incremental Delivery
 
-1. Setup + Foundational → foundation ready
-2. Add US1 → test independently → Demo (MVP: reads)
+1. Setup → shell + throttle + legacy-tightening ready
+2. Add US1 → test independently → Demo (MVP: reads; Foundational may run concurrently)
 3. Add US2 → test independently → Demo (+ create)
 4. Add US3 → test independently → Demo (+ stock adjust)
 5. Polish → full verification → Phase 20 demo exit
