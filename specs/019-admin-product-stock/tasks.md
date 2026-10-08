@@ -16,10 +16,10 @@
 
 **Purpose**: Dashboard module shell + shared throttle keys so story work has a place to land
 
-- [ ] T001 Create dashboard module shell per plan.md structure in `src/modules/dashboard/dashboard.module.ts` (imports ProductsModule, InventoryModule, AuthModule — one-way edges only, nothing imports Dashboard, no `@InjectRepository` of another module's entity) and register DashboardModule in `src/app.module.ts`
-- [ ] T002 [P] Add `POST /admin/products` and `PATCH /admin/products/:id/stock` route keys (separate 30/h-per-admin counters with identical limits — NOT a shared bucket with `products:mutation`) in `src/modules/auth/guards/rate-limit.guard.ts`
-- [ ] T002b Tighten legacy `POST /inventory/:productId/increase|decrease` from `@Auth()` to `@Auth(Admin)` in `src/modules/inventory/inventory.controller.ts` (closes the any-role stock-write bypass behind FR-009; demo admin writes go through dashboard routes, legacy stays as admin-only compat) + regression test (customer 403, admin 200)
-- [ ] T003 Verify setup compiles via `npm run build` (scope: `src/modules/dashboard/`, `src/app.module.ts`, `src/modules/auth/guards/rate-limit.guard.ts`, `src/modules/inventory/inventory.controller.ts`)
+- [X] T001 Create dashboard module shell per plan.md structure in `src/modules/dashboard/dashboard.module.ts` (imports ProductsModule, InventoryModule, AuthModule — one-way edges only, nothing imports Dashboard, no `@InjectRepository` of another module's entity) and register DashboardModule in `src/app.module.ts`
+- [X] T002 [P] Add `POST /admin/products` and `PATCH /admin/products/:id/stock` route keys (separate 30/h-per-admin counters with identical limits — NOT a shared bucket with `products:mutation`) in `src/modules/auth/guards/rate-limit.guard.ts` (+ perUserRoutes membership; 2 new unit tests in `rate-limit.guard.spec.ts`)
+- [X] T002b Tighten legacy `POST /inventory/:productId/increase|decrease` from `@Auth()` to `@Auth(Admin)` in `src/modules/inventory/inventory.controller.ts` (closes the any-role stock-write bypass behind FR-009; demo admin writes go through dashboard routes, legacy stays as admin-only compat) + regression test `inventory.controller.spec.ts` (role-boundary pin; wire 403 proof in T022 E2E)
+- [X] T003 Verify setup compiles via `npm run build` (scope: `src/modules/dashboard/`, `src/app.module.ts`, `src/modules/auth/guards/rate-limit.guard.ts`, `src/modules/inventory/inventory.controller.ts`)
 
 ---
 

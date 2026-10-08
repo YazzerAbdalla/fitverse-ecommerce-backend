@@ -13,6 +13,7 @@ import { CacheTestService } from './cache-test.service';
 import { AppDataSource } from './data-source';
 import { AuthModule } from './modules/auth/auth.module';
 import { CartModule } from './modules/cart/cart.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { OrderModule } from './modules/order/order.module';
 import { ProductsModule } from './modules/products/products.module';
@@ -67,6 +68,7 @@ import { MessagingModule } from './modules/messaging/messaging.module';
       sortSchema: true,
     }),
     AuthModule,
+    DashboardModule,
     OrderModule,
     UsersModule,
     ProductsModule,

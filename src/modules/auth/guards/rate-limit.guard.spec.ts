@@ -560,6 +560,86 @@ describe('RateLimitGuard', () => {
     });
   });
 
+  /**
+   * Admin product & stock (019 T002): separate 30/h-per-admin counters with
+   * identical limits (NOT a shared bucket with products:mutation).
+   * The concrete product id must normalize to the parameterized stock key.
+   */
+  describe('admin products/stock 30/h per-admin (019 T002)', () => {
+    const makeAdminCtx = (
+      method: string,
+      routePath: string,
+      path: string,
+      sub: string,
+    ) => {
+      const res = { setHeader: jest.fn() };
+      const req: any = {
+        method,
+        route: { path: routePath },
+        path,
+        ip: '1.1.1.1',
+        headers: {},
+        body: {},
+        user: { sub },
+      };
+      const ctx: any = {
+        switchToHttp: () => ({ getRequest: () => req, getResponse: () => res }),
+        getType: () => 'http',
+      };
+      return { ctx, req, res };
+    };
+    it('should allow 30 and block 31st POST /admin/products per admin', async () => {
+      cacheMock.get.mockResolvedValue(29);
+      const { ctx } = makeAdminCtx(
+        'POST',
+        '/admin/products',
+        '/admin/products',
+        'admin-A-uuid',
+      );
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
+      expect(cacheMock.get).toHaveBeenCalledWith(
+        expect.stringContaining('rl:POST /admin/products:user:admin-A-uuid'),
+      );
+      cacheMock.get.mockResolvedValue(30);
+      const { ctx: ctx2 } = makeAdminCtx(
+        'POST',
+        '/admin/products',
+        '/admin/products',
+        'admin-A-uuid',
+      );
+      await expect(guard.canActivate(ctx2)).rejects.toMatchObject({
+        status: 429,
+      });
+    });
+    it('should throttle PATCH stock under its own parameterized key per admin', async () => {
+      cacheMock.get.mockResolvedValue(29);
+      const { ctx } = makeAdminCtx(
+        'PATCH',
+        '/admin/products/:id/stock',
+        '/admin/products/9f4c2a1b-3d5e-4f6a-8b7c-1d2e3f4a5b6c/stock',
+        'admin-A-uuid',
+      );
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
+      // Concrete product id must map to the parameterized bucket key,
+      // distinct from the create-product key.
+      expect(cacheMock.get).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'rl:PATCH /admin/products/:id/stock:user:admin-A-uuid',
+        ),
+      );
+      cacheMock.get.mockResolvedValue(30);
+      const { ctx: ctx2 } = makeAdminCtx(
+        'PATCH',
+        '/admin/products/:id/stock',
+        '/admin/products/9f4c2a1b-3d5e-4f6a-8b7c-1d2e3f4a5b6c/stock',
+        'admin-A-uuid',
+      );
+      await expect(guard.canActivate(ctx2)).rejects.toMatchObject({
+        status: 429,
+      });
+    });
+  });
+
   describe('cart 60/h per-user shared bucket (SC-004)', () => {
     it('should allow 60 and block 61st shared across POST/PATCH/DELETE', async () => {
       const makeCartCtx = (method: string, path: string, sub: string) => {
