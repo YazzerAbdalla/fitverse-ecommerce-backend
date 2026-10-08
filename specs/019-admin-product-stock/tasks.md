@@ -29,9 +29,9 @@
 
 **⚠️ CRITICAL**: US3 work cannot begin until this phase is complete. US1 (list) and US2 (create via `ProductsService.create`) do NOT use `adjustStockByDelta` and may proceed in parallel with — or before — this phase once Setup (Phase 1) is done.
 
-- [ ] T004 Unit tests for `adjustStockByDelta` delegation matrix (positive→increase, negative→decrease, delegates own no guard logic; missing-row: delta>0 auto-creates, delta<0 → 404) in `src/modules/inventory/inventory.service.spec.ts` (write first, fail before T005)
-- [ ] T005 Implement `InventoryService.adjustStockByDelta` with full JSDoc (`@param/@returns/@throws`, `//` intent on the sign dispatch) in `src/modules/inventory/inventory.service.ts` (thin sign-dispatcher to `increaseStock`/`decreaseStock`, zero rejected by DTO)
-- [ ] T006 Verify foundation via `npm run build` and `npm run test -- --runInBand src/modules/inventory` (scope: `src/modules/inventory/inventory.service.ts`, `src/modules/inventory/inventory.service.spec.ts`)
+- [X] T004 Unit tests for `adjustStockByDelta` delegation matrix (positive→increase, negative→decrease, delegates own no guard logic; missing-row: delta>0 auto-creates, delta<0 → 404) in `src/modules/inventory/inventory.service.spec.ts` (write first, fail before T005)
+- [X] T005 Implement `InventoryService.adjustStockByDelta` with full JSDoc (`@param/@returns/@throws`, `//` intent on the sign dispatch) in `src/modules/inventory/inventory.service.ts` (thin sign-dispatcher to `increaseStock`/`decreaseStock`, zero rejected by DTO)
+- [X] T006 Verify foundation via `npm run build` and `npm run test -- --runInBand src/modules/inventory` (scope: `src/modules/inventory/inventory.service.ts`, `src/modules/inventory/inventory.service.spec.ts`) — unit suites green (service 31/31, controller 3/3); `inventory.integration.spec.ts` 7 fail with `ECONNREFUSED :5432` identically on the clean tree (no local PG, docker daemon down — live proof deferred to CI, same close-out as Phase 18)
 
 **Checkpoint**: Foundation ready — US3 implementation can now begin (US1/US2 were never blocked on it)
 

@@ -11,6 +11,12 @@ import { EntityManager, Repository } from 'typeorm';
 import { Inventory } from './entities/inventory.entity';
 import { ProductsService } from '../products/products.service';
 
+/**
+ * This service is responsible for the inventory domain.
+ * It owns all mutations of Inventory.stock/reservedAmount
+ * (available is derived as stock - reservedAmount, never stored)
+ * and enforces the stock/reserved invariants.
+ */
 @Injectable()
 export class InventoryService {
   private readonly logger = new Logger(InventoryService.name);
@@ -207,6 +213,48 @@ export class InventoryService {
     inventory.reservedAmount -= quantity;
 
     return this.inventoryRepo.save(inventory);
+  }
+
+  /**
+   * Adjusts on-hand stock by a signed delta for admin stock corrections.
+   * Positive deltas restock, negative deltas draw stock down. Reserved
+   * units are never touched here; only checkout/lifecycle flows mutate
+   * reservedAmount, so held units survive admin edits by construction.
+   *
+   * @param productId - Product whose inventory row to adjust.
+   * @param delta - Signed adjustment (must be non-zero; zero is rejected
+   * upstream by the DTO, and rejected here as a backstop).
+   * @returns The updated Inventory row.
+   * @throws ConflictException if delta is zero, if the adjustment would
+   * drop stock below zero, or below the currently reserved amount
+   * (stock unchanged in all rejection cases).
+   * @throws NotFoundException if no inventory row exists and delta is
+   * negative (nothing to subtract); a positive delta auto-creates the
+   * row at zero first so orphan products become fixable.
+   */
+  async adjustStockByDelta(
+    productId: string,
+    delta: number,
+  ): Promise<Inventory> {
+    // Sign dispatch: reuse the proven increase/decrease guards instead of
+    // a third mutation path, so all invariants stay in one place.
+    if (delta > 0) {
+      try {
+        return await this.increaseStock(productId, delta);
+      } catch (error) {
+        // Orphan repair (019 D3): products with no inventory row list as
+        // out-of-stock; a restock creates the row at zero, then applies.
+        if (error instanceof NotFoundException) {
+          await this.createForProduct(productId, 0);
+          return this.increaseStock(productId, delta);
+        }
+        throw error;
+      }
+    }
+    if (delta < 0) {
+      return this.decreaseStock(productId, -delta);
+    }
+    throw new ConflictException('Delta must not be zero');
   }
 
   // Deprecated compatibility alias
