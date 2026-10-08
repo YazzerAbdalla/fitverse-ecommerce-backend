@@ -8,10 +8,18 @@
  */
 import * as dotenv from 'dotenv';
 import { DataSource } from 'typeorm';
+import { RefreshToken } from '../../auth/entities/refresh-token.entity';
+import { Cart } from '../../cart/entities/cart.entity';
+import { CartItem } from '../../cart/entities/cart-items.entity';
 import { Product } from '../../products/entities/product.entity';
 import { Inventory } from '../../inventory/entities/inventory.entity';
 import { InventoryService } from '../../inventory/inventory.service';
+import { Order } from '../../order/entities/order.entity';
+import { OrderItem } from '../../order/entities/order-items.entity';
 import { ProductsService } from '../../products/products.service';
+import { Reservation } from '../../reservation/entities/reservation.entity';
+import { ReservationItem } from '../../reservation/entities/reservation-item.entity';
+import User from '../../users/entity/user.entity';
 
 dotenv.config();
 
@@ -34,7 +42,19 @@ describe('AdminProducts stock adjust (real PostgreSQL)', () => {
         database: process.env.POSTGRES_DATABASE ?? 'ecommerce',
         synchronize: false,
         logging: false,
-        entities: [Product, Inventory],
+        // Full relation closure (see admin-products.integration.spec.ts).
+        entities: [
+          User,
+          RefreshToken,
+          Product,
+          Inventory,
+          Cart,
+          CartItem,
+          Order,
+          OrderItem,
+          Reservation,
+          ReservationItem,
+        ],
       });
       await dashboardDataSource.initialize();
       inventoryService = new InventoryService(

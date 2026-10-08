@@ -8,8 +8,16 @@
  */
 import * as dotenv from 'dotenv';
 import { DataSource } from 'typeorm';
-import { Product } from '../../products/entities/product.entity';
+import { RefreshToken } from '../../auth/entities/refresh-token.entity';
+import { Cart } from '../../cart/entities/cart.entity';
+import { CartItem } from '../../cart/entities/cart-items.entity';
 import { Inventory } from '../../inventory/entities/inventory.entity';
+import { Order } from '../../order/entities/order.entity';
+import { OrderItem } from '../../order/entities/order-items.entity';
+import { Product } from '../../products/entities/product.entity';
+import { Reservation } from '../../reservation/entities/reservation.entity';
+import { ReservationItem } from '../../reservation/entities/reservation-item.entity';
+import User from '../../users/entity/user.entity';
 import { AdminProductsService } from '../admin-products.service';
 
 dotenv.config();
@@ -33,7 +41,21 @@ describe('AdminProducts list (real PostgreSQL)', () => {
         database: process.env.POSTGRES_DATABASE ?? 'ecommerce',
         synchronize: false,
         logging: false,
-        entities: [Product, Inventory],
+        // Full relation closure: Product's order_items/cart_items
+        // relations require their targets registered (metadata-only;
+        // synchronize:false touches no schema).
+        entities: [
+          User,
+          RefreshToken,
+          Product,
+          Inventory,
+          Cart,
+          CartItem,
+          Order,
+          OrderItem,
+          Reservation,
+          ReservationItem,
+        ],
       });
       await dashboardDataSource.initialize();
       service = new AdminProductsService(dashboardDataSource);

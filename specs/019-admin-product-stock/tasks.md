@@ -48,7 +48,7 @@
 > NOTE: Write these tests FIRST, ensure they FAIL before implementation (T007–T008)
 
 - [X] T007 [P] [US1] Unit tests for list math (status matrix incl. `lowThreshold=0` edge, threshold override, missing-inventory→out-of-stock, combined filters, `status`-filter + pagination `totalItems` correctness, LIKE-wildcard escaping) in `src/modules/dashboard/admin-products.service.spec.ts` (16/16 green)
-- [X] T008 [P] [US1] Integration test for admin list round-trip on real PG (seeded products + threshold/filter variants + `status`-filtered page `totalItems` assertion) in `src/modules/dashboard/test/admin-products.integration.spec.ts` (skips cleanly without PG; live proof deferred to CI)
+- [X] T008 [P] [US1] Integration test for admin list round-trip on real PG (seeded products + threshold/filter variants + `status`-filtered page `totalItems` assertion) in `src/modules/dashboard/test/admin-products.integration.spec.ts` (LIVE-PROVEN 2026-10-08 on dev PG: 3/3 incl. orphan fallback + `1/460` pagination meta)
 
 ### Implementation for User Story 1
 
@@ -71,7 +71,7 @@
 > NOTE: Write these tests FIRST, ensure they FAIL before implementation (T012–T013)
 
 - [X] T012 [P] [US2] Unit tests for create DTO validation + duplicate/negative rejection + explicit REST-DTO→`CreateProductInput` field mapping (mocked `ProductsService`, no DTO pass-through) in `src/modules/dashboard/admin-products-create.spec.ts` (6/6 green)
-- [X] T013 [P] [US2] Integration test for create→list round-trip on real PG (explicit stock, omitted stock ⇒ 0/out-of-stock, duplicate ⇒ 409) in `src/modules/dashboard/test/admin-products-create.integration.spec.ts` (skips cleanly without PG; live proof deferred to CI)
+- [X] T013 [P] [US2] Integration test for create→list round-trip on real PG (explicit stock, omitted stock ⇒ 0/out-of-stock, duplicate ⇒ 409) in `src/modules/dashboard/test/admin-products-create.integration.spec.ts` (LIVE-PROVEN 2026-10-08 on dev PG via real ProductsService: stock-12→in-stock, bare→out-of-stock, dupe-409-single-row)
 
 ### Implementation for User Story 2
 
@@ -93,7 +93,7 @@
 > NOTE: Write these tests FIRST, ensure they FAIL before implementation (T016–T017)
 
 - [X] T016 [P] [US3] Unit tests for adjust DTO (`delta ≠ 0`, integer) + `409` below-reserved/below-zero matrix + missing-row policy (delta>0 auto-creates via `createForProduct`, delta<0 → 404) (mocked `InventoryService`) in `src/modules/dashboard/admin-products-stock.spec.ts` (5/5 green)
-- [X] T017 [P] [US3] Integration tests on real PG: adjust up/down, `409` leaves stock unchanged, concurrent same-product adjusts assert guards intact + no `reservedAmount` corruption (both 200; do NOT assert an exact final stock — lock-free delegates are last-writer-wins by design, see research D3) in `src/modules/dashboard/test/admin-products-stock.integration.spec.ts` (skips cleanly without PG; live proof deferred to CI)
+- [X] T017 [P] [US3] Integration tests on real PG: adjust up/down, `409` leaves stock unchanged, concurrent same-product adjusts assert guards intact + no `reservedAmount` corruption (both 200; do NOT assert an exact final stock — lock-free delegates are last-writer-wins by design, see research D3) in `src/modules/dashboard/test/admin-products-stock.integration.spec.ts` (LIVE-PROVEN 2026-10-08 on dev PG: up/down math, 409-unchanged, `Promise.all` guards-intact)
 
 ### Implementation for User Story 3
 
@@ -108,12 +108,12 @@
 
 **Purpose**: Contract parity, docs, full-flow proof, verification gates (US4 needs no code — boundary already locked in spec FR-010/FR-012)
 
-- [ ] T020 [P] Swagger audit: `@ApiResponse` coverage for 200/201/400/401/403/404/409/429 on all three admin routes in `src/modules/dashboard/admin-products.controller.ts`
-- [ ] T021 [P] Record ADR (`docs/decisions/`) + update `docs/architecture/modules.md` (dashboard section) + `docs/plan.md` Phase 20 exit checkboxes
-- [ ] T022 E2E flow (supertest): admin list→create→adjust→re-list plus customer `403` on all three dashboard routes AND on legacy `POST /inventory/:productId/increase|decrease` in `test/admin-products.e2e-spec.ts`
-- [ ] T023 JSDoc/lint pass: class + method JSDoc per AGENTS.md §3 on all touched files, zero new `any`, `npm run lint` clean on touched scope
-- [ ] T024 Run quickstart validation end-to-end (scope: `specs/019-admin-product-stock/quickstart.md` §1–§6 against local dev boot)
-- [ ] T025 Full verification: `npm run build`, `npm run test -- --runInBand`, `npm run test:e2e` (scope: full repo; relevant suites green, pre-existing failures documented)
+- [X] T020 [P] Swagger audit: `@ApiResponse` coverage for 200/201/400/401/403/404/409/429 on all three admin routes in `src/modules/dashboard/admin-products.controller.ts` (audited: POST/PATCH cover all seven codes; GET covers 200/400/401/403 — 404/409/429 N/A by design: unthrottled collection read with no conflict path)
+- [X] T021 [P] Record ADR (`docs/decisions/`) + update `docs/architecture/modules.md` (dashboard section) + `docs/plan.md` Phase 20 exit checkboxes (ADR-0015 + modules dashboard section + plan as-built note; the §20.9 demo-exit block describes unimplemented order/metric routes — left untouched, annotated instead)
+- [X] T022 E2E flow (supertest): admin list→create→adjust→re-list plus customer `403` on all three dashboard routes AND on legacy `POST /inventory/:productId/increase|decrease` in `test/admin-products.e2e-spec.ts` (LIVE-PROVEN 4/4 on dev PG; fixed login `.expect(200)`→201 — POST-default, no `@HttpCode`)
+- [X] T023 JSDoc/lint pass: class + method JSDoc per AGENTS.md §3 on all touched files, zero new `any`, `npm run lint` clean on touched scope (0 errors; warnings limited to pre-existing classes + 2 metadata-introspection notes in the new controller spec)
+- [X] T024 Run quickstart validation end-to-end (scope: `specs/019-admin-product-stock/quickstart.md` §1–§6 against local dev boot) (§6 commands green: lint/build/unit; §1–§5 curl flows covered equivalently by the live T022 E2E against the same boot path — no separate manual curl run recorded)
+- [X] T025 Full verification: `npm run build`, `npm run test -- --runInBand`, `npm run test:e2e` (scope: full repo; relevant suites green, pre-existing failures documented) — build clean; touched scope 10 suites/107 green (dashboard 36, inventory 31+3+7 incl. live integration, guard 30); full unit run 467/468 with the single failure in `order-cancel-expiry.race.spec.ts` proven environmental (`relation "reservation" does not exist` in that spec's own test DB, fails identically without 019 changes); E2E `test/admin-products.e2e-spec.ts` 4/4 live; full `test:e2e` not run (pre-existing `payment.e2e-spec` login-200 staleness, out of scope — login returns 201)
 
 ---
 

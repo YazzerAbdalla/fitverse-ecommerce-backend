@@ -1992,6 +1992,15 @@ All metrics support `?from&to&` date-range (default last 30d) and `period` group
 [x] Unit 5+ and integration 3+ and E2E 1 flow PASS (Admin revenue/low-stock reads; Customer 403 on admin routes)
 ```
 
+> As-built 2026-10-08 (`specs/019-admin-product-stock`, ADR-0015): the demo
+> shipped a narrower slice than the block above — `GET /admin/products`
+> (search/filter/status/pagination) + `POST /admin/products` + `PATCH
+> /admin/products/:id/stock`, all `@Auth(Admin)`, plus legacy
+> `/inventory/:productId/increase|decrease` tightened to Admin. The
+> `/admin/orders`, `/admin/stock`, revenue/low-stock metric routes above
+> remain unimplemented (post-demo). Proven live on dev PG: dashboard 36
+> (27 unit + 9 integration), E2E 4/4, customer 403 ×5 paths.
+
 **Full scope (post-demo — §§20.1–20.8 retained as spec, 4–6 days):**
 
 Dashboard is complete when:

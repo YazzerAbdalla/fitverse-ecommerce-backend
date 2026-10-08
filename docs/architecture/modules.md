@@ -53,7 +53,8 @@ service another module needs.
 - `inventory.module.ts` — `TypeOrmModule.forFeature([Inventory])` + `InventorySeeder` (idempotent `onModuleInit`); exports `InventoryService`.
 - `inventory.entity.ts` — `id uuid PK`, `productId FK Product CASCADE @Index + @Unique`, `stock CHECK >=0`, `reservedAmount CHECK >=0 && <=stock`, `available` derived `stock - reservedAmount` (getter), `@Check` + `@Unique` enforced; migration `1755800000000-CreateInventoryAndDropProductStock` owns DDL (`synchronize:false`).
 - `inventory.service.ts` — `getInventory(productId)`, `checkAvailability(productId,qty)` (`available = stock - reservedAmount`), `increaseStock`/`decreaseStock`, `decreaseStockForOrderMany(manager, items)` / `restoreStockForOrderMany(manager, items)` via passed `EntityManager` (caller owns tx), `reserve`/`releaseReservation`/`completeSale` stubs; deterministic `FOR UPDATE` owned by reservation layer.
-- `inventory.controller.ts` — thin REST `GET /inventory/:productId`, `GET .../availability?quantity=`, `POST .../increase|decrease` (admin).
+- `inventory.controller.ts` — thin REST `GET /inventory/:productId`, `GET .../availability?quantity=`, `POST .../increase|decrease` (`@Auth(Admin)` since 019 T002b; reads stay any-role).
+- `inventory.service.ts` — adds `adjustStockByDelta(productId, delta)` (019, thin sign-dispatcher to `increase/decreaseStock`; positive delta auto-creates orphan rows via `createForProduct`, negative on missing row 404s).
 
 ## reservation (REST — Phases 2-5 DONE)
 
@@ -65,3 +66,10 @@ service another module needs.
 - `reservation-expiration.processor.ts` — `@Processor('reservation-expiration', concurrency:1)` `WorkerHost`, `onModuleInit` registers BullMQ repeat `30s`/`EXPIRATION_CRON` `jobId` singleton, `process` guards `EXPIRATION_ENABLED=false`, in-memory `processing` + distributed `SET expiration:tick:lock NX EX ttlSec` (`Math.ceil(interval/1000)+5`) via `REDIS_CLIENT` (skip if `skippedByLock`), then `service.processExpiredBatch(batchSize)`.
 - `reservation.controller.ts` — thin `POST /reservations`, `GET /:id` (owner/admin), `GET /` (paginated), `PATCH /:id/complete|cancel` (owner/admin), `PATCH /:id/expire` (admin immediate override, no `expiresAt` check Q1) all wrap `dataSource.transaction`.
 - DTOs: `create-reservation.dto.ts` (`items: {inventoryId,quantity>0}[]`, `orderId`, `expiresAt` future validated, `Global ValidationPipe` whitelist).
+
+## dashboard (REST — Phase 20 demo, 019 DONE 2026-10-08)
+
+- `dashboard.module.ts` — imports `ProductsModule`, `InventoryModule`, `AuthModule` (one-way edges only; owns no tables, no migration); provides/exports `AdminProductsService`.
+- `admin-products.service.ts` — read-only `DataSource` join (`Product LEFT JOIN Inventory`, no N+1) per plan §20.5 aggregator exception; single SQL `CASE` status expression mirrored by TS `mapStockStatus` (filter-before-paginate, `meta.totalItems` correct); LIKE wildcards escaped; admin list bypasses `products:list:*` (filter-blind keys); `minPrice<=maxPrice` service guard → 400.
+- `admin-products.controller.ts` — thin `GET /admin/products` (unthrottled-read exemption), `POST /admin/products` (explicit REST→`CreateProductInput` map + `stock ?? 0`, 201 view via `getInventory`), `PATCH /admin/products/:id/stock` (`ParseUUIDPipe`, delegates to `adjustStockByDelta`, no invalidation per research D7 — no cached view embeds quantities), all `@Auth(Admin)` with writes under separate 30/h-per-admin `RateLimitGuard` counters.
+- DTOs: `admin-product-list.query.dto.ts` (own REST bounds, `lowThreshold 0..1000` default 5), `admin-create-product.dto.ts`, `adjust-stock.dto.ts` (`@NotEquals(0)`).
