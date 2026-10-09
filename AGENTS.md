@@ -19,7 +19,7 @@ For additional context about technologies to be used, project structure,
 
 shell commands, and other important information, read the current plan
 
-at `specs/019-admin-product-stock/plan.md` (Phase 20 — Admin Product & Stock, demo scope).
+at `specs/020-cache-constraints-indexes/plan.md` (Phase 9 + 13 close-out — product cache hardening + DB constraints/indexes, demo scope).
 
 <!-- SPECKIT END -->
 
