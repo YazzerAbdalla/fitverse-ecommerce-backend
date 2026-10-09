@@ -18,8 +18,8 @@
 
 **Purpose**: Infra up + green baseline before changes
 
-- [ ] T001 Start local infra via `docker-compose.yml` (postgres 5432, redis 6379) and verify both reachable per `specs/020-cache-constraints-indexes/quickstart.md` §1
-- [ ] T002 Record green baseline (`npm run build` + `npm run test -- --runInBand src/modules/products`) before changes in `specs/020-cache-constraints-indexes/`
+- [X] T001 Start local infra via `docker-compose.yml` (postgres 5432, redis 6379) and verify both reachable per `specs/020-cache-constraints-indexes/quickstart.md` §1
+- [X] T002 Record green baseline (`npm run build` + `npm run test -- --runInBand src/modules/products`) before changes in `specs/020-cache-constraints-indexes/`
 
 ---
 
@@ -29,8 +29,8 @@
 
 **⚠️ CRITICAL**: No migration task (T016) begins until this phase is recorded in `data-model.md` §Audit
 
-- [ ] T003 [P] Run CHECK-violation audit queries (Product price, Order total, Payment amount, Inventory/quantity tables) and record counts + cleanup decision in `specs/020-cache-constraints-indexes/data-model.md`
-- [ ] T004 [P] Run EXPLAIN audit on hot paths (expiry scan, order-by-user, inventory-by-product, order-items-by-order, order-createdAt range) and record plans + final ≤3 index list in `specs/020-cache-constraints-indexes/data-model.md`
+- [X] T003 [P] Run CHECK-violation audit queries (Product price, Order total, Payment amount, Inventory/quantity tables) and record counts + cleanup decision in `specs/020-cache-constraints-indexes/data-model.md`
+- [X] T004 [P] Run EXPLAIN audit on hot paths (expiry scan, order-by-user, inventory-by-product, order-items-by-order, order-createdAt range) and record plans + final ≤3 index list in `specs/020-cache-constraints-indexes/data-model.md`
 
 **Checkpoint**: Audit recorded — migration scope locked, user-story work can begin
 
@@ -46,14 +46,14 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T005 [US1] Unit key-completeness test (every `findAll` input participates in cache key) in `src/modules/products/products.service.spec.ts`
-- [ ] T006 [US1] Unit deterministic-order passthrough + TTL warn-fallback tests in `src/modules/products/products.service.spec.ts`
+- [X] T005 [US1] Unit key-completeness test (every `findAll` input participates in cache key) in `src/modules/products/products.service.spec.ts`
+- [X] T006 [US1] Unit deterministic-order passthrough + TTL warn-fallback tests in `src/modules/products/products.service.spec.ts`
 
 ### Implementation for User Story 1
 
-- [ ] T007 [US1] Add `ORDER BY created_at ASC, id ASC` to `findAndCount` in `src/modules/products/products.service.ts`
-- [ ] T008 [US1] Document TTL ms unit + defaults (list 60_000, single 300_000) beside `parseTtlMs` in `src/modules/products/products.service.ts`
-- [ ] T009 [US1] Live miss→hit→mutate→miss integration suite in `src/modules/products/test/products-cache.integration.spec.ts` (real Redis, per `quickstart.md` §3)
+- [X] T007 [US1] Add `ORDER BY created_at ASC, id ASC` to `findAndCount` in `src/modules/products/products.service.ts`
+- [X] T008 [US1] Document TTL ms unit + defaults (list 60_000, single 300_000) beside `parseTtlMs` in `src/modules/products/products.service.ts`
+- [X] T009 [US1] Live miss→hit→mutate→miss integration suite in `src/modules/products/test/products-cache.integration.spec.ts` (real Redis, per `quickstart.md` §3)
 
 **Checkpoint**: US1 independently functional — repeat reads cached + ordered, mutations invalidate
 
@@ -67,13 +67,13 @@
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T010 [US2] Unit test asserting `cacheManager.clear()` never called on any mutation path in `src/modules/products/products.service.spec.ts`
-- [ ] T011 [P] [US2] Real-Redis namespace-preservation integration in `src/modules/products/test/products-cache.integration.spec.ts`
+- [X] T010 [US2] Unit test asserting `cacheManager.clear()` never called on any mutation path in `src/modules/products/products.service.spec.ts`
+- [X] T011 [P] [US2] Real-Redis namespace-preservation integration in `src/modules/products/test/products-cache.integration.spec.ts`
 
 ### Implementation for User Story 2
 
-- [ ] T012 [US2] Delete both `clear()` fallbacks and add `products:cache-version` stamp fallback in `src/modules/products/products.service.ts` (per `contracts/cache-invalidation.md`)
-- [ ] T013 [US2] Extend `products-cache.integration.spec.ts` with `resetAll` selective-invalidation case in `src/modules/products/test/products-cache.integration.spec.ts`
+- [X] T012 [US2] Delete both `clear()` fallbacks and add `products:cache-version` stamp fallback in `src/modules/products/products.service.ts` (per `contracts/cache-invalidation.md`)
+- [X] T013 [US2] Extend `products-cache.integration.spec.ts` with `resetAll` selective-invalidation case in `src/modules/products/test/products-cache.integration.spec.ts`
 
 **Checkpoint**: US1 + US2 green — invalidation namespace-safe on all paths
 
@@ -87,15 +87,15 @@
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T017 [P] [US3] Real-PG constraint-rejection tests (negative price/stock, over-reserved, non-positive quantity) in `src/modules/products/test/` + audit-found module suites (depends on T016)
-- [ ] T018 [P] [US3] Real-PG `EXPLAIN` index-usage tests for hot paths in `src/modules/products/test/` + audit-found module suites (depends on T016)
+- [X] T017 [P] [US3] Real-PG constraint-rejection tests (negative price/stock, over-reserved, non-positive quantity) in `src/modules/products/test/` + audit-found module suites (depends on T016)
+- [X] T018 [P] [US3] Real-PG `EXPLAIN` index-usage tests for hot paths in `src/modules/products/test/` + audit-found module suites (depends on T016)
 
 ### Implementation for User Story 3
 
-- [ ] T014 [US3] Add `@Check('"price" >= 0')` (+ audit-approved extra checks) in `src/modules/products/entities/product.entity.ts` and audit-found entity files (depends on T003)
-- [ ] T015 [US3] Add ≤3 audit-approved `@Index`es in entity files per `data-model.md` §Audit (depends on T004)
-- [ ] T016 [US3] Create additive migration `src/migration/1755900000013-*.ts` (guarded adds, `down` drops only what `up` added; depends on T003, T004, T014, T015)
-- [ ] T019 [P] [US3] Never-authoritative proof test (identical checkout with cache warm / cold / Redis down) in `src/modules/products/test/products-cache.integration.spec.ts` (depends on T007, T012)
+- [X] T014 [US3] Add `@Check('"price" >= 0')` (+ audit-approved extra checks) in `src/modules/products/entities/product.entity.ts` and audit-found entity files (depends on T003)
+- [X] T015 [US3] Add ≤3 audit-approved `@Index`es in entity files per `data-model.md` §Audit (depends on T004)
+- [X] T016 [US3] Create additive migration `src/migration/1755900000013-*.ts` (guarded adds, `down` drops only what `up` added; depends on T003, T004, T014, T015)
+- [X] T019 [P] [US3] Never-authoritative proof test (identical checkout with cache warm / cold / Redis down) in `src/modules/products/test/products-cache.integration.spec.ts` (depends on T007, T012)
 
 **Checkpoint**: All stories independently functional; migration green on clean + dirty-data paths
 
@@ -105,9 +105,9 @@
 
 **Purpose**: Close-out verification + docs
 
-- [ ] T020 Full verification per `quickstart.md` §3 (`npm run lint`, `npm run build`, unit + integration + e2e) from repo root
-- [ ] T021 [P] Tick `docs/plan.md` Phase 9 tasks + Phase 13 exit with EXPLAIN evidence and add decision note in `docs/decisions/`
-- [ ] T022 End-to-end validation run of `specs/020-cache-constraints-indexes/quickstart.md` from repo root (depends on T020)
+- [X] T020 Full verification per `quickstart.md` §3 (`npm run lint`, `npm run build`, unit + integration + e2e) from repo root
+- [X] T021 [P] Tick `docs/plan.md` Phase 9 tasks + Phase 13 exit with EXPLAIN evidence and add decision note in `docs/decisions/`
+- [X] T022 End-to-end validation run of `specs/020-cache-constraints-indexes/quickstart.md` from repo root (depends on T020)
 
 ---
 

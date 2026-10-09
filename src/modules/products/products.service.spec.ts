@@ -117,7 +117,7 @@ describe('ProductsService', () => {
       );
       expect(productsRepo.findAndCount).toHaveBeenCalledTimes(1);
       expect(cacheManager.set).toHaveBeenCalledWith(
-        'products:list:1:10',
+        'products:list:v1:1:10',
         expect.any(Object),
         60_000,
       );
@@ -125,9 +125,10 @@ describe('ProductsService', () => {
         expect.stringContaining('Cache MISS'),
       );
 
-      // second hit
+      // second hit (queue the list generation first, then the cached envelope)
       productsRepo.findAndCount.mockClear();
       logger.debug.mockClear();
+      cacheManager.get.mockResolvedValueOnce(1);
       cacheManager.get.mockResolvedValueOnce(envelope);
       const second = await service.findAll({ page: 1, limit: 10 });
       expect(second).toEqual(envelope);
@@ -141,11 +142,11 @@ describe('ProductsService', () => {
       cacheManager.get.mockResolvedValueOnce(undefined);
       productsRepo.findAndCount.mockResolvedValueOnce([[], 0]);
       await service.findAll({ page: 1, limit: 10 });
-      expect(cacheManager.get).toHaveBeenCalledWith('products:list:1:10');
+      expect(cacheManager.get).toHaveBeenCalledWith('products:list:v1:1:10');
       cacheManager.get.mockResolvedValueOnce(undefined);
       productsRepo.findAndCount.mockResolvedValueOnce([[], 0]);
       await service.findAll({ page: 2, limit: 10 });
-      expect(cacheManager.get).toHaveBeenCalledWith('products:list:2:10');
+      expect(cacheManager.get).toHaveBeenCalledWith('products:list:v1:2:10');
     });
 
     it('TTL expiry re-miss (T011)', async () => {
@@ -354,6 +355,90 @@ describe('ProductsService', () => {
       // warns were emitted for invalid TTL during getListTtlMs/getSingleTtlMs indirectly via constructor already tested
       // At least one warn for fallback
       expect(logger.warn).toHaveBeenCalled();
+    });
+  });
+
+  // 020-cache-constraints-indexes: key completeness + deterministic order + TTL pin (T005/T006)
+  describe('020 list-key completeness and order', () => {
+    it('distinct pagination inputs produce distinct cache keys (T005 FR-004)', async () => {
+      productsRepo.findAndCount.mockResolvedValue([[], 0]);
+      await service.findAll({ page: 1, limit: 10 });
+      await service.findAll({ page: 2, limit: 10 });
+      await service.findAll({ page: 1, limit: 20 });
+      const requestedCacheKeys = cacheManager.get.mock.calls.map(
+        (cacheGetArgs: unknown[]) => cacheGetArgs[0],
+      );
+      const listKeys = requestedCacheKeys.filter(
+        (requestedKey: unknown): requestedKey is string =>
+          typeof requestedKey === 'string' &&
+          requestedKey.startsWith('products:list:'),
+      );
+      // Every influencing input must participate in the key: 3 distinct inputs -> 3 distinct keys
+      expect(new Set(listKeys).size).toBe(3);
+    });
+
+    it('findAndCount uses deterministic order created_at,id ASC (T006 FR-005)', async () => {
+      cacheManager.get.mockResolvedValue(undefined);
+      productsRepo.findAndCount.mockResolvedValueOnce([[], 0]);
+      await service.findAll({ page: 1, limit: 10 });
+      expect(productsRepo.findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({ order: { created_at: 'ASC', id: 'ASC' } }),
+      );
+    });
+
+    it('invalid TTL falls back to 60_000ms default with warn (T006 FR-006)', async () => {
+      configService.get.mockImplementation((key: string) =>
+        key === 'PRODUCT_LIST_CACHE_TTL_MS' ? '0' : undefined,
+      );
+      cacheManager.get.mockResolvedValue(undefined);
+      productsRepo.findAndCount.mockResolvedValueOnce([[mockProduct()], 1]);
+      await service.findAll({ page: 1, limit: 10 });
+      expect(cacheManager.set).toHaveBeenCalledWith(
+        expect.stringContaining('products:list:'),
+        expect.any(Object),
+        60_000,
+      );
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Invalid TTL'),
+      );
+    });
+  });
+
+  // 020-cache-constraints-indexes: full-store flush ban (T010 FR-003 / SC-002)
+  describe('020 no full-store flush', () => {
+    it('healthy store: mutations never call clear() (T010)', async () => {
+      const storeKeys = cacheManager.store!.keys as jest.Mock;
+      storeKeys.mockResolvedValue(['products:list:v1:1:10']);
+      productsRepo.findOne.mockResolvedValue(null);
+      productsRepo.save.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity as Product),
+      );
+      productsRepo.findOneBy.mockResolvedValue(mockProduct({ id: 'abc-123' }));
+      await service.create({ name: 'A', description: 'a', price: 1, stock: 0 });
+      await service.update('abc-123', { price: 2 });
+      await service.remove('abc-123');
+      expect(cacheManager.clear).not.toHaveBeenCalled();
+    });
+
+    it('keys-unavailable store: invalidation versions instead of clear() (T010)', async () => {
+      cacheManager.store = {};
+      productsRepo.findOne.mockResolvedValueOnce(null);
+      productsRepo.save.mockResolvedValueOnce(
+        mockProduct({ id: 'nv', name: 'NV' }),
+      );
+      await service.create({
+        name: 'NV',
+        description: 'nv',
+        price: 5,
+        stock: 0,
+      });
+      expect(cacheManager.clear).not.toHaveBeenCalled();
+      // List generation bumped so stale versioned keys are orphaned, never flushed
+      expect(cacheManager.set).toHaveBeenCalledWith(
+        'products:cache-version',
+        2,
+        expect.any(Number),
+      );
     });
   });
 });

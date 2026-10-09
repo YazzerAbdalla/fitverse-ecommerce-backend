@@ -22,6 +22,49 @@ import { InventoryService } from '../inventory/inventory.service';
 import { NotificationService } from '../notifications/notification.service';
 
 /**
+ * Minimal shape of a cache store capable of listing keys by pattern.
+ * Declared structurally so any store (single, multi, or test double) offering
+ * `keys(pattern)` qualifies without coupling to a vendor-specific store type.
+ */
+interface KeyPatternLister {
+  keys: (keyPattern: string) => Promise<unknown>;
+}
+
+/**
+ * Checks whether a value offers pattern-based key listing.
+ * @param candidateStore - Value to inspect (typically a cache store field).
+ * @returns True when the value is an object exposing a callable `keys` function.
+ */
+function canListKeysByPattern(
+  candidateStore: unknown,
+): candidateStore is KeyPatternLister {
+  return (
+    typeof candidateStore === 'object' &&
+    candidateStore !== null &&
+    'keys' in candidateStore &&
+    typeof candidateStore.keys === 'function'
+  );
+}
+
+/**
+ * Checks whether a cached value is a product snapshot written by this service.
+ * Only `Product` rows are ever stored under `product:{id}` keys, so a shape
+ * check on the identity fields is sufficient to trust a hit.
+ * @param cachedValue - Value read from the cache (unknown origin).
+ * @returns True when the value is a non-null object with string `id` and `name`.
+ */
+function isCachedProductSnapshot(cachedValue: unknown): cachedValue is Product {
+  return (
+    typeof cachedValue === 'object' &&
+    cachedValue !== null &&
+    'id' in cachedValue &&
+    typeof cachedValue.id === 'string' &&
+    'name' in cachedValue &&
+    typeof cachedValue.name === 'string'
+  );
+}
+
+/**
  * This service is responsible for product catalog and product-cache (cache-aside).
  * It handles product CRUD, paginated listing, and Redis caching for products only.
  * It enforces that Redis is never authoritative for inventory/reservation/order
@@ -53,16 +96,160 @@ export class ProductsService {
   }
 
   /**
-   * Builds cache key for paginated product listing.
+   * Cache key of the list-generation counter used when key listing is unavailable.
+   * Bumping it orphans stale versioned list keys (they expire via TTL).
+   */
+  private readonly LIST_VERSION_KEY = 'products:cache-version';
+
+  /**
+   * TTL for the list-generation counter in ms.
+   * Outlives list entries (60s) so a reset version can never resurrect stale keys.
+   */
+  private readonly LIST_VERSION_TTL_MS = 7 * 24 * 3600 * 1000;
+
+  /**
+   * Builds a versioned cache key for paginated product listing.
+   * The version segment lets invalidation orphan keys without flushing the shared store.
+   * @param productListVersion - Current list generation (from `resolveProductListVersion`).
    * @param page - Page number (1-indexed).
    * @param limit - Items per page.
-   * @returns Cache key `products:list:{page}:{limit}`.
+   * @returns Cache key `products:list:v{version}:{page}:{limit}`.
    */
-  private buildKeyList(
+  private buildProductListKey(
+    productListVersion: number,
     page: number | undefined,
     limit: number | undefined,
   ): string {
-    return `products:list:${page}:${limit}`;
+    return `products:list:v${productListVersion}:${page}:${limit}`;
+  }
+
+  /**
+   * Resolves the current product-list generation, defaulting to 1 when missing or unreadable.
+   * Fail-open: a cache failure must never break catalog reads.
+   * @returns Current list generation (>= 1).
+   */
+  private async resolveProductListVersion(): Promise<number> {
+    try {
+      const storedVersion = await this.cacheManager.get<number | string>(
+        this.LIST_VERSION_KEY,
+      );
+      // Keyv preserves JSON primitives: accept finite numbers >= 1 and numeric strings
+      if (typeof storedVersion === 'number') {
+        if (Number.isFinite(storedVersion) && storedVersion >= 1) {
+          return Math.floor(storedVersion);
+        }
+        return 1;
+      }
+      if (typeof storedVersion === 'string') {
+        const parsedVersion = parseInt(storedVersion, 10);
+        if (Number.isFinite(parsedVersion) && parsedVersion >= 1) {
+          return parsedVersion;
+        }
+      }
+    } catch (resolveError: unknown) {
+      this.logger.warn(
+        `Cache GET failed for key ${this.LIST_VERSION_KEY}: ${this.toCacheLogMessage(resolveError)}`,
+      );
+    }
+    return 1;
+  }
+
+  /**
+   * Bumps the product-list generation so versioned list keys go stale without a store flush.
+   * Fail-open: logs and swallows cache failures.
+   */
+  private async bumpProductListVersion(): Promise<void> {
+    try {
+      const currentVersion = await this.resolveProductListVersion();
+      const nextVersion = currentVersion + 1;
+      await this.cacheManager.set(
+        this.LIST_VERSION_KEY,
+        nextVersion,
+        this.LIST_VERSION_TTL_MS,
+      );
+      this.logger.debug(`Cache list generation bumped to ${nextVersion}`);
+    } catch (bumpError: unknown) {
+      this.logger.warn(
+        `Cache list-generation bump failed: ${this.toCacheLogMessage(bumpError)}`,
+      );
+    }
+  }
+
+  /**
+   * Extracts a log-safe message from a caught value.
+   * @param caughtError - Value caught by a catch clause.
+   * @returns The error message when available, otherwise the stringified value.
+   */
+  private toCacheLogMessage(caughtError: unknown): string {
+    return caughtError instanceof Error
+      ? caughtError.message
+      : String(caughtError);
+  }
+
+  /**
+   * Deletes cache keys best-effort, logging (not throwing) per-key failures.
+   * @param cacheKeysToDelete - Keys to delete.
+   */
+  private async deleteCacheKeysBestEffort(
+    cacheKeysToDelete: string[],
+  ): Promise<void> {
+    await Promise.all(
+      cacheKeysToDelete.map((keyToDelete) =>
+        this.cacheManager.del(keyToDelete).catch((deleteError: unknown) => {
+          this.logger.warn(
+            `Cache DEL failed for key ${keyToDelete}: ${this.toCacheLogMessage(deleteError)}`,
+          );
+        }),
+      ),
+    );
+  }
+
+  /**
+   * Lists cached keys matching a pattern via the underlying store(s).
+   * Probes single-store then multi-store shapes; never touches the `Cache` facade typing.
+   * @param keyPattern - Pattern such as `products:list:*`.
+   * @returns Matching keys, empty array when none, null when no store supports listing.
+   */
+  private async findCacheKeysByPattern(
+    keyPattern: string,
+  ): Promise<string[] | null> {
+    const cacheHolder: unknown = this.cacheManager;
+    // Non-object holders cannot expose stores; treat as unsupported listing
+    if (typeof cacheHolder !== 'object' || cacheHolder === null) {
+      return null;
+    }
+    if ('store' in cacheHolder && canListKeysByPattern(cacheHolder.store)) {
+      return this.readPatternKeys(cacheHolder.store, keyPattern);
+    }
+    if ('stores' in cacheHolder && Array.isArray(cacheHolder.stores)) {
+      for (const candidateStore of cacheHolder.stores) {
+        if (canListKeysByPattern(candidateStore)) {
+          return this.readPatternKeys(candidateStore, keyPattern);
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Reads keys from a listing-capable store and keeps string entries only.
+   * @param keyLister - Store confirmed to offer `keys(pattern)` by `canListKeysByPattern`.
+   * @param keyPattern - Pattern such as `products:list:*`.
+   * @returns String keys, or null when the store answered with a non-array payload.
+   */
+  private async readPatternKeys(
+    keyLister: KeyPatternLister,
+    keyPattern: string,
+  ): Promise<string[] | null> {
+    const listedKeys: unknown = await keyLister.keys(keyPattern);
+    // Guard the store contract: only arrays qualify, only string entries survive
+    if (!Array.isArray(listedKeys)) {
+      return null;
+    }
+    return listedKeys.filter(
+      (listedEntry: unknown): listedEntry is string =>
+        typeof listedEntry === 'string',
+    );
   }
 
   /**
@@ -99,6 +286,7 @@ export class ProductsService {
 
   /**
    * Returns TTL for list cache via ConfigService.
+   * Unit is milliseconds (cache-manager/keyv convention, shared with rate-limit and OTP stores).
    * @returns TTL ms for `products:list:*` (default 60000, min 5000).
    */
   private getListTtlMs(): number {
@@ -108,6 +296,7 @@ export class ProductsService {
 
   /**
    * Returns TTL for single product cache via ConfigService.
+   * Unit is milliseconds (cache-manager/keyv convention, shared with rate-limit and OTP stores).
    * @returns TTL ms for `product:{id}` (default 300000, min 30000).
    */
   private getSingleTtlMs(): number {
@@ -124,85 +313,43 @@ export class ProductsService {
     try {
       await this.cacheManager.del(key);
       this.logger.debug(`Cache DEL: ${key}`);
-    } catch (e) {
+    } catch (deleteError: unknown) {
       this.logger.warn(
-        `Cache DEL failed for key ${key}: ${(e as Error).message}`,
+        `Cache DEL failed for key ${key}: ${this.toCacheLogMessage(deleteError)}`,
       );
     }
   }
 
   /**
-   * Invalidates all product list caches (fail-open).
-   * Uses store.keys('products:list:*') selective delete; fallback to clear() if keys unsupported.
+   * Invalidates all product list caches without ever flushing the shared store.
+   * Deletes discoverable keys, then bumps the list generation so undiscoverable
+   * or concurrently-created keys go stale. Fail-open: logs and swallows failures.
    */
   private async invalidateAllLists(): Promise<void> {
     try {
-      const store: unknown = (
-        this.cacheManager as unknown as { store?: unknown }
-      ).store;
-      const maybeKeys = (
-        store as { keys?: (pattern: string) => Promise<string[]> }
-      )?.keys;
-      if (typeof maybeKeys === 'function') {
-        const keys: string[] = await maybeKeys.call(store, 'products:list:*');
-        if (keys && keys.length > 0) {
-          await Promise.all(
-            keys.map((k) =>
-              (this.cacheManager.del(k) as Promise<unknown>).catch(
-                (err: unknown) =>
-                  this.logger.warn(
-                    `Cache DEL failed for key ${k}: ${(err as Error).message}`,
-                  ),
-              ),
-            ),
-          );
-          this.logger.debug(`Cache invalidate lists: ${keys.length} keys`);
-        } else {
-          this.logger.debug('Cache invalidate lists: no keys found');
-        }
-        return;
+      const discoverableKeys =
+        await this.findCacheKeysByPattern('products:list:*');
+      if (discoverableKeys && discoverableKeys.length > 0) {
+        await this.deleteCacheKeysBestEffort(discoverableKeys);
+        this.logger.debug(
+          `Cache invalidate lists: ${discoverableKeys.length} keys`,
+        );
+      } else if (discoverableKeys) {
+        this.logger.debug('Cache invalidate lists: no keys found');
+      } else {
+        this.logger.debug(
+          'Cache invalidate lists: key listing unavailable, version bump only',
+        );
       }
-      // Also try cacheManager store via any with prefix scan
-      const cacheStore = (
-        this.cacheManager as unknown as { stores?: unknown[] }
-      ).stores;
-      if (Array.isArray(cacheStore)) {
-        // fallback: iterate stores
-        for (const s of cacheStore as Array<{
-          keys?: (p: string) => Promise<string[]>;
-          del?: (k: string) => Promise<unknown>;
-        }>) {
-          if (typeof s.keys === 'function') {
-            const keys = await s.keys('products:list:*');
-            if (keys.length > 0) {
-              await Promise.all(
-                keys.map((k) =>
-                  this.cacheManager
-                    .del(k)
-                    .catch((err: unknown) =>
-                      this.logger.warn(
-                        `Cache DEL failed for key ${k}: ${(err as Error).message}`,
-                      ),
-                    ),
-                ),
-              );
-              this.logger.debug(
-                `Cache invalidate lists via stores: ${keys.length} keys`,
-              );
-              return;
-            }
-          }
-        }
-      }
-      // Fallback to clear if keys not exposed
+      // Generation bump covers keys created between listing and delete, and is the
+      // sole mechanism when the store cannot list keys. Never cacheManager.clear():
+      // the store is shared with rate-limit, expiration, and dedup namespaces.
+      await this.bumpProductListVersion();
+    } catch (invalidateError: unknown) {
       this.logger.warn(
-        'Fallback clear() invoked for products:list:* invalidation, store.keys not available',
+        `Cache invalidateAllLists failed: ${this.toCacheLogMessage(invalidateError)}`,
       );
-      await this.cacheManager.clear();
-    } catch (e) {
-      this.logger.warn(
-        `Cache invalidateAllLists failed: ${(e as Error).message}`,
-      );
+      await this.bumpProductListVersion();
     }
   }
 
@@ -216,9 +363,9 @@ export class ProductsService {
         await Promise.all(ids.map((id) => this.invalidateSingle(id)));
       }
       await this.invalidateAllLists();
-    } catch (e) {
+    } catch (cachesError: unknown) {
       this.logger.warn(
-        `Cache invalidateProductCaches failed: ${(e as Error).message}`,
+        `Cache invalidateProductCaches failed: ${this.toCacheLogMessage(cachesError)}`,
       );
     }
   }
@@ -233,10 +380,7 @@ export class ProductsService {
     // Make slug for the product for the frontend url
     // Check the name and slug if are they already existed or not
 
-    const { name, stock, ...rest } =
-      createProductInput as CreateProductInput & {
-        stock?: number;
-      };
+    const { name, stock, description, price } = createProductInput;
 
     const slug = slugify(name, {
       lower: true,
@@ -253,14 +397,17 @@ export class ProductsService {
       );
     }
 
+    // Product row persists catalog columns only; stock is seeded into Inventory below
     const productToSave = this.productsRepo.create({
-      ...rest,
       name,
       slug,
-    } as Partial<Product>);
+      description,
+      price,
+    });
 
     const savedProduct = await this.productsRepo.save(productToSave);
 
+    // Input validation requires stock, but treat a missing value as zero stock
     const initialStock =
       typeof stock === 'number' && Number.isFinite(stock) ? stock : 0;
 
@@ -291,14 +438,12 @@ export class ProductsService {
   async createMany(createProductInputs: CreateProductInput[]) {
     // Extract stock from inputs; product entity no longer stores it
     const inputsWithStock = createProductInputs.map((input) => {
-      const { stock, ...rest } = input as CreateProductInput & {
-        stock?: number;
-      };
+      const { stock, ...rest } = input;
       return { rest, stock };
     });
 
     const productEntities = inputsWithStock.map(({ rest }) =>
-      this.productsRepo.create(rest as Partial<Product>),
+      this.productsRepo.create(rest),
     );
 
     const uniqueNamesInRequest = new Set<string>();
@@ -381,13 +526,14 @@ export class ProductsService {
   async findAll(paginationArgs: PaginationArgs) {
     const { page, limit } = paginationArgs;
 
-    const key = this.buildKeyList(page, limit);
+    const productListVersion = await this.resolveProductListVersion();
+    const key = this.buildProductListKey(productListVersion, page, limit);
     let cachedProducts: unknown = undefined;
     try {
       cachedProducts = await this.cacheManager.get(key);
-    } catch (e) {
+    } catch (getError: unknown) {
       this.logger.warn(
-        `Cache GET failed for key ${key}: ${(e as Error).message}`,
+        `Cache GET failed for key ${key}: ${this.toCacheLogMessage(getError)}`,
       );
       cachedProducts = undefined;
     }
@@ -401,12 +547,15 @@ export class ProductsService {
 
     this.logger.debug(`Cache MISS: ${key}`);
 
+    // Pagination offset for the requested page (1-indexed input)
     const skip = (page! - 1) * limit!;
 
     // TODO: Add the search and filters in the future
+    // Deterministic order keeps pages stable across cache miss/hit and invalidation
     const [data, total] = await this.productsRepo.findAndCount({
       take: limit,
       skip,
+      order: { created_at: 'ASC', id: 'ASC' },
     });
 
     const result = {
@@ -423,9 +572,9 @@ export class ProductsService {
     const ttl = this.getListTtlMs();
     try {
       await this.cacheManager.set(key, result, ttl);
-    } catch (e) {
+    } catch (setError: unknown) {
       this.logger.warn(
-        `Cache SET failed for key ${key}: ${(e as Error).message}`,
+        `Cache SET failed for key ${key}: ${this.toCacheLogMessage(setError)}`,
       );
     }
 
@@ -442,17 +591,17 @@ export class ProductsService {
     let cached: unknown = undefined;
     try {
       cached = await this.cacheManager.get(key);
-    } catch (e) {
+    } catch (getError: unknown) {
       this.logger.warn(
-        `Cache GET failed for key ${key}: ${(e as Error).message}`,
+        `Cache GET failed for key ${key}: ${this.toCacheLogMessage(getError)}`,
       );
       cached = undefined;
     }
 
     // HIT only if cached and not null; null means not found (do not cache negative)
-    if (cached !== undefined && cached !== null) {
+    if (isCachedProductSnapshot(cached)) {
       this.logger.debug(`Cache HIT: ${key}`);
-      return cached as Product;
+      return cached;
     }
 
     this.logger.debug(`Cache MISS: ${key}`);
@@ -466,9 +615,9 @@ export class ProductsService {
     const ttl = this.getSingleTtlMs();
     try {
       await this.cacheManager.set(key, product, ttl);
-    } catch (e) {
+    } catch (setError: unknown) {
       this.logger.warn(
-        `Cache SET failed for key ${key}: ${(e as Error).message}`,
+        `Cache SET failed for key ${key}: ${this.toCacheLogMessage(setError)}`,
       );
     }
 
@@ -490,10 +639,12 @@ export class ProductsService {
         `Trying to update a product that doesn't exist`,
       );
 
-    const { stock: _stock, ...restInput } =
-      updateProductInput as UpdateProductInput & { stock?: number };
+    // Stock is owned by Inventory: strip it so the Product row never persists stock
+    const { stock: ignoredStockField, ...productOnlyPatch } =
+      updateProductInput;
+    void ignoredStockField;
 
-    this.productsRepo.merge(product, restInput);
+    this.productsRepo.merge(product, productOnlyPatch);
 
     const saved = await this.productsRepo.save(product);
 
@@ -544,9 +695,16 @@ export class ProductsService {
         const partialData = manyPartialProducts.find(
           (p) => p.id === existingProduct.id,
         );
-        const { stock: _stock, ...sanitized } =
-          (partialData as Record<string, unknown>) || {};
-        return manager.merge(Product, existingProduct, sanitized);
+        // Length + membership checks above guarantee a match; fail loudly instead of merging undefined
+        if (partialData === undefined) {
+          throw new NotFoundException(
+            `Update failed. Product with ID [${existingProduct.id}] was not found.`,
+          );
+        }
+        // Stock is owned by Inventory: strip it so the Product row never persists stock
+        const { stock: ignoredStockField, ...sanitizedPatch } = partialData;
+        void ignoredStockField;
+        return manager.merge(Product, existingProduct, sanitizedPatch);
       });
 
       // Save the updated array to db
@@ -577,45 +735,27 @@ export class ProductsService {
   }
 
   /**
-   * Deletes all products, then clears product caches.
+   * Deletes all products, then invalidates product caches without a store flush.
+   * Undiscoverable single-product keys expire via TTL; the list generation bump
+   * covers them immediately.
    * @returns Delete result.
    */
   async resetAll() {
     const result = await this.productsRepo.deleteAll();
-    // Clear all product-related caches (lists + singles via clear or selective)
+    // Clear all product-related caches (lists + discoverable singles, never clear())
     try {
-      // Prefer selective invalidation for products:lists plus clear singles
       await this.invalidateAllLists();
-      // If store supports keys for product:*, clear singles selectively as fallback
-      const store: unknown = (
-        this.cacheManager as unknown as { store?: unknown }
-      ).store;
-      const maybeKeys = (store as { keys?: (p: string) => Promise<string[]> })
-        ?.keys;
-      if (typeof maybeKeys === 'function') {
-        try {
-          const prodKeys: string[] = await maybeKeys.call(store, 'product:*');
-          await Promise.all(
-            prodKeys.map((k) =>
-              this.cacheManager.del(k).catch(() => undefined),
-            ),
-          );
-        } catch {
-          // fallback to clear singles via clear if needed
-        }
-      } else {
-        // Fallback: clear all (only products are cached globally per SC-008, but warn)
-        try {
-          await this.cacheManager.clear();
-        } catch (e) {
-          this.logger.warn(
-            `Cache clear failed for resetAll: ${(e as Error).message}`,
-          );
-        }
+      const singleProductKeys = await this.findCacheKeysByPattern('product:*');
+      if (singleProductKeys && singleProductKeys.length > 0) {
+        await this.deleteCacheKeysBestEffort(singleProductKeys);
+      } else if (!singleProductKeys) {
+        this.logger.debug(
+          'Cache resetAll: single-key listing unavailable, TTL expiry heals undiscoverable singles',
+        );
       }
-    } catch (e) {
+    } catch (resetError: unknown) {
       this.logger.warn(
-        `Cache invalidate resetAll failed: ${(e as Error).message}`,
+        `Cache invalidate resetAll failed: ${this.toCacheLogMessage(resetError)}`,
       );
     }
     return result;

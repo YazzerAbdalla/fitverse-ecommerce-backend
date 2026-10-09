@@ -19,6 +19,7 @@ Format: `NNNN-short-title.md` with `Status: Accepted | Proposed | Intended`.
 | [0005](./0005-jwt-auth.md) | JWT auth (Passport + bcrypt + roles) | Accepted |
 | [0006](./0006-graphql-products.md) | GraphQL for products, REST elsewhere | Accepted |
 | [0007](./0007-inventory-reservation.md) | Inventory/reservation intended model | Intended |
+| [0016](./0016-cache-constraints-closeout.md) | Cache + constraints close-out (no-clear, version-stamp, audit-first DDL) | Accepted |
 
 ## Open Questions (undecided — decide in a spec, not in code)
 
@@ -32,8 +33,7 @@ Format: `NNNN-short-title.md` with `Status: Accepted | Proposed | Intended`.
 - **`InventoryService.checkAvailability`** — current implementation has inverted
   logic (throws when stock *is* sufficient). Bug to fix when implementing
   inventory.
-- **Product cache invalidation** — list cache (`products:list:*`) is never
-  invalidated on mutations; decide invalidation strategy.
+- **Product cache invalidation** — decided 2026-10-09, see ADR-0016 (selective delete + version-stamp fallback, never `clear()`).
 - **Migrations vs `synchronize`** — `synchronize: true` is a dev shortcut; must
   move to real migrations before production.
 - **`auth.service.ts` leftover `console.log`** — remove; use `Logger`.

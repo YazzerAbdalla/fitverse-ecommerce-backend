@@ -25,10 +25,11 @@ State transitions: none (lifecycle untouched). Uniqueness: unchanged (`Product.n
 
 ## 3. Audit (blocking precondition for migration task)
 
-Run before writing DDL; record results here:
+Recorded 2026-10-09 on live dev PG (`ecommerce`, tables lowercase):
 
-- [ ] Violation scan: `SELECT COUNT(*) FROM "Product" WHERE price < 0` (plus `Order.total < 0`, `Payment.amount < 0`, `Inventory` triple-check, `quantity <= 0` tables) → counts + cleanup decision per 2026-10-09 audit-first rule
-- [ ] `EXPLAIN` expiry scan uses `status+expiresAt` composite → plan output
-- [ ] `EXPLAIN` order-by-user, inventory-by-product, order-items-by-order → plan outputs
-- [ ] `EXPLAIN` order-by-createdAt range (revenue window) → missing-index verdict + new index DDL if added
-- [ ] Final ≤3 index list with per-index query evidence
+- [x] Violation scan: `product.price < 0` → 0; `"order".total < 0` → 0; `inventory` triple-check → 0; `payment.amount < 0` → 0; `order_item quantity/unit_price` → 0; `reservation_item quantity` → 0. Verdict: strict `CHECK`s safe, no cleanup needed.
+- [x] `EXPLAIN` expiry scan uses `status+expiresAt` composite → `Index Scan using IDX_18950fa318a3e2e63f7be6ec27` ✓ re-proven, no action.
+- [x] `EXPLAIN` inventory-by-product → `Seq Scan` but `btree ("productId")` + `UQ` exist (tiny-table planner choice, same fragility as ADR-0014) → index-existence asserted, no action. Same for `cart("userId")` (unique constraint covers).
+- [x] `EXPLAIN` revenue window (`status='COMPLETED' AND created_at BETWEEN`) → `Seq Scan`, no supporting index → **ADD `IDX_order_status_createdAt (status, created_at)`**.
+- [x] `EXPLAIN` owner listing (`userId = ? ORDER BY created_at DESC`) → `Seq Scan + Sort`, no supporting index → **ADD `IDX_order_userId_createdAt (userId, created_at)`**.
+- [x] Final new-index list (2 of ≤3 budget): the two order composites above. No speculative adds.

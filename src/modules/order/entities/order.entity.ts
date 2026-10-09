@@ -17,11 +17,15 @@ import { OrderItem } from './order-items.entity';
 /**
  * This entity represents an Order.
  * It handles the persisted order with total and status.
+ * Total is non-negative by DB backstop; owner and revenue-window reads are
+ * index-backed (`userId + created_at`, `status + created_at`).
  */
 @Entity()
 @Check(`"total" >= 0`)
 @Index(['userId'])
 @Index(['status'])
+@Index('IDX_order_status_createdAt', ['status', 'created_at'])
+@Index('IDX_order_userId_createdAt', ['userId', 'created_at'])
 export class Order {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
