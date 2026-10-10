@@ -2,6 +2,7 @@ import { ObjectType, Field, Int } from '@nestjs/graphql';
 import { CartItem } from 'src/modules/cart/entities/cart-items.entity';
 import { OrderItem } from 'src/modules/order/entities/order-items.entity';
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -13,10 +14,16 @@ import {
 } from 'typeorm';
 import { Inventory } from 'src/modules/inventory/entities/inventory.entity';
 
+/**
+ * This entity represents a catalog product.
+ * It owns catalog columns only (name, slug, description, price); stock state
+ * lives in Inventory. Price is non-negative by DB backstop.
+ */
 @ObjectType()
 @Entity()
 @Index(['name'])
 @Unique(['name'])
+@Check('CHK_product_price_non_negative', '"price" >= 0')
 export class Product {
   @Field()
   @PrimaryGeneratedColumn('uuid')

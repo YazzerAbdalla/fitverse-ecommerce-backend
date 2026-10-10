@@ -722,7 +722,7 @@ Cancellation cannot accidentally double-release or double-return inventory. — 
 
 # Phase 9 — Redis / Caching
 
-**Status: PARTIALLY DONE / INFRASTRUCTURE EXISTS — demo close-out 2026-10-06: invalidation fix + miss/hit/invalidation tests only (key redesign + singleflight deferred)**
+**Status: DONE (demo scope) — 2026-10-09, spec `specs/020-cache-constraints-indexes/`** (selective invalidation + version-stamp fallback, deterministic order, TTL-ms pin, miss/hit/invalidation + namespace + never-authoritative proofs; key redesign + singleflight deferred post-demo)
 
 **Demo scope (with Phase 13, 0.5 day combined, 1–2 AI sessions):** product-list invalidation on mutation + `miss/hit/invalidation` tests + `never-authoritative` proof. Cache-key redesign and singleflight are post-demo.
 
@@ -732,13 +732,13 @@ The remaining work is deciding where caching actually provides value.
 
 ## Tasks
 
-* [ ] Define product cache strategy
-* [ ] Define cache keys
-* [ ] Define TTLs
-* [ ] Invalidate cache after product mutation
-* [ ] Test cache miss
-* [ ] Test cache hit
-* [ ] Test invalidation
+* [x] Define product cache strategy — cache-aside, catalog reads only (`ProductsService`, `products:list:v{n}:{page}:{limit}` TTL 60s + `product:{id}` TTL 300s, fail-open)
+* [x] Define cache keys — versioned list keys + single keys; key-completeness test pins every `findAll` input in the key (spec FR-004)
+* [x] Define TTLs — milliseconds pinned + documented (list 60_000/min 5_000, single 300_000/min 30_000, warn-on-fallback)
+* [x] Invalidate cache after product mutation — all six paths post-commit; `clear()` deleted everywhere, version-stamp fallback when key listing unavailable
+* [x] Test cache miss — unit + live real-Redis miss→hit→mutate→miss
+* [x] Test cache hit — unit + live, second identical read serves cache with zero DB calls
+* [x] Test invalidation — live: post-mutation read misses + generation bump; foreign `rl:`/`expiration:`/`notification:`/cooldown namespaces proven intact
 
 Example:
 
@@ -944,7 +944,7 @@ The second attempt must not subtract inventory again — **MET**: `POST /reserva
 
 # Phase 13 — Database Constraints & Indexes
 
-**Status: PARTIALLY DONE / DESIGN DEFINED, IMPLEMENTATION NOT COMPLETE — demo close-out 2026-10-06: 2–3 missing indexes + EXPLAIN only (with Phase 9, 0.5 day combined)**
+**Status: DONE (demo scope) — 2026-10-09, spec `specs/020-cache-constraints-indexes/`** (audit-first: zero violations, `CHK_product_price_non_negative` + `IDX_order_status_createdAt` + `IDX_order_userId_createdAt` via migration `1755900000013`, EXPLAIN proofs; speculative indexes out of scope)
 
 ## Constraints
 
