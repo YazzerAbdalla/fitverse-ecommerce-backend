@@ -1,0 +1,63 @@
+# ------------------------------------------------------
+# THIS FILE WAS AUTOMATICALLY GENERATED (DO NOT MODIFY)
+# ------------------------------------------------------
+# Verbatim copy of D:\Job\Projects\mini-e-commerce\src\schema.gql on 2026-10-10.
+# Apollo code-first source of truth for API-GQL-*. Regenerate: npm run start:dev.
+
+input CreateProductInput {
+  description: String!
+  name: String!
+  price: Int!
+  stock: Int!
+}
+
+"""
+A date-time string at UTC, such as 2019-12-03T09:54:33Z, compliant with the date-time format.
+"""
+scalar DateTime
+
+type DeleteResponse {
+  affected: Int!
+}
+
+type Mutation {
+  createManyProducts(createProductInputs: [CreateProductInput!]!): [Product!]!
+  createProduct(createProductInput: CreateProductInput!): Product!
+  removeAllProducts: DeleteResponse!
+  removeProduct(id: String!): Product!
+  updateProduct(id: String!, updateProductInput: UpdateProductInput!): Product!
+}
+
+type PaginationMeta {
+  currentPage: Int!
+  itemCount: Int!
+  itemsPerPage: Int!
+  totalItems: Int!
+  totalPages: Int!
+}
+
+type Product {
+  created_at: DateTime!
+  description: String!
+  id: String!
+  name: String!
+  price: Int!
+  slug: String!
+}
+
+type ProductPagination {
+  data: [Product!]!
+  meta: PaginationMeta!
+}
+
+type Query {
+  product(id: String!): Product!
+  products(limit: Int = 10, page: Int = 1): ProductPagination!
+}
+
+input UpdateProductInput {
+  description: String
+  name: String
+  price: Int
+  stock: Int
+}
