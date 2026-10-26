@@ -1,6 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  InternalServerErrorException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InventoryService } from './inventory.service';
 import { Inventory } from './entities/inventory.entity';
 import { ProductsService } from '../products/products.service';
@@ -345,6 +350,95 @@ describe('InventoryService', () => {
       await expect(service.completeSale('p1', 2)).rejects.toThrow(
         ConflictException,
       );
+    });
+  });
+
+  describe('reserveManyOnCheckout', () => {
+    it('reserves each requested quantity inside the active transaction', async () => {
+      const inventoryRow = new Inventory();
+      inventoryRow.productId = 'product-1';
+      inventoryRow.stock = 10;
+      inventoryRow.reservedAmount = 2;
+      const save = jest
+        .fn()
+        .mockImplementation((_entity: typeof Inventory, rows: Inventory[]) =>
+          Promise.resolve(rows),
+        );
+      const manager = {
+        queryRunner: { isTransactionActive: true },
+        save,
+      } as unknown as EntityManager;
+
+      const result = await service.reserveManyOnCheckout(
+        [inventoryRow],
+        new Map([['product-1', 3]]),
+        manager,
+      );
+
+      expect(inventoryRow.reservedAmount).toBe(5);
+      expect(result).toEqual([inventoryRow]);
+      expect(save).toHaveBeenCalledWith(Inventory, [inventoryRow]);
+    });
+
+    it('rejects invalid quantities without saving inventory', async () => {
+      const inventoryRow = new Inventory();
+      inventoryRow.productId = 'product-1';
+      inventoryRow.stock = 10;
+      inventoryRow.reservedAmount = 2;
+      const save = jest.fn();
+      const manager = {
+        queryRunner: { isTransactionActive: true },
+        save,
+      } as unknown as EntityManager;
+
+      await expect(
+        service.reserveManyOnCheckout(
+          [inventoryRow],
+          new Map([['product-1', -1]]),
+          manager,
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(inventoryRow.reservedAmount).toBe(2);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('rejects insufficient stock without saving inventory', async () => {
+      const inventoryRow = new Inventory();
+      inventoryRow.productId = 'product-1';
+      inventoryRow.stock = 10;
+      inventoryRow.reservedAmount = 8;
+      const save = jest.fn();
+      const manager = {
+        queryRunner: { isTransactionActive: true },
+        save,
+      } as unknown as EntityManager;
+
+      await expect(
+        service.reserveManyOnCheckout(
+          [inventoryRow],
+          new Map([['product-1', 3]]),
+          manager,
+        ),
+      ).rejects.toThrow(ConflictException);
+
+      expect(inventoryRow.reservedAmount).toBe(8);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('rejects inventory changes outside a transaction', async () => {
+      const manager = {
+        queryRunner: { isTransactionActive: false },
+        save: jest.fn(),
+      } as unknown as EntityManager;
+
+      await expect(
+        service.reserveManyOnCheckout(
+          [{ productId: 'product-1' } as Inventory],
+          new Map([['product-1', 1]]),
+          manager,
+        ),
+      ).rejects.toThrow(InternalServerErrorException);
     });
   });
 

@@ -1,7 +1,9 @@
 import {
+  BadRequestException,
   ConflictException,
   Inject,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
   forwardRef,
@@ -301,20 +303,94 @@ export class InventoryService {
     return inventoryRows;
   }
 
+  /**
+   * Adds the requested quantities to reserved stock for checkout.
+   *
+   * The caller must pass rows locked by the same active transaction. This
+   * method checks every request before saving any inventory changes.
+   *
+   * @param inventoryRows - Inventory rows locked by the checkout transaction.
+   * @param productsMap - Product IDs and the positive integer quantities to reserve.
+   * @param manager - EntityManager belonging to the active checkout transaction.
+   * @returns The saved inventory rows.
+   * @throws BadRequestException if product IDs or quantities do not match the rows.
+   * @throws ConflictException if any product has insufficient available stock.
+   * @throws InternalServerErrorException if the manager is not in an active transaction.
+   * @throws NotFoundException if a requested product has no inventory row.
+   */
   async reserveManyOnCheckout(
     inventoryRows: Inventory[],
     productsMap: Map<string, number>,
     manager: EntityManager,
   ): Promise<Inventory[]> {
-    for (const inventoryRow of inventoryRows) {
-      const neededQuantity = productsMap.get(inventoryRow.productId);
-
-      if (neededQuantity) {
-        inventoryRow.reservedAmount += neededQuantity;
-      }
+    // Inventory changes must be atomic with the reservation created by checkout.
+    if (manager.queryRunner?.isTransactionActive !== true) {
+      throw new InternalServerErrorException(
+        'Inventory reservation requires an active transaction',
+      );
     }
 
-    return manager.save(Inventory, inventoryRows);
+    // Both sides must contain requested products before any stock can change.
+    if (productsMap.size === 0 || inventoryRows.length === 0) {
+      throw new BadRequestException(
+        'Products and inventory rows must not be empty',
+      );
+    }
+
+    const inventoryByProductId = new Map<string, Inventory>();
+    for (const inventoryRow of inventoryRows) {
+      if (inventoryByProductId.has(inventoryRow.productId)) {
+        throw new BadRequestException(
+          `Duplicate inventory row for product ${inventoryRow.productId}`,
+        );
+      }
+      inventoryByProductId.set(inventoryRow.productId, inventoryRow);
+    }
+
+    if (inventoryByProductId.size !== productsMap.size) {
+      throw new BadRequestException(
+        'Inventory rows must match the requested products',
+      );
+    }
+
+    const inventoryReservations: Array<{
+      inventoryRow: Inventory;
+      quantity: number;
+    }> = [];
+    for (const [productId, neededQuantity] of productsMap) {
+      // Recheck DTO rules because internal service calls can bypass validation.
+      if (!Number.isInteger(neededQuantity) || neededQuantity <= 0) {
+        throw new BadRequestException(
+          `Quantity must be a positive integer for product ${productId}`,
+        );
+      }
+
+      const inventoryRow = inventoryByProductId.get(productId);
+      if (!inventoryRow) {
+        throw new NotFoundException(
+          `Inventory not found for product ${productId}`,
+        );
+      }
+
+      // Available stock excludes units already reserved by other checkouts.
+      if (neededQuantity > inventoryRow.available) {
+        throw new ConflictException(
+          `Insufficient stock for product ${productId}`,
+        );
+      }
+
+      inventoryReservations.push({ inventoryRow, quantity: neededQuantity });
+    }
+
+    // Update rows only after every requested product passed validation.
+    for (const { inventoryRow, quantity } of inventoryReservations) {
+      inventoryRow.reservedAmount += quantity;
+    }
+
+    return manager.save(
+      Inventory,
+      inventoryReservations.map(({ inventoryRow }) => inventoryRow),
+    );
   }
 
   async releaseManyReservations(
