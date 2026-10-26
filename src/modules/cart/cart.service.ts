@@ -36,20 +36,6 @@ export class CartService {
   ) {}
 
   /**
-   * Find the user's cart.
-   */
-  private async findUserCart(userId: string) {
-    return this.cartRepository.findOne({
-      where: {
-        user: { id: userId },
-      },
-      relations: {
-        cart_items: true,
-      },
-    });
-  }
-
-  /**
    * Create a new cart for the user.
    */
   private async createUserCart(userId: string) {
@@ -67,9 +53,23 @@ export class CartService {
   }
 
   /**
+   * Find the user's cart.
+   */
+  private async findUserCart(userId: string) {
+    return this.cartRepository.findOne({
+      where: {
+        user: { id: userId },
+      },
+      relations: {
+        cart_items: true,
+      },
+    });
+  }
+
+  /**
    * Find the user's existing cart or create one if it doesn't exist.
    */
-  private async findOrCreateUserCart(userId: string) {
+  async findOrCreateUserCart(userId: string) {
     const existingCart = await this.findUserCart(userId);
 
     if (existingCart) {
@@ -344,9 +344,7 @@ export class CartService {
     const cart = await this.findUserCart(userId);
 
     if (!cart) {
-      this.logger.warn(`Cart not found for user ${userId}`);
-
-      throw new NotFoundException('Cart not found.');
+      return this.createUserCart(userId);
     }
 
     const cartItems = cart.cart_items;
@@ -430,12 +428,20 @@ export class CartService {
     );
   }
 
-  /**
-   * Get the user's cart.
-   */
-  async getUserCart(userId: string) {
-    this.logger.debug(`Fetching cart for user ${userId}`);
+  async findUserCartAndClearFacade(manager: EntityManager, userId: string) {
+    // 1. Load cart with items + product via manager (stay in transaction)
+    const cart = await manager.findOne(Cart, {
+      where: { user: { id: userId } },
+      relations: { cart_items: { product: true } },
+    });
 
-    return this.findOrCreateUserCart(userId);
+    if (!cart || !cart.cart_items || cart.cart_items.length === 0) {
+      throw new BadRequestException('Cart is empty');
+    }
+
+    // 2. Delete any cartItem related with this cart
+    await manager.delete(CartItem, { where: { cart: { id: cart.id } } });
+
+    return cart;
   }
 }

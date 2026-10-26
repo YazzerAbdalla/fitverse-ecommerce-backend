@@ -39,7 +39,7 @@ export class CartController {
     type: Cart,
   })
   getCart(@CurrentUser('sub') userId: string): Promise<Cart> {
-    return this.cartService.getUserCart(userId);
+    return this.cartService.findOrCreateUserCart(userId);
   }
 
   @Post()

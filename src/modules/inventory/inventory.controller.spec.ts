@@ -21,6 +21,6 @@ describe('InventoryController (019 T002b role boundary)', () => {
 
   it('keeps inventory reads any-role', () => {
     expect(rolesOf('getInventory')).toEqual([]);
-    expect(rolesOf('checkAvailability')).toEqual([]);
+    expect(rolesOf('checkProductAvailability')).toEqual([]);
   });
 });

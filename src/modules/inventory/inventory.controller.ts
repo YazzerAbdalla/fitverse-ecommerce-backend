@@ -46,7 +46,7 @@ export class InventoryController {
 
   @Auth()
   @Get(':productId/availability')
-  async checkAvailability(
+  async checkProductAvailability(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Query() query: AvailabilityQueryDto,
   ) {

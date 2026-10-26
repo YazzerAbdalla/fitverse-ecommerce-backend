@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { Inventory } from './entities/inventory.entity';
 import { ProductsService } from '../products/products.service';
 
@@ -71,7 +71,7 @@ export class InventoryService {
     return inventory;
   }
 
-  async checkAvailability(
+  async checkProductAvailability(
     productId: string,
     neededQuantity: number,
   ): Promise<boolean> {
@@ -258,11 +258,88 @@ export class InventoryService {
   }
 
   // Deprecated compatibility alias
-  checkAvailabilityMany(): never {
+  checkProductAvailabilityMany(): never {
     throw new ConflictException('Not implemented');
   }
 
   increaseStockLegacy(): never {
     throw new ConflictException('Not implemented');
+  }
+
+  async checkManyAvailiablityOnCheckout(
+    productsMap: Map<string, number>,
+    productsIds: string[],
+    manager: EntityManager,
+  ): Promise<Inventory[]> {
+    // 1. fetch the inventory rows using In() keyword
+    const inventoryRows = await manager.find(Inventory, {
+      where: { productId: In(productsIds) },
+      lock: { mode: 'pessimistic_write' },
+    });
+    // create a map of productId to inventory row for easy lookup
+    const inventoryMap = new Map(
+      inventoryRows.map((row) => [row.productId, row]),
+    );
+    // 2. Check the inventory stock for those products
+    for (const [productId, neededQuantity] of productsMap) {
+      const inventoryRow = inventoryMap.get(productId);
+
+      if (!inventoryRow) {
+        throw new NotFoundException(
+          `Inventory not found for product ${productId}`,
+        );
+      }
+
+      if (neededQuantity > inventoryRow.available) {
+        throw new ConflictException(
+          `Insufficient stock for product ${productId}`,
+        );
+      }
+    }
+    // if all good return the inventory rows for further processing (reservation, etc.)
+
+    return inventoryRows;
+  }
+
+  async reserveManyOnCheckout(
+    inventoryRows: Inventory[],
+    productsMap: Map<string, number>,
+    manager: EntityManager,
+  ): Promise<Inventory[]> {
+    for (const inventoryRow of inventoryRows) {
+      const neededQuantity = productsMap.get(inventoryRow.productId);
+
+      if (neededQuantity) {
+        inventoryRow.reservedAmount += neededQuantity;
+      }
+    }
+
+    return manager.save(Inventory, inventoryRows);
+  }
+
+  async releaseManyReservations(
+    productsMap: Map<string, number>,
+    productsIds: string[],
+    manager: EntityManager,
+  ): Promise<Inventory[]> {
+    const inventoryRows = await manager.find(Inventory, {
+      where: { productId: In(productsIds) },
+      lock: { mode: 'pessimistic_write' },
+    });
+
+    for (const inventoryRow of inventoryRows) {
+      const reservedQuantity = productsMap.get(inventoryRow.productId);
+
+      if (reservedQuantity) {
+        if (inventoryRow.reservedAmount - reservedQuantity < 0) {
+          throw new ConflictException(
+            `Cannot release more than reserved for product ${inventoryRow.productId}`,
+          );
+        }
+        inventoryRow.reservedAmount -= reservedQuantity;
+      }
+    }
+
+    return manager.save(inventoryRows);
   }
 }
