@@ -2,11 +2,14 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  NotFoundException,
 } from '@nestjs/common';
 import { InventoryService } from '../inventory/inventory.service';
 import { CreateReservationRefactored } from './dto/create-reservation.dto';
 import { ReservationItem } from './entities/reservation-item.entity';
 import { Reservation } from './entities/reservation.entity';
+import { Repository } from 'typeorm';
+import { InjectRepository } from '@nestjs/typeorm';
 
 /**
  * This service creates checkout reservations and their items.
@@ -15,7 +18,11 @@ import { Reservation } from './entities/reservation.entity';
  */
 @Injectable()
 export class ReservationRefactoredService {
-  constructor(private readonly inventoryService: InventoryService) {}
+  constructor(
+    private readonly inventoryService: InventoryService,
+    @InjectRepository(Reservation)
+    private readonly reservationRepository: Repository<Reservation>,
+  ) {}
 
   /**
    * Creates a reservation for the requested products during checkout.
@@ -131,5 +138,50 @@ export class ReservationRefactoredService {
         },
       },
     };
+  }
+
+  /**
+   *
+   * @param orderId
+   * @param userId
+   * @returns The reservation associated with the given orderId and userId, or null if not found.
+   * @throws BadRequestException if the orderId or userId is invalid.
+   * @throws InternalServerErrorException if there is an issue querying the database.
+   * @throws NotFoundException if no reservation is found for the given orderId and userId.
+   */
+
+  async getReservationByOrderId(
+    orderId: string,
+    userId: string,
+  ): Promise<Reservation> {
+    // Implementation for fetching a reservation by orderId and userId
+    // This function should query the database to find the reservation associated with the given orderId and userId. If found, return the reservation; otherwise, return null.
+    if (!orderId || !userId) {
+      throw new BadRequestException('Invalid orderId or userId');
+    }
+
+    const reservation = await this.reservationRepository.findOne({
+      where: { orderId, userId },
+      relations: { user: true, items: true, order: true }, // Include related entities if needed
+    });
+
+    if (!reservation) {
+      throw new NotFoundException(
+        `No reservation found for orderId: ${orderId} and userId: ${userId}`,
+      );
+    }
+
+    return reservation;
+  }
+
+  /**
+   *
+   * This function used in the reservation life cycle service to save the status updates through the service which it the only one responsible to call the repository.
+   * @param reservation
+   * @returns Promise Reservatoin
+   */
+
+  async saveUpdatedReservation(updatedReservation: Reservation) {
+    return await this.reservationRepository.save(updatedReservation);
   }
 }
