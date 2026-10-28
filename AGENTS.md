@@ -447,6 +447,11 @@ Run: `npm run test`, `npm run test:e2e`, `npm run test:cov`.
   method with `/** ... @param @returns @throws */` JSDoc; add `//` comments for
   all complex conditions and formulas (see §3 Code Documentation)
 - verify (`lint`, `build`, `test`) before declaring done
+- **CRITICAL OUTPUT FORMATTING RULES**
+  1. DO NOT output internal logs, session metadata, compaction objectives, or state descriptions.
+  2. DO NOT include "Thought" processes, hidden text, or raw workspace updates in your response.
+  3. Keep greetings concise and immediately actionable.
+  4. Respond ONLY with user-facing text. If the user says "hi", respond with a single-line greeting and an immediate request for direction.
 
 ### Clean Architecture / Refactoring Rules
 
