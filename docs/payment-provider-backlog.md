@@ -19,17 +19,19 @@ This backlog breaks the payment roadmap into small, reviewable tasks. Work top t
 **Estimate:** 2–4 hours
 **Depends on:** None
 
-- Decide which provider is selected for a new payment and how that selection is stored for later webhook routing.
-- Confirm whether existing `POST /payments/intent` becomes the session-creation operation or whether the API contract changes.
-- Confirm whether the current integer amount represents whole USD or cents; document the conversion passed to Stripe.
+- Decide which provider is selected for a new payment and how that selection is stored for later webhook routing. ==> Stripe
+- Confirm whether existing `POST /payments/intent` becomes the session-creation operation or whether the API contract changes. ==> keep it and make the session creation for the checkout
+- Confirm whether the current integer amount represents whole USD or cents; document the conversion passed to Stripe. ==> Whole USD
 - Decide behavior when provider session creation fails after a pending order/payment exists.
+    Force the transaction to rollback all the changes 
 - Confirm the 15-minute reservation clock start point and expiry-versus-webhook winner rule.
+    ==> on payment success webhook event and the 15 minute reservation expired make stock recheck and if it's ok process the order 
 
 **Done when:** the answers are written in the feature spec; no implementation task has to guess these policies.
 
 ### A-02 — Write payment-service acceptance criteria
 
-**Estimate:** 2–3 hours
+**Estimate:** 2–3 hours -> **Started at:** 5PM Wednesday
 **Depends on:** A-01
 
 - Specify pending-payment creation, session link response, success, failure, cancellation, duplicate webhook, and owner checks.
