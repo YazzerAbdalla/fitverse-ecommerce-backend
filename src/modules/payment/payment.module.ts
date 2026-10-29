@@ -5,8 +5,10 @@ import { OrderModule } from '../order/order.module';
 import { Payment } from './entities/payment.entity';
 import { PaymentService } from './payment.service';
 import { PaymentController } from './payment.controller';
-import { StripStrategy } from './strategies/stripe.strategy';
+import { StripeStrategy } from './strategies/stripe.strategy';
 import { ConfigService } from '@nestjs/config';
+import { LocalSimulationPaymentStrategy } from './strategies/local-simulation.strategy';
+import { PaymentStrategyFactory } from './payment-strategy.factory';
 
 /**
  * This module handles the payment simulation domain (demo, no real provider).
@@ -18,7 +20,9 @@ import { ConfigService } from '@nestjs/config';
   controllers: [PaymentController],
   providers: [
     PaymentService,
-    StripStrategy,
+    StripeStrategy,
+    LocalSimulationPaymentStrategy,
+    PaymentStrategyFactory,
     {
       provide: 'STRIPE_API_KEY',
       useFactory: (configService: ConfigService) =>

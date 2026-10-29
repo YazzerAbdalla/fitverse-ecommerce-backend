@@ -3,13 +3,13 @@ import {
   Injectable,
   InternalServerErrorException,
 } from '@nestjs/common';
-import { PaymentStrategyInterface } from './strategy.interface';
+import { PaymentStrategyInterface } from './payment-strategy.interface';
 import { Payment } from '../entities/payment.entity';
 import Stripe from 'stripe';
 import { ConfigService } from '@nestjs/config';
 
 @Injectable()
-export class StripStrategy implements PaymentStrategyInterface {
+export class StripeStrategy implements PaymentStrategyInterface {
   private stripe: Stripe;
 
   constructor(
